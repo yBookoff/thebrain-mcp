@@ -4,6 +4,7 @@
   "description": "MCP server for TheBrain 15 — semantic operations over the local API",
   "type": "module",
   "license": "MIT",
+  "author": "yBookoff <12408023+yBookoff@users.noreply.github.com>",
   "keywords": [
     "mcp",
     "model-context-protocol",
