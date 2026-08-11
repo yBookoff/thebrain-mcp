@@ -1,0 +1,4014 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "TheBrain Local API",
+    "description": "Welcome to the TheBrain Local API. You can try out the API right here on this page:\n\n* Find your API key in the desktop app under **Settings > User > Local API Key**.\n* Click the `Authorize` button below, paste your key, click `Authorize` then `Close`.\n* Click an endpoint to view its documentation.\n* Click the `Try it out` button, fill out the required items and click the `Execute` button.\n* The resulting request and response are displayed.\n\nYou can also see example projects for <a href=\"https://github.com/TheBrainTech/thebrain-api-quickstart-blazor\" target=\"_blank\">Blazor</a>,\n<a href=\"https://github.com/TheBrainTech/thebrain-api-quickstart-python\" target=\"_blank\">Python</a>,\nand <a href=\"https://github.com/TheBrainTech/thebrain-api-quickstart-node\" target=\"_blank\">Node</a>\non GitHub. Note that these examples target the cloud API — to use them locally, replace the base URL with this server's address (e.g. <code>http://localhost:8001/api/</code>) and use your local API key.\n\n<hr/>\n\n**App Control** endpoints (under <code>/api/app</code>) are unique to the local API and let you read and change the desktop application state — get the active brain and thought, open brains, navigate to thoughts, etc. These are not available in the cloud API.",
+    "version": "1.0"
+  },
+  "paths": {
+    "/api/app/state": {
+      "get": {
+        "tags": [
+          "App"
+        ],
+        "operationId": "getAppState",
+        "responses": {
+          "200": {
+            "description": "Returns the current application state.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppStateResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppStateResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppStateResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "If the provided API key does not match the currently signed-in user."
+          }
+        }
+      }
+    },
+    "/api/app/brain/{brainId}/open": {
+      "post": {
+        "tags": [
+          "App"
+        ],
+        "operationId": "openBrain",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Brain opened successfully."
+          },
+          "400": {
+            "description": "If the brain could not be opened."
+          },
+          "403": {
+            "description": "If the provided API key does not match the currently signed-in user."
+          }
+        }
+      }
+    },
+    "/api/app/brain/{brainId}/close": {
+      "post": {
+        "tags": [
+          "App"
+        ],
+        "operationId": "closeBrainTab",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tab closed successfully."
+          },
+          "404": {
+            "description": "If no tab is open for that brain."
+          },
+          "400": {
+            "description": "If the tab could not be closed."
+          },
+          "403": {
+            "description": "If the provided API key does not match the currently signed-in user."
+          }
+        }
+      }
+    },
+    "/api/app/brain/{brainId}/thought/{thoughtId}/activate": {
+      "post": {
+        "tags": [
+          "App"
+        ],
+        "operationId": "activateThought",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Thought activated successfully."
+          },
+          "400": {
+            "description": "If the thought could not be activated."
+          },
+          "403": {
+            "description": "If the provided API key does not match the currently signed-in user."
+          }
+        }
+      }
+    },
+    "/api/attachments/{brainId}/{attachmentId}/metadata": {
+      "get": {
+        "tags": [
+          "Attachments"
+        ],
+        "summary": "Returns details about the attachment",
+        "operationId": "getAttachmentDetails",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "attachmentId",
+            "in": "path",
+            "description": "The ID of the attachment",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Returns details about the attachment.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentDto"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentDto"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/attachments/{brainId}/by-location": {
+      "get": {
+        "tags": [
+          "Attachments"
+        ],
+        "summary": "Finds attachments in the brain whose location matches the provided value.\r\nWorks for external URLs, external files, and external directories.\r\n            \r\nFor URL attachments (type 3, the default), matching is case-insensitive\r\nand ignores the http/https scheme and any trailing slash (so\r\n`https://x.com/p`, `http://X.com/p`, and `x.com/p/` all find each other).\r\nFor file and directory attachments, the location is the file-system path.\r\n            \r\nUseful for de-duplicating web-capture tools or finding every thought\r\nthat references a given file.",
+        "operationId": "findAttachmentsByLocation",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "location",
+            "in": "query",
+            "description": "The URL or file path to look up",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "description": "The attachment type: 2 = ExternalFile, 3 = ExternalUrl (default),\r\n8 = ExternalDirectory.",
+            "schema": {
+              "$ref": "#/components/schemas/AttachmentType"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Returns matching attachments. Empty list if none.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AttachmentDto"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AttachmentDto"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AttachmentDto"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/attachments/{brainId}/{attachmentId}/file-content": {
+      "get": {
+        "tags": [
+          "Attachments"
+        ],
+        "summary": "Returns the binary data for the attachment",
+        "operationId": "getAttachmentContent",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "attachmentId",
+            "in": "path",
+            "description": "The ID of the attachment",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Returns the binary data for the attachment."
+          }
+        }
+      }
+    },
+    "/api/attachments/{brainId}/{attachmentId}": {
+      "delete": {
+        "tags": [
+          "Attachments"
+        ],
+        "summary": "Deletes an attachment",
+        "operationId": "deleteAttachment",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "attachmentId",
+            "in": "path",
+            "description": "The ID of the attachment",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "If the attachment could not be deleted"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          }
+        }
+      }
+    },
+    "/api/attachments/{brainId}/{thoughtId}/file": {
+      "post": {
+        "tags": [
+          "Attachments"
+        ],
+        "summary": "Adds a new file attachment to a thought",
+        "operationId": "addAttachment",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "description": "The ID of the thought to add the attachment to",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ContentType": {
+                    "type": "string"
+                  },
+                  "ContentDisposition": {
+                    "type": "string"
+                  },
+                  "Headers": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "Length": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "Name": {
+                    "type": "string"
+                  },
+                  "FileName": {
+                    "type": "string"
+                  }
+                }
+              },
+              "encoding": {
+                "ContentType": {
+                  "style": "form"
+                },
+                "ContentDisposition": {
+                  "style": "form"
+                },
+                "Headers": {
+                  "style": "form"
+                },
+                "Length": {
+                  "style": "form"
+                },
+                "Name": {
+                  "style": "form"
+                },
+                "FileName": {
+                  "style": "form"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "If the attachment could not be added to the thought."
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/attachments/{brainId}/{thoughtId}/url": {
+      "post": {
+        "tags": [
+          "Attachments"
+        ],
+        "summary": "Adds a new URL attachment to a thought",
+        "description": "Leave `name` empty to automatically set it from the page's title element",
+        "operationId": "addUrlAttachment",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "description": "The ID of the thought to add the attachment to",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "url",
+            "in": "query",
+            "description": "The URL for the attachment",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "description": "The desired name of the URL attachment",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "400": {
+            "description": "If the attachment could not be added to the thought."
+          },
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/brain-access/{brainId}": {
+      "get": {
+        "tags": [
+          "BrainAccess"
+        ],
+        "summary": "Returns details about the brain accessors for the specified brain",
+        "operationId": "getBrainAccessors",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Returns details about the brain accessors",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BrainAccessorDto"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BrainAccessorDto"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BrainAccessorDto"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "If the brain accessors failed to be retrieved"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "403": {
+            "description": "If the user does not have admin access"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "BrainAccess"
+        ],
+        "summary": "Sets the brain access level for the specified user",
+        "operationId": "setBrainAccessLevel",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "emailAddress",
+            "in": "query",
+            "description": "The email address of the user",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "description": "The ID of the user",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "accessType",
+            "in": "query",
+            "description": "The access level to give to the user",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "If the brain access level failed to be changed for the user"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "403": {
+            "description": "If the user does not have admin access"
+          },
+          "200": {
+            "description": "Success"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "BrainAccess"
+        ],
+        "summary": "Removes a user's access to the specified brain",
+        "operationId": "removeBrainAccess",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "emailAddress",
+            "in": "query",
+            "description": "The email address of the user",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "description": "The ID of the user",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "403": {
+            "description": "If the user does not have admin access"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "400": {
+            "description": "If the user's access failed to be removed"
+          }
+        }
+      }
+    },
+    "/api/brains/{id}": {
+      "get": {
+        "tags": [
+          "Brains"
+        ],
+        "summary": "Returns details about one of the active user's brains",
+        "operationId": "getBrainDetails",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Returns details about the brain.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrainDto"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrainDto"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrainDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Brains"
+        ],
+        "summary": "Deletes a brain",
+        "operationId": "deleteBrain",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "If the brain failed to be deleted"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "403": {
+            "description": "If the user does not have access to delete the brain"
+          },
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/brains": {
+      "get": {
+        "tags": [
+          "Brains"
+        ],
+        "summary": "Returns a list of brains for the active user",
+        "operationId": "getBrains",
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Returns a list of brains for the user. Includes brains the user explicitly has access to or has favorited",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BrainDto"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BrainDto"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BrainDto"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Brains"
+        ],
+        "summary": "Creates a brain",
+        "operationId": "createBrain",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "required": [
+                  "brainName"
+                ],
+                "type": "object",
+                "properties": {
+                  "brainName": {
+                    "type": "string"
+                  }
+                }
+              },
+              "encoding": {
+                "brainName": {
+                  "style": "form"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Returns the details of the created Brain",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BrainDto"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BrainDto"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BrainDto"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "If the brain failed to be created"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          }
+        }
+      }
+    },
+    "/api/brains/{brainId}/statistics": {
+      "get": {
+        "tags": [
+          "Brains"
+        ],
+        "summary": "Gets statistics about the specified brain",
+        "description": "`internalFilesSize` and `iconsFilesSize` values are in bytes.",
+        "operationId": "getBrainStats",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatisticsDto"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatisticsDto"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatisticsDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "If the statistics failed to be generated"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          }
+        }
+      }
+    },
+    "/api/brains/{brainId}/modifications": {
+      "get": {
+        "tags": [
+          "Brains"
+        ],
+        "summary": "Gets a list of modification logs for the specified brain within a specified date and time range",
+        "description": "Omit `startTime` and `endTime` values to retrieve **all** modification logs for the specified brain.\r\n            \r\nProvide `startTime` and `endTime` values to return modification logs only within a specific time range.\r\n            \r\n<hr />\r\n            \r\nParameters `startTime` and `endTime` accept values formatted as either `date` or `date-time` strings, conforming to [RFC 3339, section 5.6](https://tools.ietf.org/html/rfc3339#section-5.6).\r\n            \r\n**Examples:**\r\n- `2017-07-03` (Date only)\r\n- `2017-07-03T01:42:28Z` (Date and Time in UTC)\r\n            \r\n<hr />\r\n            \r\n`modType` values and their corresponding actions:\r\n            \r\n- **Generic Actions:**\r\n  - 101: Created\r\n  - 102: Deleted\r\n  - 103: Changed Name\r\n  - 104: Created By Paste\r\n  - 105: Modified By Paste\r\n            \r\n- **Thoughts and Links:**\r\n  - 201: Changed Color\r\n  - 202: Changed Label\r\n  - 203: Set Type\r\n  - 204: Changed Color2\r\n  - 205: Created Icon\r\n  - 206: Deleted Icon\r\n  - 207: Changed Icon\r\n  - 208: Changed Field Instance\r\n  - 209: Created Field Instance\r\n  - 210: Deleted Field Instance\r\n            \r\n- **Thought Specific:**\r\n  - 301: Forgot\r\n  - 302: Remembered\r\n  - 303: Changed Thought Access Type\r\n  - 304: Changed Kind\r\n            \r\n- **Link Specific:**\r\n  - 401: Changed Thickness\r\n  - 402: Moved Link\r\n  - 403: Changed Direction\r\n  - 404: Changed Meaning\r\n  - 405: Changed Relation\r\n            \r\n- **Attachment Specific:**\r\n  - 501: Changed Content\r\n  - 502: Changed Location\r\n  - 503: Changed Position\r\n            \r\n- **Brain and Brain Setting Specific:**\r\n  - 601: Changed Setting\r\n  - 602: Reordered Pins\r\n            \r\n- **Brain Access Specific:**\r\n  - 701: Changed Brain Access Entry\r\n            \r\n- **Note Specific:**\r\n  - 801: Created Note\r\n  - 802: Deleted Note\r\n  - 803: Changed Note\r\n  - 804: Deleted Note Asset\r\n  - 805: Created Note Asset\r\n  - 806: Changed Note Asset\r\n  - 807: Deleted Markdown Image\r\n  - 808: Created Markdown Image\r\n  - 809: Changed Markdown Image\r\n  - 810: Deleted Dynamic Wallpaper Image\r\n  - 811: Created Dynamic Wallpaper Image\r\n  - 812: Changed Dynamic Wallpaper Image\r\n            \r\n- **Calendar Event Specific:**\r\n  - 900: Created Calendar Event\r\n  - 901: Modified Calendar Event\r\n  - 902: Deleted Calendar Event\r\n  - 903: Deleted Calendar Event Recurring Instance\r\n            \r\n- **Field Definition Specific:**\r\n  - 1001: Changed Field Definition\r\n  - 1002: Created Field Definition\r\n  - 1003: Deleted Field Definition\r\n            \r\n<hr />\r\n            \r\n`entityType` values (used by `sourceType`, `extraAType` and `extraBType`)\r\n            \r\n  - -1: Unknown\r\n  - 1: Brain\r\n  - 2: Thought\r\n  - 3: Link\r\n  - 4: Attachment\r\n  - 5: Brain Setting\r\n  - 6: Brain Access Entry\r\n  - 7: Calendar Event\r\n  - 8: Field Instance\r\n  - 9: Field Definition",
+        "operationId": "getBrainModifications",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "maxLogs",
+            "in": "query",
+            "description": "The maximum number of modifications to return in the list, beginning from the `startTime`",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 100
+            }
+          },
+          {
+            "name": "startTime",
+            "in": "query",
+            "description": "The start of the datetime range, inclusive. Only modification logs that occurred at or after this datetime will be returned.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "endTime",
+            "in": "query",
+            "description": "The end of the datetime range, inclusive. Only modification logs that occurred at or before this datetime will be returned.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "If the modification logs failed to be retrieved"
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ModificationLogDto"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ModificationLogDto"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ModificationLogDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          }
+        }
+      }
+    },
+    "/theme-wallpaper/{themeHash}": {
+      "get": {
+        "tags": [
+          "FileDownload"
+        ],
+        "parameters": [
+          {
+            "name": "themeHash",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/file-display/{tempId}": {
+      "get": {
+        "tags": [
+          "FileDownload"
+        ],
+        "parameters": [
+          {
+            "name": "tempId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/file-download/{tempId}": {
+      "get": {
+        "tags": [
+          "FileDownload"
+        ],
+        "parameters": [
+          {
+            "name": "tempId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/brain-thumb/{brainId}/{userId}/{dummyImageId}": {
+      "get": {
+        "tags": [
+          "FileDownload"
+        ],
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "dummyImageId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/favicon/{filename}": {
+      "get": {
+        "tags": [
+          "FileDownload"
+        ],
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/stock-icons/{category}/{iconId}": {
+      "get": {
+        "tags": [
+          "FileDownload"
+        ],
+        "parameters": [
+          {
+            "name": "category",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "iconId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/custom-icons/{category}/{iconId}": {
+      "get": {
+        "tags": [
+          "FileDownload"
+        ],
+        "parameters": [
+          {
+            "name": "category",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "iconId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/custom-icons-root/{iconId}": {
+      "get": {
+        "tags": [
+          "FileDownload"
+        ],
+        "parameters": [
+          {
+            "name": "iconId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/notes-image-request/{brainId}/{filename}": {
+      "get": {
+        "tags": [
+          "FileDownload"
+        ],
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/image-request/{tempId}/{size}": {
+      "get": {
+        "tags": [
+          "FileDownload"
+        ],
+        "parameters": [
+          {
+            "name": "tempId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "size",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/links/{brainId}/{linkId}": {
+      "get": {
+        "tags": [
+          "Links"
+        ],
+        "summary": "Returns details about the link",
+        "operationId": "getLinkDetails",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "linkId",
+            "in": "path",
+            "description": "The ID of the link",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Returns details about the link.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkDto"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkDto"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkDto"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Links"
+        ],
+        "summary": "Deletes a link",
+        "operationId": "deleteLink",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "linkId",
+            "in": "path",
+            "description": "The ID of the link",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "400": {
+            "description": "If the link can't be deleted"
+          },
+          "200": {
+            "description": "Success"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Links"
+        ],
+        "summary": "Updates a link using JSON Patch",
+        "operationId": "updateLink",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "linkId",
+            "in": "path",
+            "description": "The ID of the linkId to be updated",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The JSON Patch document representing the changes to apply",
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkDtoJsonPatchDocument"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkDtoJsonPatchDocument"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkDtoJsonPatchDocument"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkDtoJsonPatchDocument"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          }
+        }
+      }
+    },
+    "/api/links/{brainId}/{thoughtIdA}/{thoughtIdB}": {
+      "get": {
+        "tags": [
+          "Links"
+        ],
+        "summary": "Gets the link between two thoughts",
+        "operationId": "getLink",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtIdA",
+            "in": "path",
+            "description": "The ID of the Thought A",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtIdB",
+            "in": "path",
+            "description": "The ID of the Thought B",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "description": "If the link cannot be located"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Returns details about the link.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkDto"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkDto"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/links/{brainId}/{linkId}/attachments": {
+      "get": {
+        "tags": [
+          "Links"
+        ],
+        "summary": "Returns a list of attachments for the link",
+        "operationId": "getLinkAttachments",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "linkId",
+            "in": "path",
+            "description": "The ID of the link",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Returns a list of attachments for the link.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AttachmentDto"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AttachmentDto"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AttachmentDto"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/links/{brainId}": {
+      "post": {
+        "tags": [
+          "Links"
+        ],
+        "summary": "Creates a link",
+        "operationId": "createLink",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Details of the link to create",
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkCreateModel"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkCreateModel"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkCreateModel"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkCreateModel"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "If the link can't be created"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "404": {
+            "description": "If the source or target thought isn't found"
+          },
+          "200": {
+            "description": "Success - returns the newly created link ID",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateLinkResponseModel"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateLinkResponseModel"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateLinkResponseModel"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/notes/{brainId}/{thoughtId}": {
+      "get": {
+        "tags": [
+          "Notes"
+        ],
+        "summary": "Returns the contents of a thought's note as Markdown",
+        "operationId": "getNoteMarkdown",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "description": "The ID of the thought",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Returns the contents of the thought's note as markdown including links to embedded images.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotesDto"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotesDto"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotesDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/notes/{brainId}/{thoughtId}/html": {
+      "get": {
+        "tags": [
+          "Notes"
+        ],
+        "summary": "Returns the contents of a thought's note as HTML",
+        "operationId": "getNoteHtml",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "description": "The ID of the thought",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Returns the contents of the thought's note as html including links to embedded images.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotesDto"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotesDto"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotesDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/notes/{brainId}/{thoughtId}/text": {
+      "get": {
+        "tags": [
+          "Notes"
+        ],
+        "summary": "Returns the contents of a thought's note as raw text",
+        "operationId": "getNoteText",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "description": "The ID of the thought",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Returns the contents of the thought's note as text.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotesDto"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotesDto"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotesDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          }
+        }
+      }
+    },
+    "/api/notes/{brainId}/{thoughtId}/update": {
+      "post": {
+        "tags": [
+          "Notes"
+        ],
+        "summary": "Create or update a thought's note",
+        "operationId": "createNote",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "description": "The ID of the thought",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The new Markdown text to update the note with",
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotesUpdateModel"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotesUpdateModel"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotesUpdateModel"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotesUpdateModel"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "400": {
+            "description": "If the creation or update failed"
+          }
+        }
+      }
+    },
+    "/api/notes/{brainId}/{thoughtId}/append": {
+      "post": {
+        "tags": [
+          "Notes"
+        ],
+        "summary": "Append to a thought's note",
+        "operationId": "appendToNote",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "description": "The ID of the thought",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The new Markdown text to append to the note",
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotesUpdateModel"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotesUpdateModel"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotesUpdateModel"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotesUpdateModel"
+              }
+            }
+          }
+        },
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "400": {
+            "description": "If the creation or update failed"
+          },
+          "200": {
+            "description": "Success"
+          }
+        }
+      }
+    },
+    "/api/notes-images/{brainId}/{token}/{filename}": {
+      "get": {
+        "tags": [
+          "NotesImages"
+        ],
+        "summary": "This method does not require authorization and instead uses a token that expires to validate that this is a valid request.",
+        "operationId": "getNoteImage",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Used to retrieve images in notes. `token` is generated when retrieving notes and will expire."
+          }
+        }
+      }
+    },
+    "/api/search/{brainId}": {
+      "get": {
+        "tags": [
+          "Search"
+        ],
+        "summary": "Returns search results from a brain",
+        "description": "Newly added content may take up to 15 seconds to be indexed.",
+        "operationId": "getSearchResults",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "queryText",
+            "in": "query",
+            "description": "The string to search for",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "maxResults",
+            "in": "query",
+            "description": "The maximum amount of search results to return",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 30
+            }
+          },
+          {
+            "name": "onlySearchThoughtNames",
+            "in": "query",
+            "description": "Whether to only search in thought names",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Returns a list of search results",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SearchResultDto"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SearchResultDto"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SearchResultDto"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "If the search failed"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          }
+        }
+      }
+    },
+    "/api/search/public": {
+      "get": {
+        "tags": [
+          "Search"
+        ],
+        "summary": "Returns search results from all public brains",
+        "description": "Newly added content may take up to 15 seconds to be indexed.",
+        "operationId": "getSearchResultsPublic",
+        "parameters": [
+          {
+            "name": "queryText",
+            "in": "query",
+            "description": "The string to search for",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "maxResults",
+            "in": "query",
+            "description": "The maximum amount of search results to return",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 30
+            }
+          },
+          {
+            "name": "onlySearchThoughtNames",
+            "in": "query",
+            "description": "Whether to only search in thought names",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "excludeBrainIds",
+            "in": "query",
+            "description": "Brain IDs to exclude from the search results",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "400": {
+            "description": "If the search failed"
+          },
+          "200": {
+            "description": "Returns a list of search results",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SearchResultDto"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SearchResultDto"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SearchResultDto"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/search/accessible": {
+      "get": {
+        "tags": [
+          "Search"
+        ],
+        "summary": "Returns search results from all brains with user access",
+        "description": "Newly added content may take up to 15 seconds to be indexed.",
+        "operationId": "getSearchResultsUser",
+        "parameters": [
+          {
+            "name": "queryText",
+            "in": "query",
+            "description": "The string to search for",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "maxResults",
+            "in": "query",
+            "description": "The maximum amount of search results to return",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 30
+            }
+          },
+          {
+            "name": "onlySearchThoughtNames",
+            "in": "query",
+            "description": "Whether to only search in thought names",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Returns a list of search results",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SearchResultDto"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SearchResultDto"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SearchResultDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "400": {
+            "description": "If the search failed"
+          }
+        }
+      }
+    },
+    "/api/thoughts/{brainId}/{thoughtId}": {
+      "get": {
+        "tags": [
+          "Thoughts"
+        ],
+        "summary": "Returns details about the thought",
+        "description": "Thought properties and values:\r\n            \r\n    Guid 'id' - The ID of the thought\r\n    Guid 'brainId' - The ID of the brain containing the thought\r\n    Guid 'typeId' - The ID of the thought type\r\n            \r\n    DateTime 'creationDateTime' - The DateTime that the thought was created at\r\n    DateTime 'modificationDateTime' - The DateTime that the thought was last modified at\r\n    DateTime 'forgottenDateTime' - The DateTime that the thought was forgotten at\r\n    DateTime 'linksModificationDateTime' - The DateTime that the thought's links were last modified at\r\n            \r\n    string 'name' - The Name of the thought\r\n    string 'label' - The Label of the thought\r\n    string 'foregroundColor' - The RGB hexadecimal color of the thought's foreground color (Ex: '#ff7145')\r\n    string 'backgroundColor' - The RGB hexadecimal color of the thought's background color (Ex: '#ff7145')\r\n            \r\n    int 'acType' - The access type of the thought\r\n         Public = 0\r\n         Private = 1\r\n            \r\n    int 'kind' - The kind of thought\r\n         Normal = 1\r\n         Type = 2\r\n         Event = 3\r\n         Tag = 4\r\n         System = 5",
+        "operationId": "getThoughtDetails",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "description": "The ID of the thought",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Returns details about the thought.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThoughtDto"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThoughtDto"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThoughtDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Thoughts"
+        ],
+        "summary": "Updates a thought using JSON Patch",
+        "description": "Thought properties and expected values:\r\n            \r\n    Guid 'typeId' (Optional) - The ID of the thought type\r\n            \r\n    string 'name' - The Name of the thought\r\n    string 'label' (Optional)  - The Label of the thought\r\n    string 'foregroundColor' (Optional)  - The RGB hexadecimal color of the thought's foreground color (Ex: '#ff7145')\r\n    string 'backgroundColor' (Optional)  - The RGB hexadecimal color of the thought's background color (Ex: '#ff7145')\r\n            \r\n    int 'acType' - The access type of the thought\r\n         Public = 0\r\n         Private = 1\r\n            \r\n    int 'kind' - The kind of thought\r\n         Normal = 1\r\n         Type = 2\r\n         Event = 3\r\n         Tag = 4\r\n         System = 5",
+        "operationId": "updateThought",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "description": "The ID of the thought to be updated",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The JSON Patch document representing the changes to apply",
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThoughtDtoJsonPatchDocument"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThoughtDtoJsonPatchDocument"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThoughtDtoJsonPatchDocument"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThoughtDtoJsonPatchDocument"
+              }
+            }
+          }
+        },
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Success"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Thoughts"
+        ],
+        "summary": "Deletes the specified thought",
+        "operationId": "deleteThought",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "description": "The ID of the thought",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "If the deletion of the thought failed"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          }
+        }
+      }
+    },
+    "/api/thoughts/{brainId}/{thoughtId}/graph": {
+      "get": {
+        "tags": [
+          "Thoughts"
+        ],
+        "summary": "Returns the thought and its attachments, links, and related thoughts",
+        "operationId": "getThoughtGraph",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "description": "The ID of the thought",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "includeSiblings",
+            "in": "query",
+            "description": "Whether sibling thoughts are included",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Returns the thought and its attachments, links, and related thoughts.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThoughtGraphDto"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThoughtGraphDto"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThoughtGraphDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/thoughts/{brainId}/{thoughtId}/attachments": {
+      "get": {
+        "tags": [
+          "Thoughts"
+        ],
+        "summary": "Returns a list of attachments for the thought",
+        "operationId": "getThoughtAttachments",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "description": "The ID of the thought",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Returns a list of attachments for the thought.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AttachmentDto"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AttachmentDto"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AttachmentDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          }
+        }
+      }
+    },
+    "/api/thoughts/{brainId}": {
+      "get": {
+        "tags": [
+          "Thoughts"
+        ],
+        "summary": "Returns the first thought matching the name exactly",
+        "operationId": "getThoughtByName",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "nameExact",
+            "in": "query",
+            "description": "The exact name of the thought",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Returns the first thought matching the name exactly.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThoughtDto"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThoughtDto"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThoughtDto"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Thoughts"
+        ],
+        "summary": "Creates a thought",
+        "description": "Thought properties and expected values:\r\n            \r\n    string 'name' - The Name of the thought\r\n    string 'label' (Optional) - The Label of the thought\r\n            \r\n    Guid 'sourceThoughtId' (Optional)  - The ID of source thought. Exclude to create an Orphan thought\r\n    Guid 'typeId' (Optional)  - The ID of the thought type\r\n            \r\n    int 'acType' - The access type of the thought\r\n         Public = 0\r\n         Private = 1\r\n            \r\n    int 'kind' - The kind of thought\r\n         Normal = 1\r\n         Type = 2\r\n         Event = 3\r\n         Tag = 4\r\n         System = 5\r\n            \r\n    int 'relation' - The relationship of the created thought to the source thought\r\n         Child = 1\r\n         Parent = 2\r\n         Jump = 3\r\n         Sibling = 4",
+        "operationId": "createThought",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Details of the thought to create",
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThoughtCreateModel"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThoughtCreateModel"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThoughtCreateModel"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThoughtCreateModel"
+              }
+            }
+          }
+        },
+        "responses": {
+          "404": {
+            "description": "If the 'sourceId' thought was not found"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "400": {
+            "description": "If the creation of the thought failed"
+          },
+          "200": {
+            "description": "Success - returns the ID of the newly created thought.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateThoughtResponseModel"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateThoughtResponseModel"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateThoughtResponseModel"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/thoughts/{brainId}/{thoughtId}/pin": {
+      "post": {
+        "tags": [
+          "Thoughts"
+        ],
+        "summary": "Pins the specified thought",
+        "operationId": "pinThought",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "description": "The ID of the thought",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "If the thought failed to be pinned"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Success"
+          },
+          "404": {
+            "description": "If the provided thought was not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Thoughts"
+        ],
+        "summary": "Un-pins the specified thought",
+        "operationId": "unpinThought",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "description": "The ID of the thought",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "If the thought failed to be un-pinned"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "404": {
+            "description": "If the provided thought was not found"
+          }
+        }
+      }
+    },
+    "/api/thoughts/{brainId}/pins": {
+      "get": {
+        "tags": [
+          "Thoughts"
+        ],
+        "summary": "Gets a list of all pinned thoughts in a brain",
+        "operationId": "getPinnedThoughts",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ThoughtDto"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ThoughtDto"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ThoughtDto"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "If the list of pinned thoughts failed to be retrieved"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          }
+        }
+      }
+    },
+    "/api/thoughts/{brainId}/{thoughtId}/modifications": {
+      "get": {
+        "tags": [
+          "Thoughts"
+        ],
+        "summary": "Gets a list of modification logs for the specified thought",
+        "description": "`modType` values and their corresponding actions:\r\n            \r\n- **Generic Actions:**\r\n  - 101: Created\r\n  - 102: Deleted\r\n  - 103: Changed Name\r\n  - 104: Created By Paste\r\n  - 105: Modified By Paste\r\n            \r\n- **Thoughts and Links:**\r\n  - 201: Changed Color\r\n  - 202: Changed Label\r\n  - 203: Set Type\r\n  - 204: Changed Color2\r\n  - 205: Created Icon\r\n  - 206: Deleted Icon\r\n  - 207: Changed Icon\r\n  - 208: Changed Field Instance\r\n  - 209: Created Field Instance\r\n  - 210: Deleted Field Instance\r\n            \r\n- **Thought Specific:**\r\n  - 301: Forgot\r\n  - 302: Remembered\r\n  - 303: Changed Thought Access Type\r\n  - 304: Changed Kind\r\n            \r\n- **Link Specific:**\r\n  - 401: Changed Thickness\r\n  - 402: Moved Link\r\n  - 403: Changed Direction\r\n  - 404: Changed Meaning\r\n  - 405: Changed Relation\r\n            \r\n- **Attachment Specific:**\r\n  - 501: Changed Content\r\n  - 502: Changed Location\r\n  - 503: Changed Position\r\n            \r\n- **Brain and Brain Setting Specific:**\r\n  - 601: Changed Setting\r\n  - 602: Reordered Pins\r\n            \r\n- **Brain Access Specific:**\r\n  - 701: Changed Brain Access Entry\r\n            \r\n- **Note Specific:**\r\n  - 801: Created Note\r\n  - 802: Deleted Note\r\n  - 803: Changed Note\r\n  - 804: Deleted Note Asset\r\n  - 805: Created Note Asset\r\n  - 806: Changed Note Asset\r\n  - 807: Deleted Markdown Image\r\n  - 808: Created Markdown Image\r\n  - 809: Changed Markdown Image\r\n  - 810: Deleted Dynamic Wallpaper Image\r\n  - 811: Created Dynamic Wallpaper Image\r\n  - 812: Changed Dynamic Wallpaper Image\r\n            \r\n- **Calendar Event Specific:**\r\n  - 900: Created Calendar Event\r\n  - 901: Modified Calendar Event\r\n  - 902: Deleted Calendar Event\r\n  - 903: Deleted Calendar Event Recurring Instance\r\n            \r\n- **Field Definition Specific:**\r\n  - 1001: Changed Field Definition\r\n  - 1002: Created Field Definition\r\n  - 1003: Deleted Field Definition\r\n            \r\n<hr />\r\n            \r\n`entityType` values (used by `sourceType`, `extraAType` and `extraBType`)\r\n            \r\n  - -1: Unknown\r\n  - 1: Brain\r\n  - 2: Thought\r\n  - 3: Link\r\n  - 4: Attachment\r\n  - 5: Brain Setting\r\n  - 6: Brain Access Entry\r\n  - 7: Calendar Event\r\n  - 8: Field Instance\r\n  - 9: Field Definition",
+        "operationId": "getThoughtModifications",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "thoughtId",
+            "in": "path",
+            "description": "The ID of the thought",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "maxLogs",
+            "in": "query",
+            "description": "The maximum number of modifications to return in the list, beginning from the `startTime`",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 100
+            }
+          },
+          {
+            "name": "includeRelatedLogs",
+            "in": "query",
+            "description": "Whether to include modifications to links that were a result of modifying a thought",
+            "required": true,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "400": {
+            "description": "If the modification logs failed to be retrieved"
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ModificationLogDto"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ModificationLogDto"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ModificationLogDto"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/thoughts/{brainId}/types": {
+      "get": {
+        "tags": [
+          "Thoughts"
+        ],
+        "summary": "Gets a list of all Types in a specified brain",
+        "operationId": "getTypes",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ThoughtDto"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ThoughtDto"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ThoughtDto"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "If the list of Types failed to be retrieved"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          }
+        }
+      }
+    },
+    "/api/thoughts/{brainId}/tags": {
+      "get": {
+        "tags": [
+          "Thoughts"
+        ],
+        "summary": "Gets a list of all Tags in a specified brain",
+        "operationId": "getTags",
+        "parameters": [
+          {
+            "name": "brainId",
+            "in": "path",
+            "description": "The ID of the brain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ThoughtDto"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ThoughtDto"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ThoughtDto"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "If the list of Tags failed to be retrieved"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          }
+        }
+      }
+    },
+    "/api/users/organization": {
+      "get": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Returns details about the active user's TeamBrain Organization members",
+        "operationId": "getOrganizationMembers",
+        "responses": {
+          "200": {
+            "description": "Returns details about the TeamBrain Organization members ",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserDto"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserDto"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "404": {
+            "description": "If the user is not found."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AccessType": {
+        "enum": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "type": "integer",
+        "format": "int32"
+      },
+      "AppStateResponse": {
+        "type": "object",
+        "properties": {
+          "currentBrainId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "currentBrainName": {
+            "type": "string",
+            "nullable": true
+          },
+          "activeThoughtId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "activeThoughtName": {
+            "type": "string",
+            "nullable": true
+          },
+          "isLoggedIn": {
+            "type": "boolean"
+          },
+          "userId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "tabs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AppStateTabResponse"
+            },
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "AppStateTabResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "brainId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "brainName": {
+            "type": "string",
+            "nullable": true
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "activeThoughtId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "activeThoughtName": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "AttachmentDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "brainId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceType": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "creationDateTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "modificationDateTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "position": {
+            "type": "number",
+            "format": "double"
+          },
+          "fileModificationDateTime": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "type": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "isNotes": {
+            "type": "boolean"
+          },
+          "dataLength": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "location": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "AttachmentType": {
+        "enum": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          100
+        ],
+        "type": "integer",
+        "format": "int32"
+      },
+      "BrainAccessorDto": {
+        "type": "object",
+        "properties": {
+          "accessorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "isOrganizationUser": {
+            "type": "boolean"
+          },
+          "isPending": {
+            "type": "boolean"
+          },
+          "accessType": {
+            "$ref": "#/components/schemas/AccessType"
+          }
+        },
+        "additionalProperties": false
+      },
+      "BrainDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "homeThoughtId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateLinkResponseModel": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateThoughtResponseModel": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "EntityType": {
+        "enum": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          -1
+        ],
+        "type": "integer",
+        "format": "int32"
+      },
+      "IContractResolver": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "LinkCreateModel": {
+        "type": "object",
+        "properties": {
+          "thoughtIdA": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "thoughtIdB": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "relation": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "LinkDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "brainId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "creationDateTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "modificationDateTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "cleanedUpName": {
+            "type": "string",
+            "nullable": true
+          },
+          "typeId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "kind": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "color": {
+            "type": "string",
+            "nullable": true
+          },
+          "thickness": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "thoughtIdA": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "thoughtIdB": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "relation": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "direction": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "meaning": {
+            "type": "integer",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LinkDtoJsonPatchDocument": {
+        "type": "object",
+        "properties": {
+          "operations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinkDtoOperation"
+            },
+            "nullable": true,
+            "readOnly": true
+          },
+          "contractResolver": {
+            "$ref": "#/components/schemas/IContractResolver"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LinkDtoOperation": {
+        "type": "object",
+        "properties": {
+          "operationType": {
+            "$ref": "#/components/schemas/OperationType"
+          },
+          "path": {
+            "type": "string",
+            "nullable": true
+          },
+          "op": {
+            "type": "string",
+            "nullable": true
+          },
+          "from": {
+            "type": "string",
+            "nullable": true
+          },
+          "value": {
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModificationLogDto": {
+        "type": "object",
+        "properties": {
+          "sourceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceType": {
+            "$ref": "#/components/schemas/EntityType"
+          },
+          "extraAId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "extraAType": {
+            "$ref": "#/components/schemas/EntityType"
+          },
+          "extraBId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "extraBType": {
+            "$ref": "#/components/schemas/EntityType"
+          },
+          "modType": {
+            "$ref": "#/components/schemas/ModificationType"
+          },
+          "oldValue": {
+            "type": "string",
+            "nullable": true
+          },
+          "newValue": {
+            "type": "string",
+            "nullable": true
+          },
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "brainId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "creationDateTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "modificationDateTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "syncUpdateDateTime": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModificationType": {
+        "enum": [
+          101,
+          102,
+          103,
+          104,
+          105,
+          201,
+          202,
+          203,
+          204,
+          205,
+          206,
+          207,
+          208,
+          209,
+          210,
+          301,
+          302,
+          303,
+          304,
+          401,
+          402,
+          403,
+          404,
+          405,
+          501,
+          502,
+          503,
+          601,
+          602,
+          701,
+          801,
+          802,
+          803,
+          804,
+          805,
+          806,
+          807,
+          808,
+          809,
+          810,
+          811,
+          812,
+          900,
+          901,
+          902,
+          903,
+          1001,
+          1002,
+          1003
+        ],
+        "type": "integer",
+        "format": "int32"
+      },
+      "NotesDto": {
+        "type": "object",
+        "properties": {
+          "brainId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceType": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "modificationDateTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "markdown": {
+            "type": "string",
+            "nullable": true
+          },
+          "html": {
+            "type": "string",
+            "nullable": true
+          },
+          "text": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "NotesUpdateModel": {
+        "type": "object",
+        "properties": {
+          "markdown": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "OperationType": {
+        "enum": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "type": "integer",
+        "format": "int32"
+      },
+      "SearchResultDto": {
+        "type": "object",
+        "properties": {
+          "sourceThought": {
+            "$ref": "#/components/schemas/ThoughtDto"
+          },
+          "sourceLink": {
+            "$ref": "#/components/schemas/LinkDto"
+          },
+          "searchResultType": {
+            "$ref": "#/components/schemas/SearchResultType"
+          },
+          "isFromOtherBrain": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "attachmentId": {
+            "type": "string",
+            "format": "uuid",
+            "readOnly": true
+          },
+          "brainName": {
+            "type": "string",
+            "nullable": true
+          },
+          "brainId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "entityType": {
+            "$ref": "#/components/schemas/EntityType"
+          },
+          "sourceType": {
+            "$ref": "#/components/schemas/EntityType"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SearchResultType": {
+        "enum": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "type": "integer",
+        "format": "int32"
+      },
+      "StatisticsDto": {
+        "type": "object",
+        "properties": {
+          "brainName": {
+            "type": "string",
+            "nullable": true
+          },
+          "dateGenerated": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "brainId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "thoughts": {
+            "type": "number",
+            "format": "float"
+          },
+          "forgottenThoughts": {
+            "type": "number",
+            "format": "float"
+          },
+          "links": {
+            "type": "number",
+            "format": "float"
+          },
+          "linksPerThought": {
+            "type": "number",
+            "format": "float"
+          },
+          "thoughtTypes": {
+            "type": "number",
+            "format": "float"
+          },
+          "linkTypes": {
+            "type": "number",
+            "format": "float"
+          },
+          "tags": {
+            "type": "number",
+            "format": "float"
+          },
+          "notes": {
+            "type": "number",
+            "format": "float"
+          },
+          "internalFiles": {
+            "type": "number",
+            "format": "float"
+          },
+          "internalFolders": {
+            "type": "number",
+            "format": "float"
+          },
+          "externalFiles": {
+            "type": "number",
+            "format": "float"
+          },
+          "externalFolders": {
+            "type": "number",
+            "format": "float"
+          },
+          "webLinks": {
+            "type": "number",
+            "format": "float"
+          },
+          "assignedIcons": {
+            "type": "number",
+            "format": "float"
+          },
+          "internalFilesSize": {
+            "type": "number",
+            "format": "float"
+          },
+          "iconsFilesSize": {
+            "type": "number",
+            "format": "float"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ThoughtCreateModel": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "kind": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "label": {
+            "type": "string",
+            "nullable": true
+          },
+          "typeId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "sourceThoughtId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "relation": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "acType": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ThoughtDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "brainId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "creationDateTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "modificationDateTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "cleanedUpName": {
+            "type": "string",
+            "nullable": true
+          },
+          "typeId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "displayModificationDateTime": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "forgottenDateTime": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "linksModificationDateTime": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "acType": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "kind": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "label": {
+            "type": "string",
+            "nullable": true
+          },
+          "foregroundColor": {
+            "type": "string",
+            "nullable": true
+          },
+          "backgroundColor": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ThoughtDtoJsonPatchDocument": {
+        "type": "object",
+        "properties": {
+          "operations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThoughtDtoOperation"
+            },
+            "nullable": true,
+            "readOnly": true
+          },
+          "contractResolver": {
+            "$ref": "#/components/schemas/IContractResolver"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ThoughtDtoOperation": {
+        "type": "object",
+        "properties": {
+          "operationType": {
+            "$ref": "#/components/schemas/OperationType"
+          },
+          "path": {
+            "type": "string",
+            "nullable": true
+          },
+          "op": {
+            "type": "string",
+            "nullable": true
+          },
+          "from": {
+            "type": "string",
+            "nullable": true
+          },
+          "value": {
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ThoughtGraphDto": {
+        "type": "object",
+        "properties": {
+          "activeThought": {
+            "$ref": "#/components/schemas/ThoughtDto"
+          },
+          "parents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThoughtDto"
+            },
+            "nullable": true
+          },
+          "children": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThoughtDto"
+            },
+            "nullable": true
+          },
+          "jumps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThoughtDto"
+            },
+            "nullable": true
+          },
+          "siblings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThoughtDto"
+            },
+            "nullable": true
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThoughtDto"
+            },
+            "nullable": true
+          },
+          "type": {
+            "$ref": "#/components/schemas/ThoughtDto"
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinkDto"
+            },
+            "nullable": true
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttachmentDto"
+            },
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "UserDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "username": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastName": {
+            "type": "string",
+            "nullable": true
+          },
+          "firstName": {
+            "type": "string",
+            "nullable": true
+          },
+          "emailAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "servicesExpiry": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "accountType": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "securitySchemes": {
+      "Bearer": {
+        "type": "http",
+        "description": "Authorization header using the Bearer scheme. Example: \"Authorization: Bearer {apiKey}\"",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "Bearer": [ ]
+    }
+  ],
+  "tags": [
+    {
+      "name": "App",
+      "description": "App Control — Local only. Read and change the desktop application state. Requires the API key to match the currently signed-in user."
+    }
+  ]
+}

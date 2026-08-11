@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # The unit suite needs no TheBrain: the contract suites skip themselves when
+    # THEBRAIN_API_KEY / THEBRAIN_TEST_BRAIN_ID are absent.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # node:sqlite is unflagged from 22.13.0 onwards.
+        node: ["22", "24"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  package:
+    # Guards the two properties users feel first: a small install, and no
+    # accidental shipping of tests or the optional embeddings dependency.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Inspect the publishable package
+        run: |
+          npm pack --dry-run --json > pack.json
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const [pkg] = JSON.parse(readFileSync("pack.json", "utf8"));
+            const files = pkg.files.map((f) => f.path);
+            const stray = files.filter((f) => !f.startsWith("dist/") && !/^(package\.json|README\.md|LICENSE)$/.test(f));
+            if (stray.length > 0) {
+              console.error("Unexpected files in the package:\n" + stray.join("\n"));
+              process.exit(1);
+            }
+            const mb = pkg.unpackedSize / 1e6;
+            console.log(`${files.length} files, ${mb.toFixed(1)} MB unpacked`);
+            if (mb > 5) {
+              console.error("The package grew unexpectedly large.");
+              process.exit(1);
+            }
+          '

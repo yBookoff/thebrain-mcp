@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.tsbuildinfo
+*.tgz
+.DS_Store
+.env
+.env.local
+
+# Local Claude Code settings: machine-specific, and they record API keys inside
+# the Bash permission rules.
+.claude/settings.local.json
