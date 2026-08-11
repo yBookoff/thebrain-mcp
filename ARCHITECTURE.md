@@ -33,7 +33,7 @@ That requires two things the raw API does not provide:
   decomposition must land in one call — atomic in intent, validated before the
   first write, and idempotent on re-run.
 
-So: 16 tools instead of 48 endpoints, plus a local vector index, plus a batch
+So: 17 tools instead of 48 endpoints, plus a local vector index, plus a batch
 ingest operation.
 
 ---
@@ -158,7 +158,9 @@ So the agent thinks, and the server's job is to make that thinking *informed*
 
 ## 4. Tool design
 
-Sixteen tools, roughly 1180 tokens of descriptions in total.
+Seventeen tools. Measured against the published build: the descriptions total
+about 1050 tokens, and the full `tools/list` payload including schemas about
+3900.
 
 **One tool per intent, not per endpoint.** `brain_get_thought` returns the
 thought, its graph neighbourhood, and its note — three endpoints, one call,

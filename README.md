@@ -4,7 +4,7 @@ An MCP server for [TheBrain 15](https://www.thebrain.com/), built on its local A
 
 It gives an agent semantic operations over your brain: search by meaning, read a
 neighbourhood of the graph, and write a decomposed piece of material into the
-brain as a whole connected structure. It is not a mirror of the API — 16 tools
+brain as a whole connected structure. It is not a mirror of the API — 17 tools
 instead of 48 endpoints.
 
 The point is not "save this text". The point is that when you hand an agent an
