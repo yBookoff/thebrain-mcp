@@ -11,6 +11,10 @@ The point is not "save this text". The point is that when you hand an agent an
 article, it reads it, breaks it into meanings, works out where each one belongs
 in the graph you already have, what to link it to, and what each note should say.
 
+> Published on npm as **`thebrain-mcp-server`** — npm considers the shorter name
+> too close to an unrelated existing package. The installed command is still
+> `thebrain-mcp`.
+
 ## Requirements
 
 - TheBrain 15 running, with the local API enabled
@@ -22,7 +26,7 @@ in the graph you already have, what to link it to, and what each note should say
 ### Claude Code
 
 ```
-claude mcp add thebrain -e THEBRAIN_API_KEY=your-key -- npx -y thebrain-mcp
+claude mcp add thebrain -e THEBRAIN_API_KEY=your-key -- npx -y thebrain-mcp-server
 ```
 
 ### Clients with a config file
@@ -32,7 +36,7 @@ claude mcp add thebrain -e THEBRAIN_API_KEY=your-key -- npx -y thebrain-mcp
   "mcpServers": {
     "thebrain": {
       "command": "npx",
-      "args": ["-y", "thebrain-mcp"],
+      "args": ["-y", "thebrain-mcp-server"],
       "env": { "THEBRAIN_API_KEY": "your-key" }
     }
   }
