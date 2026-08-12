@@ -5,8 +5,8 @@ import type { ModificationLogDto } from "../src/api/types.js";
 import type { Embedder } from "../src/semantic/embedder.js";
 import {
   SemanticIndexer,
+  logThoughtId,
   mapWithConcurrency,
-  thoughtsWithNotes,
 } from "../src/semantic/indexer.js";
 import { SemanticSearch, dedupeVariants } from "../src/semantic/search.js";
 import { VectorStore, normalize } from "../src/semantic/store.js";
@@ -18,9 +18,12 @@ class FakeEmbedder implements Embedder {
   readonly id: string = "fake@v1";
   readonly dimensions = 8;
   calls = 0;
+  /** Every document handed to the embedder, so tests can see what got indexed. */
+  readonly documents: string[] = [];
 
   async embedDocuments(texts: readonly string[]): Promise<Float32Array[]> {
     this.calls += texts.length;
+    this.documents.push(...texts);
     return texts.map((t) => this.#vec(t));
   }
 
@@ -69,6 +72,21 @@ const log = (
   syncUpdateDateTime: null,
 });
 
+/**
+ * A note event, shaped the way the live API records it: the source is the
+ * `Notes.md` attachment and the thought is named in extraA.
+ */
+const noteLog = (
+  thoughtId: string,
+  modType: number,
+  at: string,
+  attachmentId = `att-${thoughtId}`,
+): ModificationLogDto => ({
+  ...log(attachmentId, modType, at, 4),
+  extraAId: thoughtId,
+  extraAType: 2,
+});
+
 /** Minimal fake API: only what the indexer and search actually touch. */
 function fakeApi(
   thoughts: Map<string, FakeThought>,
@@ -93,6 +111,9 @@ function fakeApi(
           thought: { id: t.id, name: t.name, kind: t.kind ?? 1, label: null },
           type: t.typeName ? { name: t.typeName } : null,
           tags: (t.tags ?? []).map((name) => ({ name })),
+          // The real API reports a note as an attachment flagged `isNotes`.
+          // Omitting it here is what let the note-indexing bug through.
+          attachments: t.note ? [{ id: `att-${t.id}`, isNotes: true, type: 1 }] : [],
         };
       },
     },
@@ -114,15 +135,24 @@ function fakeApi(
 }
 
 describe("helpers", () => {
-  it("thoughtsWithNotes picks only note-related events", () => {
-    const ids = thoughtsWithNotes([
-      log("a", 801, "t1"),
-      log("b", 103, "t2"),
-      log("c", 803, "t3"),
-      log("d", 802, "t4"),
-      log("e", 801, "t5", 3),
-    ]);
-    expect([...ids].sort()).toEqual(["a", "c", "d"]);
+  it("logThoughtId reads a thought event straight from sourceId", () => {
+    expect(logThoughtId(log("a", 103, "t1"))).toBe("a");
+  });
+
+  it("logThoughtId resolves a note event through extraA, not the attachment", () => {
+    // Regression: notes are attachments, so sourceId is the Notes.md id.
+    // Reading it as the thought kept notes out of the index entirely.
+    for (const modType of [801, 802, 803]) {
+      const entry = noteLog("thought-1", modType, "t1", "attachment-9");
+      expect(entry.sourceId).toBe("attachment-9");
+      expect(logThoughtId(entry)).toBe("thought-1");
+    }
+  });
+
+  it("logThoughtId ignores events about other entities", () => {
+    expect(logThoughtId(log("some-link", 101, "t1", 3))).toBeNull();
+    // An attachment event that is not a note: a URL attachment, say.
+    expect(logThoughtId({ ...noteLog("t", 501, "t1") })).toBeNull();
   });
 
   it("mapWithConcurrency preserves result order", async () => {
@@ -169,7 +199,7 @@ describe("initial indexing", () => {
       log("a", 101, "2026-08-11T09:00:00"),
       log("b", 101, "2026-08-11T09:01:00"),
       log("c", 101, "2026-08-11T09:02:00"),
-      log("a", 801, "2026-08-11T09:03:00"),
+      noteLog("a", 801, "2026-08-11T09:03:00"),
       log("deleted", 101, "2026-08-11T09:04:00"),
       log("deleted", 102, "2026-08-11T09:05:00"),
     ];
@@ -190,13 +220,37 @@ describe("initial indexing", () => {
     store.close();
   });
 
-  it("notes are fetched only where the log mentions them", async () => {
+  it("notes are fetched only for thoughts that have one", async () => {
     const { thoughts, logs } = scenario();
     const { api, calls } = fakeApi(thoughts, logs);
     const store = new VectorStore(":memory:");
     await new SemanticIndexer(api, store, new FakeEmbedder()).rebuild(BRAIN);
-    // Only thought `a` has an 801 event.
+    // Only thought `a` carries a note attachment; b and c cost no extra request.
     expect(calls.notes).toBe(1);
+    store.close();
+  });
+
+  it("the note text reaches the embedded document", async () => {
+    const { thoughts, logs } = scenario();
+    const { api } = fakeApi(thoughts, logs);
+    const store = new VectorStore(":memory:");
+    const embedder = new FakeEmbedder();
+    await new SemanticIndexer(api, store, embedder).rebuild(BRAIN);
+    expect(embedder.documents.some((d) => d.includes("game engine"))).toBe(true);
+    store.close();
+  });
+
+  it("a note with no log event whatsoever is still indexed", async () => {
+    // The log window may not reach back to when the note was written, and note
+    // events are keyed by attachment anyway. The graph is the source of truth.
+    const thoughts = new Map<string, FakeThought>([
+      ["a", { id: "a", name: "Mere Exposure", note: "furniture hanging from the ceiling" }],
+    ]);
+    const { api } = fakeApi(thoughts, [log("a", 101, "2026-08-11T09:00:00")]);
+    const store = new VectorStore(":memory:");
+    const embedder = new FakeEmbedder();
+    await new SemanticIndexer(api, store, embedder).rebuild(BRAIN);
+    expect(embedder.documents.some((d) => d.includes("furniture hanging"))).toBe(true);
     store.close();
   });
 
@@ -360,16 +414,38 @@ describe("incremental sync", () => {
     const thoughts = new Map<string, FakeThought>([
       ["a", { id: "a", name: "thought", note: "old note" }],
     ]);
-    const logs = [log("a", 101, "2026-08-11T09:00:00"), log("a", 801, "2026-08-11T09:00:01")];
+    const logs = [log("a", 101, "2026-08-11T09:00:00"), noteLog("a", 801, "2026-08-11T09:00:01")];
     const { api } = fakeApi(thoughts, logs);
     const store = new VectorStore(":memory:");
     const indexer = new SemanticIndexer(api, store, new FakeEmbedder());
     await indexer.rebuild(BRAIN);
 
     thoughts.set("a", { id: "a", name: "thought", note: "new note" });
-    logs.push(log("a", 803, "2099-01-01T00:00:00"));
+    logs.push(noteLog("a", 803, "2099-01-01T00:00:00"));
     const result = await indexer.sync(BRAIN);
     expect(result.indexed).toBe(1);
+    store.close();
+  });
+
+  it("a note-only edit is not lost by the incremental path", async () => {
+    // The thought itself produces no log entry when only its note changes:
+    // the only trace is an attachment event pointing at it through extraA.
+    const thoughts = new Map<string, FakeThought>([
+      ["a", { id: "a", name: "stable name", note: "before" }],
+    ]);
+    const logs = [log("a", 101, "2026-08-11T09:00:00"), noteLog("a", 801, "2026-08-11T09:00:01")];
+    const { api } = fakeApi(thoughts, logs);
+    const store = new VectorStore(":memory:");
+    const embedder = new FakeEmbedder();
+    const indexer = new SemanticIndexer(api, store, embedder);
+    await indexer.rebuild(BRAIN);
+
+    thoughts.set("a", { id: "a", name: "stable name", note: "after the edit" });
+    logs.push(noteLog("a", 803, "2099-01-01T00:00:00"));
+    const result = await indexer.sync(BRAIN);
+
+    expect(result.indexed).toBe(1);
+    expect(embedder.documents.at(-1)).toContain("after the edit");
     store.close();
   });
 });
@@ -385,7 +461,7 @@ describe("search", () => {
       log("a", 101, "2026-08-11T09:00:00"),
       log("b", 101, "2026-08-11T09:00:01"),
       log("t", 101, "2026-08-11T09:00:02"),
-      log("a", 801, "2026-08-11T09:00:03"),
+      noteLog("a", 801, "2026-08-11T09:00:03"),
     ];
     const searchResults = new Map([
       ["Unity", ["a"]],

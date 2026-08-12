@@ -11,13 +11,19 @@
 
 import type { TheBrainApi } from "../api/index.js";
 import {
+  EntityType,
   ModType,
   REEMBED_MOD_TYPES,
   ThoughtKind,
   type ModificationLogDto,
 } from "../api/types.js";
 import { replayThoughtIds } from "../api/resources/thoughts.js";
-import { buildDocument, documentHash, type IndexableThought } from "./document.js";
+import {
+  buildDocument,
+  documentHash,
+  indexModelId,
+  type IndexableThought,
+} from "./document.js";
 import type { Embedder } from "./embedder.js";
 import type { StoredVector, VectorStore } from "./store.js";
 
@@ -83,7 +89,7 @@ export class SemanticIndexer {
       exists: meta !== null,
       compatible: this.#store.isCompatible(
         brainId,
-        this.#embedder.id,
+        indexModelId(this.#embedder.id),
         this.#embedder.dimensions,
       ),
       brainId: meta?.brainId ?? null,
@@ -106,12 +112,18 @@ export class SemanticIndexer {
     const startedAt = Date.now();
     const watermark = new Date().toISOString();
 
-    if (!this.#store.isCompatible(brainId, this.#embedder.id, this.#embedder.dimensions)) {
+    if (
+      !this.#store.isCompatible(
+        brainId,
+        indexModelId(this.#embedder.id),
+        this.#embedder.dimensions,
+      )
+    ) {
       this.#store.clear();
     }
     this.#store.setMeta({
       brainId,
-      model: this.#embedder.id,
+      model: indexModelId(this.#embedder.id),
       dimensions: this.#embedder.dimensions,
       syncedThrough: null,
     });
@@ -119,14 +131,13 @@ export class SemanticIndexer {
     onProgress({ phase: "enumerate", done: 0, total: 0, message: "reading the log" });
     const logs = await this.#api.brains.modifications(brainId);
     const alive = replayThoughtIds(logs);
-    const withNotes = thoughtsWithNotes(logs);
 
     // Drop anything that no longer exists in the brain.
     const known = [...this.#store.contentHashes().keys()];
     const stale = known.filter((id) => !alive.has(id));
     this.#store.remove(stale);
 
-    const result = await this.#indexThoughts(brainId, [...alive], withNotes, onProgress);
+    const result = await this.#indexThoughts(brainId, [...alive], onProgress);
     this.#store.setSyncedThrough(watermark);
 
     onProgress({
@@ -152,7 +163,11 @@ export class SemanticIndexer {
     const meta = this.#store.getMeta();
     if (
       meta === null ||
-      !this.#store.isCompatible(brainId, this.#embedder.id, this.#embedder.dimensions)
+      !this.#store.isCompatible(
+        brainId,
+        indexModelId(this.#embedder.id),
+        this.#embedder.dimensions,
+      )
     ) {
       return this.rebuild(brainId, onProgress);
     }
@@ -167,18 +182,18 @@ export class SemanticIndexer {
     const touched = new Set<string>();
     const deleted = new Set<string>();
     for (const log of logs) {
-      if (log.sourceType !== 2) continue;
-      if (log.modType === ModType.Deleted) {
-        deleted.add(log.sourceId);
-        touched.delete(log.sourceId);
+      const thoughtId = logThoughtId(log);
+      if (thoughtId === null) continue;
+      if (log.modType === ModType.Deleted && log.sourceType === EntityType.Thought) {
+        deleted.add(thoughtId);
+        touched.delete(thoughtId);
       } else if (log.modType === ModType.Created || REEMBED_MOD_TYPES.has(log.modType)) {
-        if (!deleted.has(log.sourceId)) touched.add(log.sourceId);
+        if (!deleted.has(thoughtId)) touched.add(thoughtId);
       }
     }
 
     this.#store.remove([...deleted]);
-    const withNotes = thoughtsWithNotes(logs);
-    const result = await this.#indexThoughts(brainId, [...touched], withNotes, onProgress);
+    const result = await this.#indexThoughts(brainId, [...touched], onProgress);
     this.#store.setSyncedThrough(watermark);
 
     onProgress({
@@ -193,7 +208,6 @@ export class SemanticIndexer {
   async #indexThoughts(
     brainId: string,
     ids: readonly string[],
-    withNotes: ReadonlySet<string>,
     onProgress: (p: IndexProgress) => void,
   ): Promise<{ indexed: number; skipped: number }> {
     if (ids.length === 0) return { indexed: 0, skipped: 0 };
@@ -205,7 +219,7 @@ export class SemanticIndexer {
     // The graph returns a thought, its tags and its type in one request —
     // cheaper than fetching them separately.
     const collected = await mapWithConcurrency(ids, this.#concurrency, async (id) => {
-      const item = await this.#collect(brainId, id, withNotes.has(id));
+      const item = await this.#collect(brainId, id);
       fetched += 1;
       if (fetched % 50 === 0 || fetched === total) {
         onProgress({
@@ -256,14 +270,15 @@ export class SemanticIndexer {
     return { indexed, skipped };
   }
 
-  async #collect(
-    brainId: string,
-    thoughtId: string,
-    fetchNote: boolean,
-  ): Promise<IndexableThought | null> {
+  async #collect(brainId: string, thoughtId: string): Promise<IndexableThought | null> {
     try {
       const graph = await this.#api.thoughts.getGraph(brainId, thoughtId);
-      const note = fetchNote
+      // A note shows up as an attachment flagged `isNotes`, so the graph we
+      // already fetched says whether reading the note is worth a request. The
+      // modification log cannot answer this: its note events are keyed by the
+      // attachment, and old ones fall outside whatever window we asked for.
+      const hasNote = graph.attachments.some((a) => a.isNotes);
+      const note = hasNote
         ? await this.#api.notes.get(brainId, thoughtId).catch(() => "")
         : "";
       return {
@@ -282,20 +297,32 @@ export class SemanticIndexer {
   }
 }
 
-/** Thoughts with note-related events in the log. */
-export function thoughtsWithNotes(logs: readonly ModificationLogDto[]): Set<string> {
-  const ids = new Set<string>();
-  for (const log of logs) {
-    if (log.sourceType !== 2) continue;
-    if (
-      log.modType === ModType.NoteCreated ||
-      log.modType === ModType.NoteChanged ||
-      log.modType === ModType.NoteDeleted
-    ) {
-      ids.add(log.sourceId);
-    }
-  }
-  return ids;
+/**
+ * The thought a log entry is about, or null if it is about something else.
+ *
+ * Most entries name the thought in `sourceId`. Note events do not: a note is
+ * stored as a `Notes.md` attachment, so the entry's source is the attachment
+ * (`sourceType` 4) and the thought sits in `extraA`. Reading `sourceId` blindly
+ * dropped every note edit, which is how notes stayed out of the index while
+ * every rebuild cheerfully reported "no changes".
+ *
+ * Measured against the live API:
+ *   { modType: 801, sourceType: 4, sourceId: <attachment>,
+ *     extraAId: <thought>, extraAType: 2 }
+ */
+export function logThoughtId(log: ModificationLogDto): string | null {
+  if (log.sourceType === EntityType.Thought) return log.sourceId;
+  if (isNoteMod(log.modType) && log.extraAType === EntityType.Thought) return log.extraAId;
+  return null;
+}
+
+/** Note lifecycle events: created, changed, deleted. */
+export function isNoteMod(modType: number): boolean {
+  return (
+    modType === ModType.NoteCreated ||
+    modType === ModType.NoteChanged ||
+    modType === ModType.NoteDeleted
+  );
 }
 
 /** Bounded-concurrency map: the API is fast, but there is no need to flood it. */

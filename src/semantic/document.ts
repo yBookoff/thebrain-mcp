@@ -26,6 +26,24 @@ export interface IndexableThought {
 export const NOTE_EXCERPT_LIMIT = 1500;
 
 /**
+ * Version of the document format.
+ *
+ * Folded into the identifier stored with an index (see `indexModelId`), so that
+ * changing what goes into a vector invalidates existing indexes rather than
+ * leaving them silently ranked against differently-built vectors.
+ *
+ * Bumped to 2 when notes actually started reaching the embedder: until then a
+ * bug in note detection meant every vector was built from name, type and tags
+ * alone, and the document hash never changed, so no rebuild would repair it.
+ */
+export const DOCUMENT_FORMAT = 2;
+
+/** What an index records as its model: the embedder plus the document format. */
+export function indexModelId(embedderId: string): string {
+  return `${embedderId}#doc${DOCUMENT_FORMAT}`;
+}
+
+/**
  * Builds the text to embed.
  *
  * The name comes first deliberately: with mean pooling this pulls the vector

@@ -16,6 +16,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { TheBrainApi, isUuid, replayThoughtIds, ThoughtKind } from "../src/api/index.js";
+import { isNoteMod, logThoughtId } from "../src/semantic/indexer.js";
 
 const apiKey = process.env["THEBRAIN_API_KEY"];
 const testBrainId = process.env["THEBRAIN_TEST_BRAIN_ID"];
@@ -116,9 +117,11 @@ suite("resource layer against the live API", () => {
       name: `${PREFIX}renamed`,
       foregroundColor: "#ff7145",
     });
+    // Wait for both fields, not just the name: they land a moment apart, and
+    // waiting on one while asserting the other is a race the test used to lose.
     const after = await eventually(
       () => api.thoughts.get(brainId, id),
-      (t) => t.name === `${PREFIX}renamed`,
+      (t) => t.name === `${PREFIX}renamed` && t.foregroundColor === "#ff7145",
     );
     expect(after.name).toBe(`${PREFIX}renamed`);
     expect(after.foregroundColor).toBe("#ff7145");
@@ -195,6 +198,34 @@ suite("resource layer against the live API", () => {
     );
     expect(both).toBe("first part\n\nsecond part");
   });
+
+  it("a note is an attachment flagged isNotes, and the log keys it by that attachment", async () => {
+    // This is what the semantic indexer relies on. It cost a real bug: note
+    // events name the attachment in sourceId, so reading sourceId as the
+    // thought silently kept every note out of the index.
+    const id = await make("note-signal");
+
+    const bare = await api.thoughts.getGraph(brainId, id);
+    expect(bare.attachments.some((a) => a.isNotes)).toBe(false);
+
+    await api.notes.set(brainId, id, "furniture hanging from the ceiling");
+    const withNote = await eventually(
+      () => api.thoughts.getGraph(brainId, id),
+      (g) => g.attachments.some((a) => a.isNotes),
+    );
+    expect(withNote.attachments.some((a) => a.isNotes)).toBe(true);
+
+    const logs = await eventually(
+      () => api.brains.modifications(brainId, { maxLogs: 200 }),
+      (entries) => entries.some((l) => isNoteMod(l.modType) && l.extraAId === id),
+    );
+    const event = logs.find((l) => isNoteMod(l.modType) && l.extraAId === id);
+    expect(event).toBeDefined();
+    expect(event!.sourceType).toBe(4); // attachment, not thought
+    expect(event!.sourceId).not.toBe(id);
+    expect(event!.extraAType).toBe(2); // the thought lives here
+    expect(logThoughtId(event!)).toBe(id);
+  }, 30_000);
 
   it("set replaces the note entirely", async () => {
     const id = await make("overwrite");

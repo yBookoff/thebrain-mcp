@@ -292,7 +292,10 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
 8. **`SearchResultDto.brainId` comes back as zeros.** Use `sourceThought.brainId`.
 9. **A thought's type appears both as `type` and as a parent** in `/graph`
    responses. Filter it, or types pollute every traversal.
-10. **Search is prefix-based, not semantic.** This is the entire reason for §8.
+10. **A note is an attachment.** It shows up in `graph.attachments` with
+    `isNotes: true`, and its log events are keyed by that attachment rather than
+    by the thought.
+11. **Search is prefix-based, not semantic.** This is the entire reason for §8.
 
 ### Write visibility
 
@@ -441,12 +444,35 @@ Not something that happens on server start. A 10,000-thought brain takes about a
 minute, and the user should know why their client is busy.
 
 Enumeration goes through the modification log. Data is collected via `graph`,
-which returns the thought, its type and its tags in one request. **Notes are
-fetched only for thoughts with `801`/`802`/`803` events in the log** — otherwise
-indexing costs an extra request per thought for notes that mostly do not exist.
+which returns the thought, its type, its tags and its attachments in one request.
+**A note is fetched only when that graph reports an attachment flagged
+`isNotes`** — so the extra request is spent exactly on the thoughts that have a
+note, and never on the ones that do not.
+
+> The first version of this decided which notes to fetch from the modification
+> log, looking for `801`/`802`/`803` events. That was wrong in a way that
+> produced no error at all. A note is stored as a `Notes.md` attachment, so its
+> log entry names the attachment in `sourceId` (`sourceType` 4) and the thought
+> only in `extraA`. The filter `sourceType !== 2` therefore discarded every note
+> event, no note was ever read, and every vector was built from name, type and
+> tags alone. Because the document never changed, its hash never changed either,
+> and each rebuild honestly reported "no changes" — a silent failure of the one
+> feature the semantic layer exists for. Found by using the product, not by the
+> tests: the benchmark that validated `buildDocument` fed it notes directly, so
+> it exercised the formula while the pipeline that fills it stayed broken.
+>
+> Two things changed as a result. Note detection now comes from the graph, which
+> cannot go stale the way a log window can. And the document format carries a
+> version (`DOCUMENT_FORMAT` in `document.ts`) that is folded into the model
+> identifier stored with the index, so that changing what goes into a vector
+> invalidates existing indexes instead of leaving them ranked against vectors
+> built to older rules.
 
 Incremental sync takes its watermark at the moment the run starts. A small
-overlap is harmless: unchanged documents are skipped by content hash.
+overlap is harmless: unchanged documents are skipped by content hash. Mapping a
+log entry to its thought goes through `logThoughtId()`, which reads `sourceId`
+for ordinary events and `extraAId` for note events — otherwise an edit that
+touches only a note leaves the thought unmarked and its vector stale.
 
 Measured on a live 45-thought brain: first index 1.5 s, second run 0.1 s
 (everything skipped by hash), empty sync 0.1 s.

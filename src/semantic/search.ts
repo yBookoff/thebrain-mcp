@@ -12,6 +12,7 @@
 
 import type { TheBrainApi } from "../api/index.js";
 import { ThoughtKind } from "../api/types.js";
+import { indexModelId } from "./document.js";
 import { EmbedderUnavailableError, type Embedder } from "./embedder.js";
 import { mapWithConcurrency } from "./indexer.js";
 import type { VectorStore } from "./store.js";
@@ -69,7 +70,11 @@ export class SemanticSearch {
     const excludeKinds = options.includeAuxiliary ? [] : AUXILIARY_KINDS;
 
     const indexReady =
-      this.store.isCompatible(brainId, this.embedder.id, this.embedder.dimensions) &&
+      this.store.isCompatible(
+        brainId,
+        indexModelId(this.embedder.id),
+        this.embedder.dimensions,
+      ) &&
       this.store.size() > 0;
 
     if (indexReady) {
@@ -97,7 +102,7 @@ export class SemanticSearch {
     const reason =
       this.store.size() === 0
         ? "the semantic index has not been built yet — run a rebuild"
-        : "the index was built with a different model and is unusable — rebuild it";
+        : "the index was built with a different model or document format and is unusable — rebuild it";
     return this.#keyword(brainId, concept, options, limit, reason);
   }
 

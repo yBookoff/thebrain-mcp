@@ -238,6 +238,7 @@ returned to its original state.
 | L9 | **Search is prefix-based.** `OT` → finds `OTGP`; `OTPG` (a typo) → 0; `project` (a synonym) → 0 | Semantic proximity is unreachable through the API — a local vector layer is required |
 | L10 | A thought's type arrives **both** in the `type` field **and** in the `parents` list | Filter it during traversal, or types end up in the tree as ordinary parents |
 | L11 | 9–20 ms latency per request; 20 concurrent requests in 0.06 s | Indexing will not be bottlenecked by the API; parallelise freely |
+| L13 | **A note is an attachment, and its log events are keyed by it.** `graph.attachments` carries `{isNotes: true, type: 1}` for a thought with a note and is empty without one. The log entry reads `{modType: 801/802/803, sourceType: 4, sourceId: <attachment>, extraAId: <thought>, extraAType: 2}` | Anything deciding "does this thought have a note" from `sourceId` silently sees nothing. Read `isNotes` from the graph; map log events through `extraAId` |
 | L12 | **Writes become visible at different speeds.** `create`→`get(id)` instant; `rename`→`get` ~0.1 s; `set note`→`get note` ~0.2 s; `attachTag`→`graph.tags` ~0.1–0.5 s; **`create`→`findByName` ~5.6 s** | After a write, address thoughts **by identifier, never by name**. `nameExact` is not a workaround for "create it and immediately find it" |
 
 ### Tags — the undocumented mechanism
@@ -293,7 +294,9 @@ separate fields. A discrepancy with the log by exactly that amount is expected,
 not an error.
 
 The same log supplies the signals for incremental sync: `101` add, `102` remove,
-`103` re-embed the name, `801`/`802`/`803` re-embed the note.
+`103` re-embed the name, `801`/`802`/`803` re-embed the note. Mind L13 for the
+last group: those entries are keyed by the note's attachment, and the thought is
+in `extraAId`.
 
 Caveat: log completeness has not been verified for imported or synced brains.
 
