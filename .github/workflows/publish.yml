@@ -52,6 +52,9 @@ jobs:
           fi
           echo "publishing $(node -p "require('./package.json').name")@$pkg"
 
+      - name: Check that server.json agrees with package.json
+        run: node scripts/sync-server-json.mjs --check
+
       - run: npm ci
 
       - name: Typecheck
@@ -63,6 +66,20 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Publish
+      - name: Publish to npm
         # No token: OIDC covers authentication, and provenance comes with it.
         run: npm publish
+
+      # The MCP Registry stores metadata only, and validates it against the
+      # package that was just published — so this has to come after npm, and
+      # package.json must carry the matching `mcpName`.
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Authenticate to the MCP Registry
+        # Same OIDC identity as the npm step: no secret, nothing to rotate.
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to the MCP Registry
+        run: ./mcp-publisher publish

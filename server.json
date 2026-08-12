@@ -1,0 +1,71 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.yBookoff/thebrain",
+  "description": "MCP server for TheBrain 15: search by meaning, graph traversal and batch writes over the local API",
+  "repository": {
+    "url": "https://github.com/yBookoff/thebrain-mcp",
+    "source": "github"
+  },
+  "version": "0.1.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "thebrain-mcp-server",
+      "version": "0.1.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "THEBRAIN_API_KEY",
+          "description": "Local API key from TheBrain: Settings > User > Local API Key",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "THEBRAIN_BASE_URL",
+          "description": "Address of the local API. Default http://localhost:8001",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "THEBRAIN_DATA_DIR",
+          "description": "Where semantic indexes are stored. Default ~/.thebrain-mcp",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "THEBRAIN_ALLOW_DESTRUCTIVE",
+          "description": "Set to 1 to allow deleting thoughts. Deletion still requires human confirmation. Default 0",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "THEBRAIN_EMBEDDING_MODEL",
+          "description": "Embedding model for semantic search. Default Xenova/multilingual-e5-small",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "THEBRAIN_EMBEDDING_DTYPE",
+          "description": "Weight precision: fp32, fp16, q8 or q4. Default q8",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "THEBRAIN_TIMEOUT_MS",
+          "description": "API request timeout in milliseconds. Default 30000",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

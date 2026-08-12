@@ -102,12 +102,21 @@ git push --follow-tags
 ```
 
 The tag push runs `.github/workflows/publish.yml`, which refuses to publish if
-the tag and `package.json` disagree, then typechecks, tests, builds and publishes.
+the tag and `package.json` disagree, then typechecks, tests, builds, publishes to
+npm, and finally registers the release with the official MCP Registry.
 
-There is **no npm token in this repository**. Authentication uses npm trusted
-publishing over OIDC: GitHub Actions proves its identity, npm issues a token
-valid for that single run, and provenance attestation is produced automatically.
-Nothing to rotate, nothing to leak, and no OTP prompt.
+`server.json` is the registry's metadata: it carries the version twice, and both
+copies must match what reached npm. `npm version` keeps them in step through its
+`version` lifecycle hook (`scripts/sync-server-json.mjs`), and the workflow
+re-checks with `--check` so a hand-edited mismatch cannot slip through. That
+script also refuses to run if the identities drift apart — `mcpName` in
+`package.json` must equal `name` in `server.json`, and the npm entry's
+`identifier` must equal the package name.
+
+There are **no publishing secrets in this repository at all**. Both npm and the
+MCP Registry authenticate over OIDC: GitHub Actions proves its identity, each
+issues a token valid for that single run, and npm produces a provenance
+attestation automatically. Nothing to rotate, nothing to leak, and no OTP prompt.
 
 The package name (`thebrain-mcp-server`) differs from the repository name
 (`thebrain-mcp`) because npm considers the shorter name too close to an

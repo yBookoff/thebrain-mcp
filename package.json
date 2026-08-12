@@ -1,7 +1,8 @@
 {
   "name": "thebrain-mcp-server",
   "version": "0.1.1",
-  "description": "MCP server for TheBrain 15 \u2014 semantic operations over the local API",
+  "description": "MCP server for TheBrain 15 — semantic operations over the local API",
+  "mcpName": "io.github.yBookoff/thebrain",
   "type": "module",
   "license": "MIT",
   "author": "yBookoff <12408023+yBookoff@users.noreply.github.com>",
@@ -39,7 +40,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run typecheck && npm run test && npm run build",
-    "release": "npm version patch && git push --follow-tags"
+    "release": "npm version patch && git push --follow-tags",
+    "version": "node scripts/sync-server-json.mjs && git add server.json"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
