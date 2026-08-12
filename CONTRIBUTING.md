@@ -92,6 +92,27 @@ Reopen these only with new evidence, not new preference:
 - **Claude Code is the priority client.** Claude Desktop is supported on a
   best-effort basis; a capability that exists only in Code is still fair game.
 
+## Releasing
+
+Publishing is automated and tag-driven. From a clean `main`:
+
+```
+npm version patch    # or minor / major — writes package.json, commits, tags
+git push --follow-tags
+```
+
+The tag push runs `.github/workflows/publish.yml`, which refuses to publish if
+the tag and `package.json` disagree, then typechecks, tests, builds and publishes.
+
+There is **no npm token in this repository**. Authentication uses npm trusted
+publishing over OIDC: GitHub Actions proves its identity, npm issues a token
+valid for that single run, and provenance attestation is produced automatically.
+Nothing to rotate, nothing to leak, and no OTP prompt.
+
+The package name (`thebrain-mcp-server`) differs from the repository name
+(`thebrain-mcp`) because npm considers the shorter name too close to an
+unrelated existing package.
+
 ## Reporting a bug in the TheBrain API
 
 If you find behaviour that contradicts the spec, add it to the live-observations

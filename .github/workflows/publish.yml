@@ -1,0 +1,68 @@
+name: Publish
+
+# Publishing is driven by tags, not by pushes to main: a branch push should be
+# able to land a README fix without shipping a release, and npm refuses a
+# version that already exists anyway.
+#
+#   npm version patch && git push --follow-tags
+#
+# Authentication is npm trusted publishing (OIDC). There is no NPM_TOKEN secret
+# to leak or rotate: GitHub Actions proves its identity, npm issues a token good
+# for this run alone, and provenance attestation is generated automatically.
+#
+# This requires a one-time setup on npmjs.com, under the package's
+# Settings > Trusted Publisher (all fields are case-sensitive):
+#   Organization or user: yBookoff
+#   Repository:           thebrain-mcp
+#   Workflow filename:    publish.yml
+#   Allowed actions:      npm publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # lets npm verify this workflow through OIDC
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Trusted publishing needs Node 22.14+ and npm 11.5.1+.
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+
+      - name: Update npm to a version that speaks OIDC
+        run: npm install -g npm@latest
+
+      - name: Check that the tag matches the version in package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag v$tag does not match package.json $pkg — refusing to publish"
+            exit 1
+          fi
+          echo "publishing $(node -p "require('./package.json').name")@$pkg"
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish
+        # No token: OIDC covers authentication, and provenance comes with it.
+        run: npm publish
