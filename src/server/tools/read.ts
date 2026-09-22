@@ -10,7 +10,8 @@ import { z } from "zod";
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { ThoughtKind, describeModType } from "../../api/types.js";
+import { ThoughtKind } from "../../api/types.js";
+import { describeChange, isSettingNoise, subjectIds } from "../../operations/changes.js";
 import { traverse } from "../../operations/traverse.js";
 import { mapWithConcurrency } from "../../semantic/indexer.js";
 import type { ServerContext } from "../context.js";
@@ -22,6 +23,13 @@ const brainId = z
 
 /** Cap on how many names the log resolves: beyond this the output is unreadable anyway. */
 const MAX_RESOLVED_NAMES = 60;
+
+/**
+ * How many log entries to read before filtering out view settings. The caller's
+ * limit cannot be passed down: the API keeps the newest entries, and those can
+ * all be settings.
+ */
+const MAX_LOG_READ = 5000;
 
 export function registerReadTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
@@ -291,32 +299,40 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
     },
     guard(async ({ brainId: bid, since, limit }) => {
       const from = since ?? new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
-      const logs = await ctx.api.brains.modifications(bid, {
+      const read = await ctx.api.brains.modifications(bid, {
         since: from,
-        maxLogs: limit ?? 100,
+        maxLogs: MAX_LOG_READ,
       });
+      const hidden = read.filter(isSettingNoise).length;
+      const logs = read
+        .filter((l) => !isSettingNoise(l))
+        .sort((a, b) => b.creationDateTime.localeCompare(a.creationDateTime))
+        .slice(0, limit ?? 100);
 
       // Names are resolved in one bounded batch: otherwise a large `limit`
       // turns into hundreds of sequential requests.
-      const unique = [
-        ...new Set(logs.filter((l) => l.sourceType === 2).map((l) => l.sourceId)),
-      ].slice(0, MAX_RESOLVED_NAMES);
+      const unique = [...new Set(logs.flatMap(subjectIds))].slice(0, MAX_RESOLVED_NAMES);
       const resolved = await mapWithConcurrency(unique, 10, async (id) => {
         const t = await ctx.api.thoughts.get(bid, id).catch(() => null);
         return [id, t?.name ?? "(unnamed)"] as const;
       });
       const thoughtNames = new Map(resolved);
 
-      const rows = logs
-        .slice()
-        .sort((a, b) => b.creationDateTime.localeCompare(a.creationDateTime))
-        .map((l) => [
-          l.creationDateTime.slice(0, 16).replace("T", " "),
-          describeModType(l.modType),
-          l.sourceType === 2
-            ? (thoughtNames.get(l.sourceId) ?? "(deleted or not shown)")
-            : "",
-        ]);
+      const rows = logs.map((l) => [
+        l.creationDateTime.slice(0, 16).replace("T", " "),
+        describeChange(l),
+        subjectIds(l)
+          .map((id) => thoughtNames.get(id) ?? "(deleted or not shown)")
+          .join(" ↔ "),
+      ]);
+
+      const totals = [
+        `events ${logs.length}`,
+        hidden > 0 ? `view-setting changes hidden: ${hidden}` : null,
+        read.length >= MAX_LOG_READ
+          ? `only the newest ${MAX_LOG_READ} log entries were read — pass a later \`since\``
+          : null,
+      ].filter((s) => s !== null);
 
       return ok(
         join([
@@ -324,7 +340,7 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
             `Changes since ${from.slice(0, 16).replace("T", " ")}`,
             table(["When", "What", "Thought"], rows),
           ),
-          section("Totals", `events ${logs.length}`),
+          section("Totals", totals.join("; ")),
         ]),
       );
     }),
