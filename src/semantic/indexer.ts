@@ -5,11 +5,15 @@
  * start: on a 10,000-thought brain it takes about a minute, and the user
  * should know it is happening.
  *
- * Thoughts are enumerated through the modification log — the API has no
- * "list all" endpoint. The same log supplies incremental sync signals.
+ * The API has no "list all" endpoint. A rebuild enumerates thoughts from the
+ * modification log and then walks the graph outward from the home thought and
+ * from every logged thought, because the log alone misses thoughts that were
+ * never created in this brain (imports, old brains). The log still supplies
+ * incremental sync signals.
  */
 
 import type { TheBrainApi } from "../api/index.js";
+import type { CleanGraph } from "../api/resources/thoughts.js";
 import {
   EntityType,
   ModType,
@@ -130,14 +134,20 @@ export class SemanticIndexer {
 
     onProgress({ phase: "enumerate", done: 0, total: 0, message: "reading the log" });
     const logs = await this.#api.brains.modifications(brainId);
-    const alive = replayThoughtIds(logs);
+    const logged = replayThoughtIds(logs);
+
+    onProgress({ phase: "enumerate", done: 0, total: 0, message: "walking the graph" });
+    const graphs = await this.#walk(brainId, logged);
+    // A union, not a replacement: a logged thought whose graph failed to load
+    // keeps its old behaviour — fetched once more, dropped only if it is gone.
+    const alive = new Set([...logged, ...graphs.keys()]);
 
     // Drop anything that no longer exists in the brain.
     const known = [...this.#store.contentHashes().keys()];
     const stale = known.filter((id) => !alive.has(id));
     this.#store.remove(stale);
 
-    const result = await this.#indexThoughts(brainId, [...alive], onProgress);
+    const result = await this.#indexThoughts(brainId, [...alive], onProgress, graphs);
     this.#store.setSyncedThrough(watermark);
 
     onProgress({
@@ -205,10 +215,53 @@ export class SemanticIndexer {
     return { ...result, removed: deleted.size, elapsedMs: Date.now() - startedAt };
   }
 
+  /**
+   * Every thought reachable from the home thought or from a logged thought,
+   * with its graph, so indexing can reuse what the walk already fetched.
+   *
+   * The log alone undercounts. Measured on a live TheBrain 15 against
+   * `statistics.thoughts`: one brain with 56 thoughts had no `created` events at
+   * all, another had 1 of 44, a third 125 of 187. Walking the graph from the
+   * home thought found 56, 46 and 184 (types and tags included, unlinked
+   * thoughts excluded). Seeding from the log as well keeps islands that are
+   * cut off from home but were created here.
+   */
+  async #walk(brainId: string, logged: ReadonlySet<string>): Promise<Map<string, CleanGraph>> {
+    const home = await this.#api.brains
+      .get(brainId)
+      .then((b) => b.homeThoughtId)
+      .catch(() => null);
+
+    const graphs = new Map<string, CleanGraph>();
+    const queued = new Set<string>(logged);
+    if (home !== null) queued.add(home);
+
+    let frontier = [...queued];
+    while (frontier.length > 0) {
+      const level = frontier;
+      const fetched = await mapWithConcurrency(level, this.#concurrency, (id) =>
+        this.#api.thoughts.getGraph(brainId, id).catch(() => null),
+      );
+      const next: string[] = [];
+      fetched.forEach((graph, i) => {
+        if (graph === null) return;
+        graphs.set(level[i]!, graph);
+        for (const neighbour of neighbourIds(graph)) {
+          if (queued.has(neighbour)) continue;
+          queued.add(neighbour);
+          next.push(neighbour);
+        }
+      });
+      frontier = next;
+    }
+    return graphs;
+  }
+
   async #indexThoughts(
     brainId: string,
     ids: readonly string[],
     onProgress: (p: IndexProgress) => void,
+    graphs: ReadonlyMap<string, CleanGraph> = new Map(),
   ): Promise<{ indexed: number; skipped: number }> {
     if (ids.length === 0) return { indexed: 0, skipped: 0 };
 
@@ -219,7 +272,7 @@ export class SemanticIndexer {
     // The graph returns a thought, its tags and its type in one request —
     // cheaper than fetching them separately.
     const collected = await mapWithConcurrency(ids, this.#concurrency, async (id) => {
-      const item = await this.#collect(brainId, id);
+      const item = await this.#collect(brainId, id, graphs.get(id));
       fetched += 1;
       if (fetched % 50 === 0 || fetched === total) {
         onProgress({
@@ -270,9 +323,13 @@ export class SemanticIndexer {
     return { indexed, skipped };
   }
 
-  async #collect(brainId: string, thoughtId: string): Promise<IndexableThought | null> {
+  async #collect(
+    brainId: string,
+    thoughtId: string,
+    cached?: CleanGraph,
+  ): Promise<IndexableThought | null> {
     try {
-      const graph = await this.#api.thoughts.getGraph(brainId, thoughtId);
+      const graph = cached ?? (await this.#api.thoughts.getGraph(brainId, thoughtId));
       // A note shows up as an attachment flagged `isNotes`, so the graph we
       // already fetched says whether reading the note is worth a request. The
       // modification log cannot answer this: its note events are keyed by the
@@ -314,6 +371,20 @@ export function logThoughtId(log: ModificationLogDto): string | null {
   if (log.sourceType === EntityType.Thought) return log.sourceId;
   if (isNoteMod(log.modType) && log.extraAType === EntityType.Thought) return log.extraAId;
   return null;
+}
+
+/**
+ * Thoughts one hop away, tags and the type included: both are thoughts in their
+ * own right. A tag's graph lists the thoughts it marks as children, so following
+ * tags reaches thoughts whose only connection is a shared tag. A type's graph
+ * lists none of its instances (measured), so the type contributes only itself.
+ */
+export function neighbourIds(graph: CleanGraph): string[] {
+  const ids = [...graph.parents, ...graph.children, ...graph.jumps, ...graph.tags].map(
+    (t) => t.id,
+  );
+  if (graph.type !== null) ids.push(graph.type.id);
+  return ids;
 }
 
 /** Note lifecycle events: created, changed, deleted. */

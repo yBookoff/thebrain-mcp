@@ -352,6 +352,28 @@ test, so drift will be caught.
 
 Caveat: log completeness has not been verified for imported or synced brains.
 
+> **Correction.** The caveat was warranted: the log alone is not enough. On a
+> live TheBrain 15 with brains created over years, three of eight brains logged
+> far fewer thoughts than they hold:
+>
+> | `statistics.thoughts` | `created` events in the log | Found by walking the graph |
+> |---|---|---|
+> | 56 | 0 | 56 |
+> | 44 | 1 | 46 (+2 types) |
+> | 187 | 125 | 184 (3 thoughts linked to nothing) |
+>
+> A rebuild now takes the union of the log and a breadth-first walk over
+> `graph` — parents, children, jumps, tags and type — seeded from the brain's
+> `homeThoughtId` and from every logged thought, so islands cut off from home
+> survive as long as the log knows one of their thoughts. The walk's graphs are
+> reused for indexing, so a thought still costs one `graph` request. With the
+> union, those three brains index 56, 46 and 199 entries; the last reconciles as
+> 187 thoughts + 7 forgotten + 2 types + 3 tags. Forgotten thoughts were indexed
+> before this change as well, through their `created` events.
+>
+> Still missed: a thought linked to nothing and absent from the log. There is no
+> endpoint that could reveal it.
+
 ---
 
 ## 8. The semantic layer
