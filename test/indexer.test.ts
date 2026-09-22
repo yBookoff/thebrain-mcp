@@ -48,6 +48,10 @@ interface FakeThought {
   typeName?: string;
   tags?: string[];
   note?: string;
+  /** Ids of thoughts linked to this one, as the graph endpoint reports them. */
+  children?: string[];
+  parents?: string[];
+  jumps?: string[];
 }
 
 const log = (
@@ -92,10 +96,16 @@ function fakeApi(
   thoughts: Map<string, FakeThought>,
   logs: ModificationLogDto[],
   searchResults: Map<string, string[]> = new Map(),
+  home: string | null = null,
 ) {
-  const calls = { graph: 0, notes: 0, modifications: 0, search: 0 };
+  const calls = { graph: 0, graphIds: [] as string[], notes: 0, modifications: 0, search: 0 };
+  const ref = (id: string) => ({ id, name: thoughts.get(id)?.name ?? null, kind: 1 });
   const api = {
     brains: {
+      async get(brainId: string) {
+        if (home === null) throw new Error("no home thought");
+        return { id: brainId, name: "brain", homeThoughtId: home };
+      },
       async modifications(_brainId: string, options?: { since?: string }) {
         calls.modifications += 1;
         if (options?.since === undefined) return logs;
@@ -105,12 +115,20 @@ function fakeApi(
     thoughts: {
       async getGraph(_brainId: string, id: string) {
         calls.graph += 1;
+        calls.graphIds.push(id);
         const t = thoughts.get(id);
         if (t === undefined) throw new Error(`no thought ${id}`);
         return {
           thought: { id: t.id, name: t.name, kind: t.kind ?? 1, label: null },
-          type: t.typeName ? { name: t.typeName } : null,
-          tags: (t.tags ?? []).map((name) => ({ name })),
+          parents: (t.parents ?? []).map(ref),
+          children: (t.children ?? []).map(ref),
+          jumps: (t.jumps ?? []).map(ref),
+          siblings: [],
+          links: [],
+          // Tags and types are thoughts of their own; these ids point nowhere,
+          // like a tag the walk may try once and find gone.
+          type: t.typeName ? { id: `type-${t.typeName}`, name: t.typeName } : null,
+          tags: (t.tags ?? []).map((name) => ({ id: `tag-${name}`, name })),
           // The real API reports a note as an attachment flagged `isNotes`.
           // Omitting it here is what let the note-indexing bug through.
           attachments: t.note ? [{ id: `att-${t.id}`, isNotes: true, type: 1 }] : [],
@@ -216,7 +234,7 @@ describe("initial indexing", () => {
     expect(result.indexed).toBe(3);
     expect(store.size()).toBe(3);
     // The deleted thought was never fetched.
-    expect(calls.graph).toBe(3);
+    expect(calls.graphIds).not.toContain("deleted");
     store.close();
   });
 
@@ -293,6 +311,57 @@ describe("initial indexing", () => {
     const result = await new SemanticIndexer(api, store, new FakeEmbedder()).rebuild(BRAIN);
     expect(result.indexed).toBe(2);
     store.close();
+  });
+
+  describe("thoughts the log never saw", () => {
+    // Imported and old brains carry thoughts with no `created` event. Measured
+    // on a live TheBrain 15: 0 of 56, 1 of 44 and 125 of 187 thoughts logged.
+    function imported() {
+      const thoughts = new Map<string, FakeThought>([
+        ["home", { id: "home", name: "Life areas", children: ["x", "y"] }],
+        ["x", { id: "x", name: "Health", parents: ["home"] }],
+        ["y", { id: "y", name: "Stress management", parents: ["home"], jumps: ["z"] }],
+        ["z", { id: "z", name: "Relaxation techniques", jumps: ["y"] }],
+      ]);
+      return thoughts;
+    }
+
+    it("a brain with an empty log is indexed through the graph", async () => {
+      const { api } = fakeApi(imported(), [], new Map(), "home");
+      const store = new VectorStore(":memory:");
+      const result = await new SemanticIndexer(api, store, new FakeEmbedder()).rebuild(BRAIN);
+      expect(result.indexed).toBe(4);
+      expect(store.size()).toBe(4);
+      store.close();
+    });
+
+    it("each graph is fetched once: the walk's result is reused for indexing", async () => {
+      const { api, calls } = fakeApi(imported(), [], new Map(), "home");
+      const store = new VectorStore(":memory:");
+      await new SemanticIndexer(api, store, new FakeEmbedder()).rebuild(BRAIN);
+      expect(calls.graph).toBe(4);
+      store.close();
+    });
+
+    it("an island cut off from home is reached through a logged thought", async () => {
+      const thoughts = imported();
+      thoughts.set("q", { id: "q", name: "Island", children: ["r"] });
+      thoughts.set("r", { id: "r", name: "Unlogged child", parents: ["q"] });
+      const { api } = fakeApi(thoughts, [log("q", 101, "2026-08-11T09:00:00")], new Map(), "home");
+      const store = new VectorStore(":memory:");
+      const result = await new SemanticIndexer(api, store, new FakeEmbedder()).rebuild(BRAIN);
+      expect(result.indexed).toBe(6);
+      store.close();
+    });
+
+    it("without a home thought it still indexes what the log knows", async () => {
+      const { api } = fakeApi(imported(), [log("y", 101, "2026-08-11T09:00:00")]);
+      const store = new VectorStore(":memory:");
+      const result = await new SemanticIndexer(api, store, new FakeEmbedder()).rebuild(BRAIN);
+      // y, then z by its jump and home by y's parent link, then x as home's child.
+      expect(result.indexed).toBe(4);
+      store.close();
+    });
   });
 
   it("reports progress", async () => {
