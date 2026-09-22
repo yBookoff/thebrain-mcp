@@ -416,6 +416,30 @@ This works better than it sounds, because vector search is not perfect either
 (see the ceiling below) and the skills already train agents to supply variants.
 The reason for degradation is returned in the result so the tool can show it.
 
+### Variants in vector mode
+
+> **Correction.** Vector mode used to embed the concept alone and drop the
+> variants, although the tool description and the skills both promised they
+> raised recall. They now do: the concept and each variant are embedded
+> separately, each is searched, and a thought keeps its best score. The
+> phrasing that produced it is reported as `matchedVariant`.
+>
+> The fusion was chosen by measurement: 11 conversational Russian queries with
+> agent-style variants, over a 199-entry brain whose thoughts are mostly
+> titles of two to five words, relevance labelled by hand.
+>
+> | Fusion | precision@5 | recall@10 | MRR |
+> |---|---|---|---|
+> | Concept alone (before) | 0.40 | 0.45 | 0.47 |
+> | Variants joined into one string | 0.67 | 0.67 | 0.88 |
+> | Centroid of variant vectors | 0.65 | 0.65 | 0.95 |
+> | **Best score per thought** | **0.75** | **0.73** | **0.95** |
+> | Reciprocal rank fusion (k=60) | 0.42 | 0.43 | 0.85 |
+>
+> Small sample, one brain, one labeller: read it as a direction, not a
+> benchmark. Scores are only compared with each other, never against a
+> threshold, so the top-k rule still holds.
+
 ### Storage
 
 `node:sqlite` (Node 22+), vectors as BLOBs, brute-force cosine scan. No vector

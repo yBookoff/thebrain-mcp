@@ -554,6 +554,41 @@ describe("search", () => {
     store.close();
   });
 
+  it("in vector mode a variant finds what the query alone misses", async () => {
+    // Regression: variants were ignored whenever the index was ready.
+    const { api, store, embedder } = await ready();
+    const search = new SemanticSearch(api, store, embedder);
+    const alone = await search.find(BRAIN, "zzzz", { limit: 1 });
+    expect(alone.matches[0]!.thoughtId).not.toBe("b");
+    expect(alone.matches[0]!.matchedVariant).toBeNull();
+
+    const withVariant = await search.find(BRAIN, "zzzz", {
+      variants: ["borscht recipe"],
+      limit: 1,
+    });
+    expect(withVariant.mode).toBe("vector");
+    expect(withVariant.matches[0]!.thoughtId).toBe("b");
+    expect(withVariant.matches[0]!.matchedVariant).toBe("borscht recipe");
+    store.close();
+  });
+
+  it("in vector mode a thought appears once, with its best score", async () => {
+    const { api, store, embedder } = await ready();
+    const outcome = await new SemanticSearch(api, store, embedder).find(BRAIN, "Unity", {
+      variants: ["Unity game engine", "unity"],
+    });
+    const ids = outcome.matches.map((m) => m.thoughtId);
+    expect(new Set(ids).size).toBe(ids.length);
+    // Credit goes to the phrasing that scored best; "unity" is a case-duplicate
+    // of the query and is dropped before searching.
+    for (const m of outcome.matches) {
+      expect([null, "Unity game engine"]).toContain(m.matchedVariant);
+    }
+    const scores = outcome.matches.map((m) => m.score);
+    expect(scores).toEqual([...scores].sort((x, y) => y - x));
+    store.close();
+  });
+
   it("types and tags stay out of the results", async () => {
     const { api, store, embedder } = await ready();
     const outcome = await new SemanticSearch(api, store, embedder).find(BRAIN, "Tool");
