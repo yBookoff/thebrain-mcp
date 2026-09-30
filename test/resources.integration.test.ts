@@ -20,7 +20,9 @@ import {
   ModType,
   TheBrainApi,
   ThoughtKind,
+  compareLogTime,
   isUuid,
+  logEntryKey,
   replayThoughtIds,
   type ModificationLogDto,
 } from "../src/api/index.js";
@@ -58,6 +60,16 @@ async function eventually<T>(
     last = await probe();
   }
   return last;
+}
+
+/** `t` moved by `delta` microseconds, still offsetless, as the log writes it. */
+function shiftMicros(t: string, delta: number): string {
+  const [whole = "", fraction = ""] = t.split(".");
+  const micros =
+    Date.parse(`${whole}Z`) * 1000 + Number(fraction.padEnd(6, "0").slice(0, 6)) + delta;
+  const seconds = Math.floor(micros / 1_000_000);
+  const rest = micros - seconds * 1_000_000;
+  return `${new Date(seconds * 1000).toISOString().slice(0, 19)}.${String(rest).padStart(6, "0")}`;
 }
 
 suite("resource layer against the live API", () => {
@@ -100,7 +112,7 @@ suite("resource layer against the live API", () => {
     // Sweep up debris from earlier failed runs. The API has no "list all"
     // endpoint, but everything these tests create is in the log.
     const leftovers: string[] = [];
-    for (const id of replayThoughtIds(await api.brains.modifications(brainId))) {
+    for (const id of replayThoughtIds(await api.brains.allModifications(brainId))) {
       const t = await api.thoughts.get(brainId, id).catch(() => null);
       if (t?.name?.startsWith(PREFIX)) leftovers.push(id);
     }
@@ -335,7 +347,7 @@ suite("resource layer against the live API", () => {
 
     const time = (l: ModificationLogDto): number => Date.parse(l.creationDateTime);
     const newestFirst = (x: number, y: number): number => y - x;
-    const all = await api.brains.modifications(brainId);
+    const all = await api.brains.allModifications(brainId);
     const few = await api.brains.modifications(brainId, { maxLogs: 3 });
 
     expect(all.length).toBeGreaterThan(3);
@@ -344,6 +356,114 @@ suite("resource layer against the live API", () => {
     expect(few.map(time).sort(newestFirst)).toEqual(newest); // truncation keeps the newest
     expect(few.map(time)).toEqual(newest); // and returns them newest first
   }, 30_000);
+
+  /** Creates a thought and returns its `created` log entry. */
+  const createdEntry = async (name: string): Promise<ModificationLogDto> => {
+    const id = await make(name);
+    const logs = await eventually(
+      () => api.brains.modifications(brainId, { maxLogs: 50 }),
+      (entries) => entries.some((l) => l.sourceId === id && l.modType === ModType.Created),
+    );
+    return logs.find((l) => l.sourceId === id && l.modType === ModType.Created)!;
+  };
+
+  it("log timestamps carry no offset and mean UTC, and endTime reads them the same way", async () => {
+    // The log reader sends an entry's own timestamp back as endTime. Zones
+    // differ by hours, so a minute of slack between TheBrain's clock and ours
+    // still tells them apart. On a machine whose zone is UTC nothing can.
+    const before = Date.now();
+    const entry = await createdEntry("log-utc");
+    const t = entry.creationDateTime;
+    expect(t).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{1,7})?$/);
+    const skew = Math.abs(Date.parse(`${t}Z`) - before);
+    expect(skew, `${t} read as UTC is ${skew} ms from the local clock`).toBeLessThan(60_000);
+
+    const includes = async (until: string): Promise<boolean> =>
+      (await api.brains.modifications(brainId, { maxLogs: 5, until })).some(
+        (l) => logEntryKey(l) === logEntryKey(entry),
+      );
+    expect(await includes(t)).toBe(true);
+    expect(await includes(`${t}Z`)).toBe(true);
+    // An offset is honoured, so the agreement above is not the API ignoring
+    // zones altogether: an hour east of UTC is an hour earlier.
+    expect(await includes(`${t}+01:00`)).toBe(false);
+  }, 30_000);
+
+  it("endTime and startTime are inclusive to the microsecond", async () => {
+    const entry = await createdEntry("log-bounds");
+    const t = entry.creationDateTime;
+    const key = logEntryKey(entry);
+    const within = async (range: { since?: string; until?: string }): Promise<boolean> =>
+      (await api.brains.modifications(brainId, { maxLogs: 1000, ...range })).some(
+        (l) => logEntryKey(l) === key,
+      );
+
+    expect(await within({ until: t })).toBe(true);
+    expect(await within({ until: shiftMicros(t, -1) })).toBe(false);
+    expect(await within({ since: t })).toBe(true);
+    expect(await within({ since: shiftMicros(t, 1) })).toBe(false);
+
+    // Why the reader never passes a boundary through Date: milliseconds cut
+    // the entry off. Only observable when the timestamp has sub-millisecond digits.
+    const fraction = t.split(".")[1] ?? "";
+    if (fraction.length > 3) {
+      expect(await within({ until: new Date(`${t}Z`).toISOString() })).toBe(false);
+    }
+  }, 30_000);
+
+  it("startTime does not change which end truncation keeps", async () => {
+    // The OpenAPI description says maxLogs counts "beginning from the
+    // startTime". It does not: with startTime the newest entries are still the
+    // ones kept, which is what made sync drop the oldest changes.
+    const since = new Date().toISOString();
+    const names = ["log-since-1", "log-since-2", "log-since-3", "log-since-4"];
+    for (const name of names) await make(name);
+    const range = await eventually(
+      () => api.brains.modifications(brainId, { maxLogs: 1000, since }),
+      (entries) => entries.length >= names.length,
+    );
+
+    const two = await api.brains.modifications(brainId, { maxLogs: 2, since });
+    expect(two.map(logEntryKey)).toEqual(range.slice(0, 2).map(logEntryKey));
+    expect(two.map(logEntryKey)).not.toContain(logEntryKey(range.at(-1)!));
+  }, 30_000);
+
+  it("concurrent writes share timestamps, and paging keeps every tied entry once", async () => {
+    // Only concurrency produces them: a single request that logs several
+    // entries (a cascade delete, a first note) stamps each one apart. Measured
+    // over repeated bursts of concurrent creates: 30 at once shared a timestamp
+    // in about half the bursts, 100 at once in every burst, 2 to 5 times.
+    const BURST = 100;
+    const since = new Date().toISOString();
+    let tied = false;
+    for (let round = 0; round < 3 && !tied; round++) {
+      await Promise.all(Array.from({ length: BURST }, (_, i) => make(`log-tie-${round}-${i}`)));
+      const burst = await eventually(
+        () => api.brains.modifications(brainId, { maxLogs: 10_000, since }),
+        (entries) => entries.length >= BURST * (round + 1),
+      );
+      const times = burst.map((l) => l.creationDateTime);
+      tied = new Set(times).size < times.length;
+    }
+    expect(tied).toBe(true);
+
+    const sameEntries = (paged: ModificationLogDto[], whole: ModificationLogDto[]): void => {
+      expect(paged.map(logEntryKey).sort()).toEqual(whole.map(logEntryKey).sort());
+      for (let i = 1; i < paged.length; i++) {
+        const order = compareLogTime(paged[i - 1]!.creationDateTime, paged[i]!.creationDateTime);
+        expect(order).toBeGreaterThanOrEqual(0);
+      }
+    };
+    // A page of two is bound to split a tie, and often to be filled by one.
+    sameEntries(
+      await api.brains.allModifications(brainId, { since, pageSize: 2 }),
+      await api.brains.modifications(brainId, { maxLogs: 10_000, since }),
+    );
+    sameEntries(
+      await api.brains.allModifications(brainId, { pageSize: 25 }),
+      await api.brains.modifications(brainId, { maxLogs: 100_000 }),
+    );
+  }, 90_000);
 
   it("set replaces the note entirely", async () => {
     const id = await make("overwrite");
@@ -371,7 +491,7 @@ suite("resource layer against the live API", () => {
     // Holds for a brain whose thoughts were all created in it, like a test
     // brain. Imported and old brains fall short, which is why a rebuild also
     // walks the graph (ARCHITECTURE.md §7).
-    const logs = await api.brains.modifications(brainId);
+    const logs = await api.brains.allModifications(brainId);
     const alive = replayThoughtIds(logs);
 
     let normal = 0;

@@ -10,7 +10,8 @@ import { z } from "zod";
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { ThoughtKind } from "../../api/types.js";
+import { compareLogTime } from "../../api/log.js";
+import { ThoughtKind, type ModificationLogDto } from "../../api/types.js";
 import { describeChange, isSettingNoise, subjectIds } from "../../operations/changes.js";
 import { traverse } from "../../operations/traverse.js";
 import { mapWithConcurrency } from "../../semantic/indexer.js";
@@ -30,13 +31,6 @@ const MAX_RESOLVED_NAMES = 60;
  * fallback.
  */
 const MAX_VARIANTS = 10;
-
-/**
- * How many log entries to read before filtering out brain settings. The caller's
- * limit cannot be passed down: the API keeps the newest entries, and those can
- * all be settings.
- */
-const MAX_LOG_READ = 5000;
 
 export function registerReadTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
@@ -301,21 +295,39 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
         since: z
           .string()
           .optional()
-          .describe("ISO timestamp to start from. Defaults to the last seven days."),
+          .describe(
+            "ISO timestamp to start from, UTC unless it carries an offset. " +
+              "Defaults to the last seven days.",
+          ),
         limit: z.number().int().min(1).max(500).optional().describe("Defaults to 100."),
       },
     },
     guard(async ({ brainId: bid, since, limit }) => {
       const from = since ?? new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
-      const read = await ctx.api.brains.modifications(bid, {
-        since: from,
-        maxLogs: MAX_LOG_READ,
-      });
-      const hidden = read.filter(isSettingNoise).length;
-      const logs = read
-        .filter((l) => !isSettingNoise(l))
-        .sort((a, b) => b.creationDateTime.localeCompare(a.creationDateTime))
-        .slice(0, limit ?? 100);
+      const want = limit ?? 100;
+
+      // The caller's limit cannot go to the API: it keeps the newest entries,
+      // and those can all be settings. So pages are read, newest first, until
+      // one event more than the limit shows there is something left out.
+      const events: ModificationLogDto[] = [];
+      const settings: string[] = [];
+      for await (const page of ctx.api.brains.modificationPages(bid, { since: from })) {
+        for (const l of page) {
+          if (isSettingNoise(l)) settings.push(l.creationDateTime);
+          else events.push(l);
+        }
+        if (events.length > want) break;
+      }
+      const newestFirst = (a: ModificationLogDto, b: ModificationLogDto): number =>
+        compareLogTime(b.creationDateTime, a.creationDateTime);
+      const logs = events.sort(newestFirst).slice(0, want);
+      const cut = events.length > want;
+      // Settings count only within the period the rows cover.
+      const oldestShown = logs.at(-1)?.creationDateTime;
+      const hidden =
+        cut && oldestShown !== undefined
+          ? settings.filter((t) => compareLogTime(t, oldestShown) >= 0).length
+          : settings.length;
 
       // Names are resolved in one bounded batch: otherwise a large `limit`
       // turns into hundreds of sequential requests.
@@ -337,16 +349,14 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       const totals = [
         `events ${logs.length}`,
         hidden > 0 ? `brain-setting changes hidden: ${hidden}` : null,
-        read.length >= MAX_LOG_READ
-          ? `only the newest ${MAX_LOG_READ} log entries were read — pass a later \`since\``
-          : null,
+        cut ? "older events not shown — raise `limit`" : null,
       ].filter((s) => s !== null);
 
       return ok(
         join([
           section(
             `Changes since ${from.slice(0, 16).replace("T", " ")}`,
-            table(["When", "What", "Thought"], rows),
+            table(["When (UTC)", "What", "Thought"], rows),
           ),
           section("Totals", totals.join("; ")),
         ]),

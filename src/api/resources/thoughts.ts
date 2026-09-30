@@ -1,5 +1,6 @@
 import { assertUuid, emptyOn400, type TheBrainClient } from "../client.js";
 import { TheBrainError } from "../errors.js";
+import { compareLogTime } from "../log.js";
 import {
   ModType,
   type AttachmentDto,
@@ -219,19 +220,21 @@ export class ThoughtsResource {
 /**
  * Reconstructs a brain's contents from the modification log.
  *
- * The API has no "list all thoughts" endpoint. The log without a date range
- * holds the full history: `created` minus `deleted` yields the current set of
- * identifiers.
+ * The API has no "list all thoughts" endpoint. Over the whole log
+ * (`brains.allModifications`), `created` minus `deleted` yields the thoughts
+ * that were created in this brain and still exist. Imported and old brains hold
+ * thoughts the log never recorded, which is why a rebuild also walks the graph
+ * (ARCHITECTURE.md §7).
  *
  * Cross-checked against `statistics`: the log covers thoughts of every kind,
  * whereas `statistics.thoughts` counts only `kind = Normal`.
- *
- * Caveat: log completeness for imported brains has not been verified.
  */
 export function replayThoughtIds(logs: readonly ModificationLogDto[]): Set<string> {
   const alive = new Set<string>();
-  const ordered = [...logs].sort(
-    (a, b) => Date.parse(a.creationDateTime) - Date.parse(b.creationDateTime),
+  // Not through `Date`: it drops microseconds, and a create and a delete in the
+  // same millisecond would then replay in whatever order they arrived.
+  const ordered = [...logs].sort((a, b) =>
+    compareLogTime(a.creationDateTime, b.creationDateTime),
   );
   for (const log of ordered) {
     if (log.sourceType !== 2) continue;

@@ -55,6 +55,9 @@ silent wrong behaviour rather than a loud failure:
   Reading `sourceId` as the thought is what once kept notes out of the index.
 - **The log does not list every thought.** Imported and old brains hold
   thoughts with no `created` event, so a rebuild also walks `graph`.
+- **The log keeps only the newest `maxLogs` entries, even with `startTime`.**
+  Read it through `brains.allModifications()` / `modificationPages()`. Log
+  timestamps carry microseconds; never round-trip one through `Date`.
 - **A thought's type also appears in `parents`.** Filter it in traversal.
 - **Markdown round-trip eats the closing ` ``` `.** Warn; suggest indented code.
 - **Tags attach via `POST /api/links` with `relation: 2` against a `kind=4`

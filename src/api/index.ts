@@ -38,6 +38,8 @@ export class TheBrainApi {
 
 export { TheBrainClient, assertUuid, isUuid, emptyOn400 } from "./client.js";
 export { TheBrainError, type ApiErrorKind } from "./errors.js";
+export { compareLogTime, logEntryKey } from "./log.js";
+export { LOG_PAGE_SIZE } from "./resources/brains.js";
 export * from "./types.js";
 export {
   replayThoughtIds,
