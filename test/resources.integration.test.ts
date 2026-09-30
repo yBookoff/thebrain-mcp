@@ -15,8 +15,17 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { TheBrainApi, isUuid, replayThoughtIds, ThoughtKind } from "../src/api/index.js";
-import { isNoteMod, logThoughtId } from "../src/semantic/indexer.js";
+import {
+  EntityType,
+  ModType,
+  TheBrainApi,
+  ThoughtKind,
+  isUuid,
+  replayThoughtIds,
+  type ModificationLogDto,
+} from "../src/api/index.js";
+import { describeChange, subjectIds } from "../src/operations/changes.js";
+import { isNoteMod, logThoughtId, neighbourIds } from "../src/semantic/indexer.js";
 
 const apiKey = process.env["THEBRAIN_API_KEY"];
 const testBrainId = process.env["THEBRAIN_TEST_BRAIN_ID"];
@@ -88,9 +97,8 @@ suite("resource layer against the live API", () => {
       await api.thoughts.delete(brainId, id).catch(() => undefined);
     }
 
-    // Sweep up debris from earlier failed runs. This doubles as a live check
-    // of log-based enumeration — the only way to list thoughts, given the API
-    // has no "list all" endpoint.
+    // Sweep up debris from earlier failed runs. The API has no "list all"
+    // endpoint, but everything these tests create is in the log.
     const leftovers: string[] = [];
     for (const id of replayThoughtIds(await api.brains.modifications(brainId))) {
       const t = await api.thoughts.get(brainId, id).catch(() => null);
@@ -181,6 +189,50 @@ suite("resource layer against the live API", () => {
     expect(without.tags.map((t) => t.id)).not.toContain(tagId);
   });
 
+  it("a tag's graph lists the thoughts it marks as children", async () => {
+    // The indexer's graph walk relies on this to reach thoughts whose only
+    // connection is a shared tag.
+    const tagId = await make("walk-tag", ThoughtKind.Tag);
+    const id = await make("walk-tagged");
+    await api.links.attachTag(brainId, id, tagId);
+
+    const tagGraph = await eventually(
+      () => api.thoughts.getGraph(brainId, tagId),
+      (g) => g.children.some((c) => c.id === id),
+    );
+    expect(tagGraph.children.map((c) => c.id)).toContain(id);
+    expect(neighbourIds(tagGraph)).toContain(id);
+  }, 30_000);
+
+  it("a type's graph lists its instances", async () => {
+    // The walk reaches thoughts whose only connection is a shared type through
+    // this. A measurement on a real brain once claimed the opposite; this test
+    // settled it.
+    const typeId = await make("walk-type", ThoughtKind.Type);
+    const id = await make("walk-typed");
+    await api.thoughts.update(brainId, id, { typeId });
+
+    const graph = await eventually(
+      () => api.thoughts.getGraph(brainId, id),
+      (g) => g.type?.id === typeId,
+    );
+    expect(neighbourIds(graph)).toContain(typeId);
+
+    const typeGraph = await eventually(
+      () => api.thoughts.getGraph(brainId, typeId),
+      (g) => neighbourIds(g).includes(id),
+    );
+    expect(neighbourIds(typeGraph)).toContain(id);
+    // `children`, as with a tag; a failure shows all four lists.
+    const holds = (list: readonly { id: string }[]): boolean => list.some((t) => t.id === id);
+    expect({
+      parents: holds(typeGraph.parents),
+      children: holds(typeGraph.children),
+      jumps: holds(typeGraph.jumps),
+      tags: holds(typeGraph.tags),
+    }).toEqual({ parents: false, children: true, jumps: false, tags: false });
+  }, 30_000);
+
   it("append creates the note when absent and extends it afterwards", async () => {
     const id = await make("with-note");
 
@@ -225,6 +277,72 @@ suite("resource layer against the live API", () => {
     expect(event!.sourceId).not.toBe(id);
     expect(event!.extraAType).toBe(2); // the thought lives here
     expect(logThoughtId(event!)).toBe(id);
+    expect(subjectIds(event!)).toEqual([id]);
+  }, 30_000);
+
+  it("a link event names both ends in extraA and extraB, and the link in sourceId", async () => {
+    // brain_recent_changes names both thoughts of a link event from here.
+    const a = await make("log-link-A");
+    const b = await make("log-link-B");
+    const linkId = await api.links.create(brainId, { thoughtIdA: a, thoughtIdB: b });
+
+    const logs = await eventually(
+      () => api.brains.modifications(brainId, { maxLogs: 200 }),
+      (entries) => entries.some((l) => l.sourceId === linkId),
+    );
+    const event = logs.find((l) => l.sourceId === linkId && l.modType === ModType.Created);
+    expect(event).toBeDefined();
+    expect(event!.sourceType).toBe(EntityType.Link);
+    expect(event!.extraAType).toBe(EntityType.Thought);
+    expect(event!.extraBType).toBe(EntityType.Thought);
+    expect([event!.extraAId, event!.extraBId].sort()).toEqual([a, b].sort());
+    expect(subjectIds(event!).sort()).toEqual([a, b].sort());
+    expect(describeChange(event!)).toBe("link created");
+  }, 30_000);
+
+  it("an attachment event names its thought in extraA", async () => {
+    // Notes are covered above; a URL is an ordinary attachment.
+    const id = await make("log-attachment");
+    await api.attachments.attachUrl(brainId, id, "https://example.com/zz-it-probe", {
+      name: `${PREFIX}probe`,
+      deduplicate: false,
+    });
+
+    const isOurs = (l: ModificationLogDto): boolean =>
+      l.sourceType === EntityType.Attachment && l.extraAId === id && !isNoteMod(l.modType);
+    const logs = await eventually(
+      () => api.brains.modifications(brainId, { maxLogs: 200 }),
+      (entries) => entries.some(isOurs),
+    );
+    const event = logs.find((l) => isOurs(l) && l.modType === ModType.Created);
+    expect(event).toBeDefined();
+    expect(event!.sourceId).not.toBe(id);
+    expect(event!.extraAType).toBe(EntityType.Thought);
+    expect(subjectIds(event!)).toEqual([id]);
+    expect(describeChange(event!)).toBe("attachment created");
+  }, 30_000);
+
+  it("the log returns the newest entries first and truncates at maxLogs", async () => {
+    // brain_recent_changes filters out settings before applying its limit
+    // because of this: the newest entries can all be settings.
+    for (const n of [1, 2, 3]) await make(`log-order-${n}`);
+    const last = await make("log-order-4");
+    // Both reads below must see the same log, so wait for the last write.
+    await eventually(
+      () => api.brains.modifications(brainId, { maxLogs: 50 }),
+      (entries) => entries.some((l) => l.sourceId === last),
+    );
+
+    const time = (l: ModificationLogDto): number => Date.parse(l.creationDateTime);
+    const newestFirst = (x: number, y: number): number => y - x;
+    const all = await api.brains.modifications(brainId);
+    const few = await api.brains.modifications(brainId, { maxLogs: 3 });
+
+    expect(all.length).toBeGreaterThan(3);
+    expect(few).toHaveLength(3);
+    const newest = all.map(time).sort(newestFirst).slice(0, 3);
+    expect(few.map(time).sort(newestFirst)).toEqual(newest); // truncation keeps the newest
+    expect(few.map(time)).toEqual(newest); // and returns them newest first
   }, 30_000);
 
   it("set replaces the note entirely", async () => {
@@ -250,6 +368,9 @@ suite("resource layer against the live API", () => {
   });
 
   it("the log reconstructs contents that agree with statistics", async () => {
+    // Holds for a brain whose thoughts were all created in it, like a test
+    // brain. Imported and old brains fall short, which is why a rebuild also
+    // walks the graph (ARCHITECTURE.md §7).
     const logs = await api.brains.modifications(brainId);
     const alive = replayThoughtIds(logs);
 

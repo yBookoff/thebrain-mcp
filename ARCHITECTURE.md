@@ -372,7 +372,9 @@ Caveat: log completeness has not been verified for imported or synced brains.
 > before this change as well, through their `created` events.
 >
 > Still missed: a thought linked to nothing and absent from the log. There is no
-> endpoint that could reveal it.
+> endpoint that could reveal it. The walk relies on a tag's graph listing the
+> thoughts it marks, and a type's graph its instances, both as `children`; both
+> have contract tests.
 
 ---
 
@@ -489,8 +491,11 @@ engineering 0.904), which is why `document.ts` embeds more than the name.
 Not something that happens on server start. A 10,000-thought brain takes about a
 minute, and the user should know why their client is busy.
 
-Enumeration goes through the modification log. Data is collected via `graph`,
-which returns the thought, its type, its tags and its attachments in one request.
+Enumeration takes the union of the modification log and a breadth-first walk
+over `graph`: the log alone misses thoughts in imported and old brains (see
+*Enumerating all thoughts* in §7). Data is collected via `graph`, which returns
+the thought, its type, its tags and its attachments in one request; the walk
+has already fetched it, so collecting reuses it.
 **A note is fetched only when that graph reports an attachment flagged
 `isNotes`** — so the extra request is spent exactly on the thoughts that have a
 note, and never on the ones that do not.
@@ -586,7 +591,7 @@ Two testing habits worth stating, because both caught real bugs:
   create parent links the way the real one does. Making it faithful immediately
   broke three assertions that were indexing `links[0]` — and those assertions
   were the ones that were wrong.
-- **Measure before documenting.** Both corrections in this document — the
+- **Measure before documenting.** Two corrections in this document — the
   `nameExact` latency and the q8 ranking claim — came from tests written against
   a claim that had been asserted rather than checked.
 

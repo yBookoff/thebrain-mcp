@@ -375,9 +375,9 @@ export function logThoughtId(log: ModificationLogDto): string | null {
 
 /**
  * Thoughts one hop away, tags and the type included: both are thoughts in their
- * own right. A tag's graph lists the thoughts it marks as children, so following
- * tags reaches thoughts whose only connection is a shared tag. A type's graph
- * lists none of its instances (measured), so the type contributes only itself.
+ * own right. A tag's graph lists the thoughts it marks as children, and a type's
+ * graph lists its instances the same way, so following them reaches thoughts
+ * whose only connection is a shared tag or type. Both are contract-tested.
  */
 export function neighbourIds(graph: CleanGraph): string[] {
   const ids = [...graph.parents, ...graph.children, ...graph.jumps, ...graph.tags].map(
