@@ -198,6 +198,12 @@ brain with more than 500 thoughts.
   numbers.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to work on this.
 
+## Support
+
+thebrain-mcp is built and maintained in spare time. If it earns a place in your
+workflow, you can [sponsor it on GitHub](https://github.com/sponsors/yBookoff) —
+once or monthly.
+
 ## License
 
 MIT

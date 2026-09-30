@@ -24,6 +24,10 @@
   "bugs": {
     "url": "https://github.com/yBookoff/thebrain-mcp/issues"
   },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/yBookoff"
+  },
   "bin": {
     "thebrain-mcp": "dist/index.js"
   },
