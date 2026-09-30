@@ -296,6 +296,9 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     `isNotes: true`, and its log events are keyed by that attachment rather than
     by the thought.
 11. **Search is prefix-based, not semantic.** This is the entire reason for §8.
+12. **The log keeps only the newest `maxLogs` entries**, with or without
+    `startTime`. Reading all of it means paging back on `endTime` — see
+    *Reading the whole log* below.
 
 ### Write visibility
 
@@ -340,10 +343,9 @@ It is the target's `kind=4` that flips the behaviour.
 
 ### Enumerating all thoughts
 
-There is no "list all thoughts" endpoint. The workaround:
-`/api/brains/{id}/modifications` with no date range returns the full history, and
-`modType 101` (created) minus `modType 102` (deleted) reconstructs the current
-population.
+There is no "list all thoughts" endpoint. The workaround: over the whole
+modification log (read page by page, see below), `modType 101` (created) minus
+`modType 102` (deleted) reconstructs the current population.
 
 Cross-checked against an independent source: the log gave 43 live thoughts, 38
 with `kind=1` and 5 with `kind=2`; `statistics.thoughts` = 38,
@@ -375,6 +377,41 @@ Caveat: log completeness has not been verified for imported or synced brains.
 > endpoint that could reveal it. The walk relies on a tag's graph listing the
 > thoughts it marks, and a type's graph its instances, both as `children`; both
 > have contract tests.
+
+### Reading the whole log
+
+One request returns at most `maxLogs` entries, and when the range holds more it
+keeps the **newest**, newest first. That holds with `startTime` too, although
+the spec says `maxLogs` counts "beginning from the `startTime`". Until this was
+fixed, both consumers lost the oldest end: a rebuild over a log longer than
+10,000 entries missed old `created` events, which the graph walk makes up for
+except for unlinked thoughts; and a sync with more than 10,000 changes since its
+watermark dropped the oldest of them and moved the watermark past them anyway.
+View settings (`601`) made up 45–82% of the logs measured, so the limit comes
+sooner than the size of a brain suggests.
+
+`brains.modificationPages()` pages back on `endTime` instead. What it rests on,
+measured on a live TheBrain 15, each point with a contract test:
+
+| Question | Answer |
+|---|---|
+| Is `endTime` inclusive? | Yes, to the microsecond; `startTime` too |
+| What zone is `creationDateTime` in? | UTC, with no offset, microsecond precision and trailing zeros trimmed: `2026-09-30T13:48:59.61898` |
+| Does the API read an offsetless bound the same way? | Yes, as UTC. An explicit offset is honoured |
+| Can two entries share a timestamp? | Yes, under concurrent writes: 100 creates at once shared 2–5. A single request that logs several entries stamps each one apart |
+
+Each page asks for everything up to the oldest timestamp of the one before. The
+entries at that boundary come back again and are dropped by content. The
+boundary goes back **as the exact string the log returned**: through `Date` it
+would lose its microseconds and fall just before the boundary entry, and the
+entry with it. A page filled by one timestamp cannot move the boundary, so the
+page doubles until it can. Writes made meanwhile land above the boundary and do
+not disturb it.
+
+Paging on offset or on `startTime` would not work: the API has no offset, and
+`startTime` alone still returns the newest page. For the same reason
+`brain_recent_changes` reads pages newest first and stops once it has one
+event more than the caller's limit, rather than asking for the limit.
 
 ---
 
@@ -520,7 +557,10 @@ note, and never on the ones that do not.
 > built to older rules.
 
 Incremental sync takes its watermark at the moment the run starts. A small
-overlap is harmless: unchanged documents are skipped by content hash. Mapping a
+overlap is harmless: unchanged documents are skipped by content hash. It reads
+every change since the watermark, page by page (§7, *Reading the whole log*):
+one request would keep only the newest changes and drop the oldest, while the
+watermark moved past them regardless. Mapping a
 log entry to its thought goes through `logThoughtId()`, which reads `sourceId`
 for ordinary events and `extraAId` for note events — otherwise an edit that
 touches only a note leaves the thought unmarked and its vector stale.

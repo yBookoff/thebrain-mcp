@@ -30,7 +30,7 @@ Returns 403 if the API key does not belong to the currently logged-in user.
 | GET | `/api/brains/{id}` | Brain details |
 | DELETE | `/api/brains/{id}` | **Delete a brain** (destructive) |
 | GET | `/api/brains/{brainId}/statistics` | Counts of thoughts/links/notes/files and byte sizes |
-| GET | `/api/brains/{brainId}/modifications` | The brain's modification log; `maxLogs` (**required**), `startTime`/`endTime` (RFC 3339) |
+| GET | `/api/brains/{brainId}/modifications` | The brain's modification log; `maxLogs` (**required**), `startTime`/`endTime` (RFC 3339). Keeps the newest `maxLogs` entries, see L14 |
 
 ## 3. Thoughts (13) — the core
 
@@ -199,6 +199,7 @@ FileDownload paths plus BrainAccess/Users need no wrapper.
    required argument on every tool.
 3. **No pagination.** Search takes `maxResults` (required), modifications takes
    `maxLogs` (required). Pick sensible defaults, or the model will invent them.
+   The log can still be read in full by paging back on `endTime` (L14).
 4. **No batch operations.** Creating a tree of N thoughts costs N+ calls — a
    candidate for a composite tool.
 5. **Writes are not immediately visible.** "Create it and immediately find it"
@@ -233,12 +234,13 @@ returned to its original state.
 | L4 | **`notes/append` on a thought with no note is a silent no-op**: HTTP 200, the note stays empty | An append tool must read the note first and fall back to `update` when there is none |
 | L5 | **A Markdown round-trip loses the closing ` ``` ` of a code fence.** Sent a code block, got it back without the closing fence, with the rest of the document swallowed into the block | Notes containing code get corrupted. Either escape, or warn, or write through HTML |
 | L6 | In `SearchResultDto` the `brainId` field comes back as zeros (`00000000-…`); the real id is in `sourceThought.brainId` | Take brainId from `sourceThought`, not from the result root |
-| L7 | Dates arrive in inconsistent timezone formats: `app/state` with an offset (`+02:00`), `thoughts` naive (`2026-08-11T09:01:27.71436`), `search` with `Z` | Normalise in the client |
+| L7 | Dates arrive in inconsistent timezone formats: `app/state` with an offset (`+02:00`), `thoughts` naive (`2026-08-11T09:01:27.71436`), `search` with `Z`. Naive log timestamps are UTC (L14) | Normalise in the client |
 | L8 | **Tags are attached through `relation: 2`** — the mechanism is undocumented, see the section below | The discriminator is a link's `meaning` field |
 | L9 | **Search is prefix-based.** `OT` → finds `OTGP`; `OTPG` (a typo) → 0; `project` (a synonym) → 0 | Semantic proximity is unreachable through the API — a local vector layer is required |
 | L10 | A thought's type arrives **both** in the `type` field **and** in the `parents` list | Filter it during traversal, or types end up in the tree as ordinary parents |
 | L11 | 9–20 ms latency per request; 20 concurrent requests in 0.06 s | Indexing will not be bottlenecked by the API; parallelise freely |
 | L13 | **A note is an attachment, and its log events are keyed by it.** `graph.attachments` carries `{isNotes: true, type: 1}` for a thought with a note and is empty without one. The log entry reads `{modType: 801/802/803, sourceType: 4, sourceId: <attachment>, extraAId: <thought>, extraAType: 2}` | Anything deciding "does this thought have a note" from `sourceId` silently sees nothing. Read `isNotes` from the graph; map log events through `extraAId` |
+| L14 | **The log keeps the newest `maxLogs` entries, with or without `startTime`.** The spec says `maxLogs` counts "beginning from the `startTime`"; it does not. Both bounds are inclusive to the microsecond. `creationDateTime` is UTC with no offset and microsecond precision, trailing zeros trimmed (`…T13:48:59.61898`), and a bound without an offset is read as UTC. Concurrent writes share timestamps: 100 creates at once gave 2–5 shared ones | Read a long log in pages, passing the oldest entry's timestamp back as `endTime` **in the exact string it arrived in**. A `Date` keeps milliseconds only, so the boundary entry would fall off the next page. Drop the repeated boundary entries by content, and grow a page that a single timestamp fills |
 | L12 | **Writes become visible at different speeds.** `create`→`get(id)` instant; `rename`→`get` ~0.1 s; `set note`→`get note` ~0.2 s; `attachTag`→`graph.tags` ~0.1–0.5 s; **`create`→`findByName` ~5.6 s** | After a write, address thoughts **by identifier, never by name**. `nameExact` is not a workaround for "create it and immediately find it" |
 
 ### Tags — the undocumented mechanism
@@ -280,8 +282,9 @@ it is a different mechanism.
 There is no "list all thoughts" endpoint and no traversal beyond one hop. But
 `/api/brains/{id}/modifications` with no date range returns the history up to
 `maxLogs` entries (when there are more, it keeps the newest and returns them
-newest first), and replaying `modType 101` (created) minus `modType 102`
-(deleted) reconstructs the current population.
+newest first; the rest is reached by paging back on `endTime`, L14), and
+replaying `modType 101` (created) minus `modType 102` (deleted) over the whole
+log reconstructs the current population.
 
 Cross-checked against an independent source — an exact match:
 
@@ -306,8 +309,6 @@ The same log supplies the signals for incremental sync: `101` add, `102` remove,
 `103` re-embed the name, `801`/`802`/`803` re-embed the note. Mind L13 for the
 last group: those entries are keyed by the note's attachment, and the thought is
 in `extraAId`.
-
-Caveat: log completeness has not been verified for imported or synced brains.
 
 ### Error formats — there are five of them
 

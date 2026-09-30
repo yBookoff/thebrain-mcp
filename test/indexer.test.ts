@@ -106,10 +106,10 @@ function fakeApi(
         if (home === null) throw new Error("no home thought");
         return { id: brainId, name: "brain", homeThoughtId: home };
       },
-      async modifications(_brainId: string, options?: { since?: string }) {
+      async allModifications(_brainId: string, options?: { since?: string }) {
         calls.modifications += 1;
         if (options?.since === undefined) return logs;
-        return logs.filter((l) => l.creationDateTime > options.since!);
+        return logs.filter((l) => l.creationDateTime >= options.since!);
       },
     },
     thoughts: {

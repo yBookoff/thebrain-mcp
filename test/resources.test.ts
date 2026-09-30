@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { TheBrainApi } from "../src/api/index.js";
-import { replayThoughtIds, warnIfFencedCode } from "../src/api/index.js";
+import {
+  LOG_PAGE_SIZE,
+  compareLogTime,
+  logEntryKey,
+  replayThoughtIds,
+  warnIfFencedCode,
+} from "../src/api/index.js";
 import type { ModificationLogDto, ThoughtDto } from "../src/api/types.js";
 
 const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
@@ -304,29 +310,29 @@ describe("search", () => {
   });
 });
 
-describe("reconstructing a brain from the log", () => {
-  const log = (
-    sourceId: string,
-    modType: number,
-    at: string,
-    sourceType = 2,
-  ): ModificationLogDto => ({
-    sourceId,
-    sourceType,
-    extraAId: "",
-    extraAType: -1,
-    extraBId: "",
-    extraBType: -1,
-    modType,
-    oldValue: null,
-    newValue: null,
-    userId: "u",
-    brainId: BRAIN,
-    creationDateTime: at,
-    modificationDateTime: at,
-    syncUpdateDateTime: null,
-  });
+const log = (
+  sourceId: string,
+  modType: number,
+  at: string,
+  sourceType = 2,
+): ModificationLogDto => ({
+  sourceId,
+  sourceType,
+  extraAId: "",
+  extraAType: -1,
+  extraBId: "",
+  extraBType: -1,
+  modType,
+  oldValue: null,
+  newValue: null,
+  userId: "u",
+  brainId: BRAIN,
+  creationDateTime: at,
+  modificationDateTime: at,
+  syncUpdateDateTime: null,
+});
 
+describe("reconstructing a brain from the log", () => {
   it("created minus deleted gives the current contents", () => {
     const alive = replayThoughtIds([
       log("a", 101, "2026-08-11T09:00:00"),
@@ -360,6 +366,134 @@ describe("reconstructing a brain from the log", () => {
       log("t-1", 101, "2026-08-11T09:01:00", 2),
     ]);
     expect([...alive]).toEqual(["t-1"]);
+  });
+
+  it("orders a create and a delete that share a millisecond", () => {
+    // Newest first, as the API returns them. Through Date both parse to .617,
+    // the sort keeps them as they came, and the thought is replayed back to life.
+    const alive = replayThoughtIds([
+      log("a", 102, "2026-09-30T13:48:59.617093"),
+      log("a", 101, "2026-09-30T13:48:59.617092"),
+    ]);
+    expect([...alive]).toEqual([]);
+  });
+});
+
+describe("log timestamps", () => {
+  it("order by microseconds that Date would merge", () => {
+    expect(compareLogTime("2026-09-30T13:48:59.617092", "2026-09-30T13:48:59.617093")).toBe(-1);
+    expect(Date.parse("2026-09-30T13:48:59.617092Z")).toBe(
+      Date.parse("2026-09-30T13:48:59.617093Z"),
+    );
+  });
+
+  it("compare trimmed fractions by value, not by length", () => {
+    // The API trims trailing zeros: .61898 is .618980.
+    expect(compareLogTime("2026-09-30T13:48:59.61898", "2026-09-30T13:48:59.618886")).toBe(1);
+    expect(compareLogTime("2026-09-30T13:48:59", "2026-09-30T13:48:59.000001")).toBe(-1);
+    expect(compareLogTime("2026-09-30T13:48:59.5", "2026-09-30T13:48:59.500000")).toBe(0);
+  });
+});
+
+describe("reading the whole log", () => {
+  /** Microseconds past 13:00:00, formatted the way the API trims them. */
+  const at = (us: number): string => {
+    const fraction = String(us).padStart(6, "0").replace(/0+$/, "");
+    return `2026-09-30T13:00:00${fraction === "" ? "" : `.${fraction}`}`;
+  };
+  // Ties of two, three and four, entries a microsecond apart, and one entry
+  // with no fraction at all.
+  const MICROS = [
+    0, 1, 2, 2, 100, 100, 100, 100, 101, 1000, 1001, 1001, 5000, 5001, 5002, 5003,
+    90000, 90000, 90001, 500000, 500001, 600000, 600000, 600000, 999999,
+  ];
+  const entries = MICROS.map((us, i) => log(`t-${i}`, 101, at(us)));
+  const newestFirst = [...entries].reverse();
+
+  /**
+   * Behaves as measured on the live API: both bounds inclusive to the
+   * microsecond, and truncation keeps the newest, newest first.
+   */
+  const logRoute = (url: URL): ModificationLogDto[] => {
+    const maxLogs = Number(url.searchParams.get("maxLogs"));
+    const start = url.searchParams.get("startTime");
+    const end = url.searchParams.get("endTime");
+    return newestFirst
+      .filter((l) => start === null || compareLogTime(l.creationDateTime, start) >= 0)
+      .filter((l) => end === null || compareLogTime(l.creationDateTime, end) <= 0)
+      .slice(0, maxLogs);
+  };
+
+  it("returns every entry exactly once, whatever the page size", async () => {
+    for (let pageSize = 1; pageSize <= entries.length + 1; pageSize++) {
+      const { api } = apiWith([["/modifications", logRoute]]);
+      const all = await api.brains.allModifications(BRAIN, { pageSize });
+      expect(all.map(logEntryKey), `pageSize ${pageSize}`).toEqual(newestFirst.map(logEntryKey));
+    }
+  });
+
+  it("sends the oldest entry's timestamp back unchanged", async () => {
+    // Through Date, .500001 would leave as .500Z, and the entry itself would
+    // fall outside the next page.
+    const { api, calls } = apiWith([["/modifications", logRoute]]);
+    await api.brains.allModifications(BRAIN, { pageSize: 4 });
+    const bounds = calls.map((c) => c.url.searchParams.get("endTime"));
+    expect(bounds[0]).toBeNull();
+    expect(bounds.length).toBeGreaterThan(2);
+    for (const bound of bounds.slice(1)) {
+      expect(entries.map((l) => l.creationDateTime)).toContain(bound);
+    }
+  });
+
+  it("grows a page that one timestamp fills, instead of asking for it again", async () => {
+    const { api, calls } = apiWith([["/modifications", logRoute]]);
+    const all = await api.brains.allModifications(BRAIN, { pageSize: 2 });
+    expect(all).toHaveLength(entries.length);
+    const sizes = calls.map((c) => Number(c.url.searchParams.get("maxLogs")));
+    expect(Math.max(...sizes)).toBeGreaterThan(2);
+    // A request never repeats: either the boundary moved or the page grew.
+    const requests = calls.map((c) => c.url.search);
+    expect(new Set(requests).size).toBe(requests.length);
+  });
+
+  it("keeps since on every page", async () => {
+    const { api, calls } = apiWith([["/modifications", logRoute]]);
+    const since = at(1001);
+    const all = await api.brains.allModifications(BRAIN, { since, pageSize: 3 });
+    expect(all.map(logEntryKey)).toEqual(
+      newestFirst.filter((l) => compareLogTime(l.creationDateTime, since) >= 0).map(logEntryKey),
+    );
+    expect(calls.length).toBeGreaterThan(1);
+    for (const c of calls) expect(c.url.searchParams.get("startTime")).toBe(since);
+  });
+
+  it("makes one request when the log fits in a page", async () => {
+    const { api, calls } = apiWith([["/modifications", logRoute]]);
+    await expect(api.brains.allModifications(BRAIN)).resolves.toHaveLength(entries.length);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url.searchParams.get("maxLogs")).toBe(String(LOG_PAGE_SIZE));
+  });
+
+  it("asks for nothing more once the reader stops", async () => {
+    const { api, calls } = apiWith([["/modifications", logRoute]]);
+    for await (const page of api.brains.modificationPages(BRAIN, { pageSize: 5 })) {
+      expect(page).toHaveLength(5);
+      break;
+    }
+    expect(calls).toHaveLength(1);
+  });
+
+  it("drops entries newer than the boundary if the API ever returns them", async () => {
+    // An API that ignored endTime would repeat the newest page forever; the
+    // page grows until it covers the log, and nothing comes back twice.
+    const { api } = apiWith([
+      [
+        "/modifications",
+        (url) => newestFirst.slice(0, Number(url.searchParams.get("maxLogs"))),
+      ],
+    ]);
+    const all = await api.brains.allModifications(BRAIN, { pageSize: 3 });
+    expect(all.map(logEntryKey)).toEqual(newestFirst.map(logEntryKey));
   });
 });
 

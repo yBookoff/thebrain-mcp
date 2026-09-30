@@ -133,7 +133,7 @@ export class SemanticIndexer {
     });
 
     onProgress({ phase: "enumerate", done: 0, total: 0, message: "reading the log" });
-    const logs = await this.#api.brains.modifications(brainId);
+    const logs = await this.#api.brains.allModifications(brainId);
     const logged = replayThoughtIds(logs);
 
     onProgress({ phase: "enumerate", done: 0, total: 0, message: "walking the graph" });
@@ -163,7 +163,9 @@ export class SemanticIndexer {
    * Incremental sync from the log.
    *
    * The watermark is taken at the start — a small overlap is harmless because
-   * unchanged entries are filtered out by document hash.
+   * unchanged entries are filtered out by document hash. Every change since the
+   * watermark is read, however many: the API alone would keep only the newest
+   * page and drop the oldest changes while the watermark moved past them.
    */
   async sync(
     brainId: string,
@@ -185,7 +187,7 @@ export class SemanticIndexer {
 
     const watermark = new Date().toISOString();
     onProgress({ phase: "enumerate", done: 0, total: 0, message: "reading changes" });
-    const logs = await this.#api.brains.modifications(brainId, {
+    const logs = await this.#api.brains.allModifications(brainId, {
       since: meta.syncedThrough,
     });
 
