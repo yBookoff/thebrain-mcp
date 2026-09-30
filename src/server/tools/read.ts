@@ -25,7 +25,14 @@ const brainId = z
 const MAX_RESOLVED_NAMES = 60;
 
 /**
- * How many log entries to read before filtering out view settings. The caller's
+ * Cap on search phrasings. Each one costs an embedding and a full scan in
+ * vector mode, run one after another, or a request to TheBrain's search in the
+ * fallback.
+ */
+const MAX_VARIANTS = 10;
+
+/**
+ * How many log entries to read before filtering out brain settings. The caller's
  * limit cannot be passed down: the API keeps the newest entries, and those can
  * all be settings.
  */
@@ -139,10 +146,11 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
         query: z.string().describe("What you are looking for, in your own words."),
         variants: z
           .array(z.string())
+          .max(MAX_VARIANTS)
           .optional()
           .describe(
             "Other phrasings of the same concept: synonyms, a translation into the " +
-              "second language, a broader and a narrower term. Three to six of them.",
+              `second language, a broader and a narrower term. Three to six of them, at most ${MAX_VARIANTS}.`,
           ),
         limit: z.number().int().min(1).max(50).optional().describe("Defaults to 15."),
         includeAuxiliary: z
@@ -328,7 +336,7 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
 
       const totals = [
         `events ${logs.length}`,
-        hidden > 0 ? `view-setting changes hidden: ${hidden}` : null,
+        hidden > 0 ? `brain-setting changes hidden: ${hidden}` : null,
         read.length >= MAX_LOG_READ
           ? `only the newest ${MAX_LOG_READ} log entries were read — pass a later \`since\``
           : null,

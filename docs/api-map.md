@@ -275,12 +275,13 @@ it is a different mechanism.
 
 `statistics.links` does not count links with `meaning=5`.
 
-### Enumerating all thoughts through the log — it works
+### Enumerating all thoughts through the log — not enough on its own
 
 There is no "list all thoughts" endpoint and no traversal beyond one hop. But
-`/api/brains/{id}/modifications` with no date range returns **the entire
-history**, and replaying `modType 101` (created) minus `modType 102` (deleted)
-reconstructs the current population.
+`/api/brains/{id}/modifications` with no date range returns the history up to
+`maxLogs` entries (when there are more, it keeps the newest and returns them
+newest first), and replaying `modType 101` (created) minus `modType 102`
+(deleted) reconstructs the current population.
 
 Cross-checked against an independent source — an exact match:
 
@@ -292,6 +293,14 @@ Cross-checked against an independent source — an exact match:
 Note that `statistics.thoughts` counts **only** `kind=1`; types and tags are
 separate fields. A discrepancy with the log by exactly that amount is expected,
 not an error.
+
+> **Correction.** The exact match above was on a brain whose thoughts were all
+> created in it. Imported and old brains log far fewer `created` events than
+> they hold thoughts: on a live TheBrain 15, 0 of 56, 1 of 44 and 125 of 187. A
+> rebuild therefore takes the union of the log and a breadth-first walk over
+> `graph`; see ARCHITECTURE.md §7. The walk relies on two graph facts, both
+> contract-tested: a tag's graph lists the thoughts it marks as `children`, and
+> a type's graph lists its instances there too.
 
 The same log supplies the signals for incremental sync: `101` add, `102` remove,
 `103` re-embed the name, `801`/`802`/`803` re-embed the note. Mind L13 for the

@@ -53,6 +53,8 @@ silent wrong behaviour rather than a loud failure:
 - **A note is an attachment.** `graph.attachments` flags it with `isNotes`; its
   log events carry the attachment in `sourceId` and the thought in `extraAId`.
   Reading `sourceId` as the thought is what once kept notes out of the index.
+- **The log does not list every thought.** Imported and old brains hold
+  thoughts with no `created` event, so a rebuild also walks `graph`.
 - **A thought's type also appears in `parents`.** Filter it in traversal.
 - **Markdown round-trip eats the closing ` ``` `.** Warn; suggest indented code.
 - **Tags attach via `POST /api/links` with `relation: 2` against a `kind=4`

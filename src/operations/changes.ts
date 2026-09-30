@@ -14,6 +14,9 @@
  * The API returns the newest entries first and truncates at `maxLogs`, so
  * settings have to be filtered before the caller's limit is applied: with the
  * limit applied first, a zoomed view could leave nothing else to show.
+ *
+ * The link, attachment and truncation claims have contract tests in
+ * `test/resources.integration.test.ts`.
  */
 
 import {
@@ -23,7 +26,11 @@ import {
   type ModificationLogDto,
 } from "../api/types.js";
 
-/** An event about the brain's view settings rather than its content. */
+/**
+ * An event about the brain's settings rather than its content. Nearly all are
+ * view zoom and position, but the filter goes by entity type, so any other
+ * brain setting is hidden with them.
+ */
 export function isSettingNoise(log: ModificationLogDto): boolean {
   return log.sourceType === EntityType.BrainSetting;
 }
