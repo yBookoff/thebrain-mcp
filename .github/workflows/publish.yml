@@ -16,11 +16,22 @@ name: Publish
 #   Repository:           thebrain-mcp
 #   Workflow filename:    publish.yml
 #   Allowed actions:      npm publish
+#
+# A run that fails after npm accepted the package can be finished by hand: run
+# this workflow from main with the tag. npm is skipped when it already has the
+# version, and the steps after it run with main's version of this file.
+#
+#   gh workflow run publish.yml --ref main -f tag=v0.1.3
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish, e.g. v0.1.3"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -29,8 +40,13 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    env:
+      # A tag push publishes that tag; a manual run publishes the tag it is given.
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: actions/setup-node@v4
         with:
@@ -44,7 +60,7 @@ jobs:
 
       - name: Check that the tag matches the version in package.json
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${TAG#v}"
           pkg="$(node -p "require('./package.json').version")"
           if [ "$tag" != "$pkg" ]; then
             echo "tag v$tag does not match package.json $pkg — refusing to publish"
@@ -68,11 +84,39 @@ jobs:
 
       - name: Publish to npm
         # No token: OIDC covers authentication, and provenance comes with it.
-        run: npm publish
+        # Skipped when npm already has the version, so a failed run can be
+        # repeated for the steps after this one.
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if [ "$(npm view "$name@$version" version --prefer-online 2> /dev/null)" = "$version" ]; then
+            echo "$name@$version is already on npm, skipping"
+          else
+            npm publish
+          fi
 
       # The MCP Registry stores metadata only, and validates it against the
       # package that was just published — so this has to come after npm, and
       # package.json must carry the matching `mcpName`.
+      #
+      # npm accepts a publish before it serves it ("may take a few minutes to
+      # become available"), and the registry checks what npm serves: v0.1.3
+      # failed here with a 404 one second after npm had accepted it.
+      - name: Wait until npm serves the version
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          for attempt in $(seq 1 30); do
+            if [ "$(npm view "$name@$version" version --prefer-online 2> /dev/null)" = "$version" ]; then
+              echo "npm serves $name@$version"
+              exit 0
+            fi
+            echo "npm does not serve $name@$version yet ($attempt/30)"
+            sleep 20
+          done
+          echo "npm still does not serve $name@$version after 10 minutes"
+          exit 1
+
       - name: Install mcp-publisher
         run: |
           curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
