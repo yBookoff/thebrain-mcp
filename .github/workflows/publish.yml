@@ -15,13 +15,20 @@ name: Publish
 #   Organization or user: yBookoff
 #   Repository:           thebrain-mcp
 #   Workflow filename:    publish.yml
-#   Allowed actions:      npm publish
+#   Allowed actions:      npm stage publish
 #
-# A run that fails after npm accepted the package can be finished by hand: run
-# this workflow from main with the tag. npm is skipped when it already has the
-# version, and the steps after it run with main's version of this file.
+# The workflow stages the release rather than publishing it. A maintainer then
+# approves it with 2FA, on npmjs.com under Staged Packages or with
+# `npm stage approve <id>`; the id is in the run summary. The run waits for
+# the approval, then for npm to serve the version, and only then registers it
+# with the MCP Registry.
 #
-#   gh workflow run publish.yml --ref main -f tag=v0.1.3
+# If the run gives up before the approval, or fails after it, finish it by
+# running this workflow from main with the tag. npm answers that it already
+# holds the version, and the steps after it run with main's version of this
+# file.
+#
+#   gh workflow run publish.yml --ref main -f tag=v0.1.4
 
 on:
   push:
@@ -29,7 +36,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to publish, e.g. v0.1.3"
+        description: "Tag to publish, e.g. v0.1.4"
         required: true
         type: string
 
@@ -50,13 +57,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # Trusted publishing needs Node 22.14+ and npm 11.5.1+.
+          # npm 12 needs Node 22.22.2+; trusted publishing needs 22.14+.
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
           cache: npm
-
-      - name: Update npm to a version that speaks OIDC
-        run: npm install -g npm@latest
 
       - name: Check that the tag matches the version in package.json
         run: |
@@ -71,6 +75,7 @@ jobs:
       - name: Check that server.json agrees with package.json
         run: node scripts/sync-server-json.mjs --check
 
+      # Built with the npm that ships with Node, as in CI.
       - run: npm ci
 
       - name: Typecheck
@@ -82,39 +87,65 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Publish to npm
+      # Staging needs npm 11.15+. Pinned to a major: `npm@latest` once pulled
+      # in npm 12 in the middle of a release without anyone noticing.
+      - name: Install npm 12 for staging
+        run: npm install -g npm@12
+
+      - name: Stage on npm
         # No token: OIDC covers authentication, and provenance comes with it.
-        # Skipped when npm already has the version, so a failed run can be
-        # repeated for the steps after this one.
         run: |
+          set -o pipefail
           name="$(node -p "require('./package.json').name")"
           version="$(node -p "require('./package.json').version")"
           if [ "$(npm view "$name@$version" version --prefer-online 2> /dev/null)" = "$version" ]; then
-            echo "$name@$version is already on npm, skipping"
-          else
-            npm publish
+            echo "$name@$version is already on npm"
+            exit 0
           fi
 
+          log="$RUNNER_TEMP/npm-stage.log"
+          if npm stage publish 2>&1 | tee "$log"; then
+            id="$(sed -n 's/.*staged with id \([^)]*\)).*/\1/p' "$log" | head -n 1)"
+            {
+              echo "### $name@$version is staged"
+              echo
+              echo "Approve it with 2FA on npmjs.com under **Staged Packages**, or run:"
+              echo
+              echo '```'
+              echo "npm stage approve ${id:-<id from npm stage list $name>}"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # npm refuses a version it already holds, staged, processing or
+          # published, with 409 "previously staged" or 403 "cannot publish
+          # over". On a rerun that means an earlier run got this far.
+          if grep -qiE "previously staged|cannot publish over" "$log"; then
+            echo "npm already holds $name@$version; waiting for it below"
+            exit 0
+          fi
+          exit 1
+
       # The MCP Registry stores metadata only, and validates it against the
-      # package that was just published — so this has to come after npm, and
-      # package.json must carry the matching `mcpName`.
-      #
-      # npm accepts a publish before it serves it ("may take a few minutes to
-      # become available"), and the registry checks what npm serves: v0.1.3
-      # failed here with a 404 one second after npm had accepted it.
-      - name: Wait until npm serves the version
+      # package on npm, so this has to wait until npm serves the version: after
+      # the approval, and after npm's own processing, which takes minutes
+      # ("may take a few minutes to become available"). v0.1.3 failed here with
+      # a 404 one second after npm had accepted it.
+      - name: Wait for the approval and for npm to serve the version
         run: |
           name="$(node -p "require('./package.json').name")"
           version="$(node -p "require('./package.json').version")"
-          for attempt in $(seq 1 30); do
+          for attempt in $(seq 1 60); do
             if [ "$(npm view "$name@$version" version --prefer-online 2> /dev/null)" = "$version" ]; then
               echo "npm serves $name@$version"
               exit 0
             fi
-            echo "npm does not serve $name@$version yet ($attempt/30)"
-            sleep 20
+            echo "npm does not serve $name@$version yet ($attempt/60)"
+            sleep 60
           done
-          echo "npm still does not serve $name@$version after 10 minutes"
+          echo "npm still does not serve $name@$version after an hour."
+          echo "Once it is approved, finish with: gh workflow run publish.yml --ref main -f tag=$TAG"
           exit 1
 
       - name: Install mcp-publisher
