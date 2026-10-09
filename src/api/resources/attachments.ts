@@ -31,8 +31,9 @@ export class AttachmentsResource {
   /**
    * Finds attachments by location.
    *
-   * URL matching is normalised: case, http/https scheme and a trailing slash
-   * are ignored. Ready-made deduplication for a web clipper.
+   * URL matching ignores the http/https scheme and a trailing slash; the rest
+   * must match exactly, case included. Ready-made deduplication for a web
+   * clipper.
    */
   async byLocation(
     brainId: string,

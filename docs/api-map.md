@@ -38,7 +38,7 @@ Returns 403 if the API key does not belong to the currently logged-in user.
 | Method | Path | What it does |
 |---|---|---|
 | GET | `/api/thoughts/{brainId}/{thoughtId}` | Thought details (`ThoughtDto`) |
-| PATCH | `/api/thoughts/{brainId}/{thoughtId}` | Update via **JSON Patch** (`name`, `label`, `typeId`, colours, `acType`, `kind`) |
+| PATCH | `/api/thoughts/{brainId}/{thoughtId}` | Update via **JSON Patch** (`name`, `label`, `aliases`, `typeId`, colours, `acType`, `kind`) |
 | DELETE | `/api/thoughts/{brainId}/{thoughtId}` | Delete a thought |
 | POST | `/api/thoughts/{brainId}` | Create a thought (`ThoughtCreateModel`) → `{id}` |
 | GET | `/api/thoughts/{brainId}?nameExact=` | The first thought whose name matches exactly |
@@ -92,7 +92,7 @@ temporary token.
 | DELETE | `/api/attachments/{brainId}/{attachmentId}` | Delete an attachment |
 | POST | `/api/attachments/{brainId}/{thoughtId}/file` | Upload a file (multipart) |
 | POST | `/api/attachments/{brainId}/{thoughtId}/url` | Add a URL attachment; `url` (required), `name` (empty → the page's `<title>` is used) |
-| GET | `/api/attachments/{brainId}/by-location` | **Lookup by location** — URL or path. For URLs (type 3): case-insensitive, ignores the http/https scheme and a trailing `/`. Meant for web-clipper deduplication |
+| GET | `/api/attachments/{brainId}/by-location` | **Lookup by location** — URL or path. For URLs (type 3): ignores the http/https scheme and a trailing `/`; the rest must match exactly, case included. Meant for web-clipper deduplication |
 
 `type`: 2 = ExternalFile, 3 = ExternalUrl (default), 8 = ExternalDirectory.
 
@@ -133,7 +133,7 @@ They serve bytes addressed by internal temp-ids that the API never hands out.
 
 ## Data model
 
-**ThoughtDto** — `id`, `brainId`, `name`, `cleanedUpName`, `label`, `typeId`, `kind`, `acType`,
+**ThoughtDto** — `id`, `brainId`, `name`, `cleanedUpName`, `label`, `aliases`, `typeId`, `kind`, `acType`,
 `foregroundColor`, `backgroundColor`, `creationDateTime`, `modificationDateTime`,
 `forgottenDateTime`, `linksModificationDateTime`, `displayModificationDateTime`.
 
@@ -159,7 +159,7 @@ in the API.
 | `relation` | 1 Child, 2 Parent, 3 Jump, 4 Sibling |
 | `AttachmentType` | 2 ExternalFile, 3 ExternalUrl, 8 ExternalDirectory (the rest of `[0..15, 100]` are undocumented) |
 | `EntityType` | -1 Unknown, 1 Brain, 2 Thought, 3 Link, 4 Attachment, 5 BrainSetting, 6 BrainAccessEntry, 7 CalendarEvent, 8 FieldInstance, 9 FieldDefinition |
-| `ModificationType` | 101–105 generic (Created/Deleted/ChangedName/CreatedByPaste/ModifiedByPaste); 201–210 thought+link (colour, label, type, icons, fields); 301–304 thought (Forgot/Remembered/AccessType/Kind); 401–405 link (thickness/moved/direction/meaning/relation); 501–503 attachment; 601–602 brain; 701 access; 801–812 notes and assets; 900–903 calendar; 1001–1003 field definitions |
+| `ModificationType` | 101–105 generic (Created/Deleted/ChangedName/CreatedByPaste/ModifiedByPaste); 201–211 thought+link (colour, label, type, icons, fields, aliases); 301–304 thought (Forgot/Remembered/AccessType/Kind); 401–405 link (thickness/moved/direction/meaning/relation); 501–503 attachment; 601–602 brain; 701 access; 801–812 notes and assets; 900–903 calendar; 1001–1003 field definitions; 1101–1102 are in the enum with no description |
 | `AccessType` | `[0,1,2,3,4]` — names not given in the spec |
 | `SearchResultType` | `[0..7]` — names not given in the spec |
 | `OperationType` (JSON Patch) | `[0..6]` — add/remove/replace/move/copy/test/invalid |

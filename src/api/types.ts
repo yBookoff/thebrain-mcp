@@ -90,6 +90,7 @@ export const MODIFICATION_TYPES: Readonly<Record<number, string>> = {
   208: "field value changed",
   209: "field added",
   210: "field removed",
+  211: "aliases changed",
 
   301: "forgotten",
   302: "remembered",

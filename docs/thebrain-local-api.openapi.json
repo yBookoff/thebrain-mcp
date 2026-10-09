@@ -2,7 +2,7 @@
   "openapi": "3.0.1",
   "info": {
     "title": "TheBrain Local API",
-    "description": "Welcome to the TheBrain Local API. You can try out the API right here on this page:\n\n* Find your API key in the desktop app under **Settings > User > Local API Key**.\n* Click the `Authorize` button below, paste your key, click `Authorize` then `Close`.\n* Click an endpoint to view its documentation.\n* Click the `Try it out` button, fill out the required items and click the `Execute` button.\n* The resulting request and response are displayed.\n\nYou can also see example projects for <a href=\"https://github.com/TheBrainTech/thebrain-api-quickstart-blazor\" target=\"_blank\">Blazor</a>,\n<a href=\"https://github.com/TheBrainTech/thebrain-api-quickstart-python\" target=\"_blank\">Python</a>,\nand <a href=\"https://github.com/TheBrainTech/thebrain-api-quickstart-node\" target=\"_blank\">Node</a>\non GitHub. Note that these examples target the cloud API — to use them locally, replace the base URL with this server's address (e.g. <code>http://localhost:8001/api/</code>) and use your local API key.\n\n<hr/>\n\n**App Control** endpoints (under <code>/api/app</code>) are unique to the local API and let you read and change the desktop application state — get the active brain and thought, open brains, navigate to thoughts, etc. These are not available in the cloud API.",
+    "description": "Welcome to the TheBrain Local API. You can try out the API right here on this page:\n\n* Find your API key in the desktop app under **Settings > User > Local API Key**.\n* Click the `Authorize` button below, paste your key, click `Authorize` then `Close`.\n* Click an endpoint to view its documentation.\n* Click the `Try it out` button, fill out the required items and click the `Execute` button.\n* The resulting request and response are displayed.\n\nYou can also see example projects for <a href=\"https://github.com/TheBrainTech/thebrain-api-quickstart-blazor\" target=\"_blank\">Blazor</a>,\n<a href=\"https://github.com/TheBrainTech/thebrain-api-quickstart-python\" target=\"_blank\">Python</a>,\nand <a href=\"https://github.com/TheBrainTech/thebrain-api-quickstart-node\" target=\"_blank\">Node</a>\non GitHub. Note that these examples target the cloud API — to use them locally, replace the base URL with this server's address (e.g. <code>http://localhost:11522/api/</code>) and use your local API key.\n\n<hr/>\n\n**App Control** endpoints (under <code>/api/app</code>) are unique to the local API and let you read and change the desktop application state — get the active brain and thought, open brains, navigate to thoughts, etc. These are not available in the cloud API.",
     "version": "1.0"
   },
   "paths": {
@@ -171,9 +171,6 @@
           }
         ],
         "responses": {
-          "401": {
-            "description": "If the API Key is missing or invalid"
-          },
           "200": {
             "description": "Returns details about the attachment.",
             "content": {
@@ -193,6 +190,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
           }
         }
       }
@@ -202,7 +202,7 @@
         "tags": [
           "Attachments"
         ],
-        "summary": "Finds attachments in the brain whose location matches the provided value.\r\nWorks for external URLs, external files, and external directories.\r\n            \r\nFor URL attachments (type 3, the default), matching is case-insensitive\r\nand ignores the http/https scheme and any trailing slash (so\r\n`https://x.com/p`, `http://X.com/p`, and `x.com/p/` all find each other).\r\nFor file and directory attachments, the location is the file-system path.\r\n            \r\nUseful for de-duplicating web-capture tools or finding every thought\r\nthat references a given file.",
+        "summary": "Finds attachments in the brain whose location matches the provided value.\r\nWorks for external URLs, external files, and external directories.\r\n            \r\nFor URL attachments (type 3, the default), matching ignores the http/https\r\nscheme and any trailing slash, and the rest of the location must match\r\nexactly, case included (so `https://x.com/p`, `http://x.com/p` and\r\n`x.com/p/` all find each other, but `X.com/p` does not).\r\nFor file and directory attachments, the location is the file-system path.\r\n            \r\nUseful for de-duplicating web-capture tools or finding every thought\r\nthat references a given file.",
         "operationId": "findAttachmentsByLocation",
         "parameters": [
           {
@@ -436,14 +436,17 @@
           }
         },
         "responses": {
-          "400": {
-            "description": "If the attachment could not be added to the thought."
+          "200": {
+            "description": "Success"
           },
           "401": {
             "description": "If the API Key is missing or invalid"
           },
-          "200": {
-            "description": "Success"
+          "404": {
+            "description": "If the thought was not found"
+          },
+          "400": {
+            "description": "If the attachment could not be added to the thought."
           }
         }
       }
@@ -528,6 +531,9 @@
           }
         ],
         "responses": {
+          "400": {
+            "description": "If the brain accessors failed to be retrieved"
+          },
           "200": {
             "description": "Returns details about the brain accessors",
             "content": {
@@ -557,14 +563,11 @@
               }
             }
           },
-          "400": {
-            "description": "If the brain accessors failed to be retrieved"
+          "403": {
+            "description": "If the user does not have admin access"
           },
           "401": {
             "description": "If the API Key is missing or invalid"
-          },
-          "403": {
-            "description": "If the user does not have admin access"
           }
         }
       },
@@ -614,6 +617,9 @@
           }
         ],
         "responses": {
+          "200": {
+            "description": "Success"
+          },
           "400": {
             "description": "If the brain access level failed to be changed for the user"
           },
@@ -622,9 +628,6 @@
           },
           "403": {
             "description": "If the user does not have admin access"
-          },
-          "200": {
-            "description": "Success"
           }
         }
       },
@@ -667,14 +670,14 @@
           "200": {
             "description": "Success"
           },
+          "400": {
+            "description": "If the user's access failed to be removed"
+          },
           "403": {
             "description": "If the user does not have admin access"
           },
           "401": {
             "description": "If the API Key is missing or invalid"
-          },
-          "400": {
-            "description": "If the user's access failed to be removed"
           }
         }
       }
@@ -743,8 +746,8 @@
           }
         ],
         "responses": {
-          "400": {
-            "description": "If the brain failed to be deleted"
+          "200": {
+            "description": "Success"
           },
           "401": {
             "description": "If the API Key is missing or invalid"
@@ -752,8 +755,8 @@
           "403": {
             "description": "If the user does not have access to delete the brain"
           },
-          "200": {
-            "description": "Success"
+          "400": {
+            "description": "If the brain failed to be deleted"
           }
         }
       }
@@ -766,9 +769,6 @@
         "summary": "Returns a list of brains for the active user",
         "operationId": "getBrains",
         "responses": {
-          "401": {
-            "description": "If the API Key is missing or invalid"
-          },
           "200": {
             "description": "Returns a list of brains for the user. Includes brains the user explicitly has access to or has favorited",
             "content": {
@@ -797,6 +797,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
           }
         }
       },
@@ -829,6 +832,12 @@
           }
         },
         "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "400": {
+            "description": "If the brain failed to be created"
+          },
           "200": {
             "description": "Returns the details of the created Brain",
             "content": {
@@ -857,12 +866,6 @@
                 }
               }
             }
-          },
-          "400": {
-            "description": "If the brain failed to be created"
-          },
-          "401": {
-            "description": "If the API Key is missing or invalid"
           }
         }
       }
@@ -887,6 +890,9 @@
           }
         ],
         "responses": {
+          "400": {
+            "description": "If the statistics failed to be generated"
+          },
           "200": {
             "description": "Success",
             "content": {
@@ -906,9 +912,6 @@
                 }
               }
             }
-          },
-          "400": {
-            "description": "If the statistics failed to be generated"
           },
           "401": {
             "description": "If the API Key is missing or invalid"
@@ -969,6 +972,9 @@
           "400": {
             "description": "If the modification logs failed to be retrieved"
           },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
           "200": {
             "description": "Success",
             "content": {
@@ -997,9 +1003,6 @@
                 }
               }
             }
-          },
-          "401": {
-            "description": "If the API Key is missing or invalid"
           }
         }
       }
@@ -1363,14 +1366,14 @@
           }
         ],
         "responses": {
-          "401": {
-            "description": "If the API Key is missing or invalid"
+          "200": {
+            "description": "Success"
           },
           "400": {
             "description": "If the link can't be deleted"
           },
-          "200": {
-            "description": "Success"
+          "401": {
+            "description": "If the API Key is missing or invalid"
           }
         }
       },
@@ -1536,9 +1539,6 @@
           }
         ],
         "responses": {
-          "401": {
-            "description": "If the API Key is missing or invalid"
-          },
           "200": {
             "description": "Returns a list of attachments for the link.",
             "content": {
@@ -1567,6 +1567,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
           }
         }
       }
@@ -1616,15 +1619,6 @@
           }
         },
         "responses": {
-          "400": {
-            "description": "If the link can't be created"
-          },
-          "401": {
-            "description": "If the API Key is missing or invalid"
-          },
-          "404": {
-            "description": "If the source or target thought isn't found"
-          },
           "200": {
             "description": "Success - returns the newly created link ID",
             "content": {
@@ -1644,6 +1638,15 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "If the link can't be created"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "404": {
+            "description": "If the source or target thought isn't found"
           }
         }
       }
@@ -1790,6 +1793,9 @@
           }
         ],
         "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
           "200": {
             "description": "Returns the contents of the thought's note as text.",
             "content": {
@@ -1809,9 +1815,6 @@
                 }
               }
             }
-          },
-          "401": {
-            "description": "If the API Key is missing or invalid"
           }
         }
       }
@@ -1871,14 +1874,14 @@
           }
         },
         "responses": {
+          "400": {
+            "description": "If the creation or update failed"
+          },
           "200": {
             "description": "Success"
           },
           "401": {
             "description": "If the API Key is missing or invalid"
-          },
-          "400": {
-            "description": "If the creation or update failed"
           }
         }
       }
@@ -1938,14 +1941,14 @@
           }
         },
         "responses": {
-          "401": {
-            "description": "If the API Key is missing or invalid"
+          "200": {
+            "description": "Success"
           },
           "400": {
             "description": "If the creation or update failed"
           },
-          "200": {
-            "description": "Success"
+          "401": {
+            "description": "If the API Key is missing or invalid"
           }
         }
       }
@@ -1985,11 +1988,11 @@
           }
         ],
         "responses": {
-          "401": {
-            "description": "If the API Key is missing or invalid"
-          },
           "200": {
             "description": "Used to retrieve images in notes. `token` is generated when retrieving notes and will expire."
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
           }
         }
       }
@@ -2212,6 +2215,12 @@
           }
         ],
         "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
+          "400": {
+            "description": "If the search failed"
+          },
           "200": {
             "description": "Returns a list of search results",
             "content": {
@@ -2240,12 +2249,6 @@
                 }
               }
             }
-          },
-          "401": {
-            "description": "If the API Key is missing or invalid"
-          },
-          "400": {
-            "description": "If the search failed"
           }
         }
       }
@@ -2256,7 +2259,7 @@
           "Thoughts"
         ],
         "summary": "Returns details about the thought",
-        "description": "Thought properties and values:\r\n            \r\n    Guid 'id' - The ID of the thought\r\n    Guid 'brainId' - The ID of the brain containing the thought\r\n    Guid 'typeId' - The ID of the thought type\r\n            \r\n    DateTime 'creationDateTime' - The DateTime that the thought was created at\r\n    DateTime 'modificationDateTime' - The DateTime that the thought was last modified at\r\n    DateTime 'forgottenDateTime' - The DateTime that the thought was forgotten at\r\n    DateTime 'linksModificationDateTime' - The DateTime that the thought's links were last modified at\r\n            \r\n    string 'name' - The Name of the thought\r\n    string 'label' - The Label of the thought\r\n    string 'foregroundColor' - The RGB hexadecimal color of the thought's foreground color (Ex: '#ff7145')\r\n    string 'backgroundColor' - The RGB hexadecimal color of the thought's background color (Ex: '#ff7145')\r\n            \r\n    int 'acType' - The access type of the thought\r\n         Public = 0\r\n         Private = 1\r\n            \r\n    int 'kind' - The kind of thought\r\n         Normal = 1\r\n         Type = 2\r\n         Event = 3\r\n         Tag = 4\r\n         System = 5",
+        "description": "Thought properties and values:\r\n            \r\n    Guid 'id' - The ID of the thought\r\n    Guid 'brainId' - The ID of the brain containing the thought\r\n    Guid 'typeId' - The ID of the thought type\r\n            \r\n    DateTime 'creationDateTime' - The DateTime that the thought was created at\r\n    DateTime 'modificationDateTime' - The DateTime that the thought was last modified at\r\n    DateTime 'forgottenDateTime' - The DateTime that the thought was forgotten at\r\n    DateTime 'linksModificationDateTime' - The DateTime that the thought's links were last modified at\r\n            \r\n    string 'name' - The Name of the thought\r\n    string 'label' - The Label of the thought\r\n    string[] 'aliases' - Alternate names of the thought, matched by search and mention recognition (empty when none)\r\n    string 'foregroundColor' - The RGB hexadecimal color of the thought's foreground color (Ex: '#ff7145')\r\n    string 'backgroundColor' - The RGB hexadecimal color of the thought's background color (Ex: '#ff7145')\r\n            \r\n    int 'acType' - The access type of the thought\r\n         Public = 0\r\n         Private = 1\r\n            \r\n    int 'kind' - The kind of thought\r\n         Normal = 1\r\n         Type = 2\r\n         Event = 3\r\n         Tag = 4\r\n         System = 5",
         "operationId": "getThoughtDetails",
         "parameters": [
           {
@@ -2281,6 +2284,9 @@
           }
         ],
         "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
           "200": {
             "description": "Returns details about the thought.",
             "content": {
@@ -2300,9 +2306,6 @@
                 }
               }
             }
-          },
-          "401": {
-            "description": "If the API Key is missing or invalid"
           }
         }
       },
@@ -2311,7 +2314,7 @@
           "Thoughts"
         ],
         "summary": "Updates a thought using JSON Patch",
-        "description": "Thought properties and expected values:\r\n            \r\n    Guid 'typeId' (Optional) - The ID of the thought type\r\n            \r\n    string 'name' - The Name of the thought\r\n    string 'label' (Optional)  - The Label of the thought\r\n    string 'foregroundColor' (Optional)  - The RGB hexadecimal color of the thought's foreground color (Ex: '#ff7145')\r\n    string 'backgroundColor' (Optional)  - The RGB hexadecimal color of the thought's background color (Ex: '#ff7145')\r\n            \r\n    int 'acType' - The access type of the thought\r\n         Public = 0\r\n         Private = 1\r\n            \r\n    int 'kind' - The kind of thought\r\n         Normal = 1\r\n         Type = 2\r\n         Event = 3\r\n         Tag = 4\r\n         System = 5",
+        "description": "Thought properties and expected values:\r\n            \r\n    Guid 'typeId' (Optional) - The ID of the thought type\r\n            \r\n    string 'name' - The Name of the thought\r\n    string 'label' (Optional)  - The Label of the thought\r\n    string[] 'aliases' (Optional) - Alternate names of the thought. 'replace' or 'add' sets the whole list and\r\n         'remove' clears it; element paths such as '/aliases/0' are not accepted. Aliases are trimmed, deduplicated\r\n         case-insensitively, dropped when equal to the name, and capped at 100. Saving the first alias in a brain\r\n         makes the brain require TheBrain 15.0.621 or later on every device.\r\n    string 'foregroundColor' (Optional)  - The RGB hexadecimal color of the thought's foreground color (Ex: '#ff7145')\r\n    string 'backgroundColor' (Optional)  - The RGB hexadecimal color of the thought's background color (Ex: '#ff7145')\r\n            \r\n    int 'acType' - The access type of the thought\r\n         Public = 0\r\n         Private = 1\r\n            \r\n    int 'kind' - The kind of thought\r\n         Normal = 1\r\n         Type = 2\r\n         Event = 3\r\n         Tag = 4\r\n         System = 5",
         "operationId": "updateThought",
         "parameters": [
           {
@@ -2398,14 +2401,14 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "Success"
-          },
           "400": {
             "description": "If the deletion of the thought failed"
           },
           "401": {
             "description": "If the API Key is missing or invalid"
+          },
+          "200": {
+            "description": "Success"
           }
         }
       }
@@ -2505,6 +2508,9 @@
           }
         ],
         "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
           "200": {
             "description": "Returns a list of attachments for the thought.",
             "content": {
@@ -2533,9 +2539,6 @@
                 }
               }
             }
-          },
-          "401": {
-            "description": "If the API Key is missing or invalid"
           }
         }
       }
@@ -2569,9 +2572,6 @@
           }
         ],
         "responses": {
-          "401": {
-            "description": "If the API Key is missing or invalid"
-          },
           "200": {
             "description": "Returns the first thought matching the name exactly.",
             "content": {
@@ -2591,6 +2591,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
           }
         }
       },
@@ -2599,7 +2602,7 @@
           "Thoughts"
         ],
         "summary": "Creates a thought",
-        "description": "Thought properties and expected values:\r\n            \r\n    string 'name' - The Name of the thought\r\n    string 'label' (Optional) - The Label of the thought\r\n            \r\n    Guid 'sourceThoughtId' (Optional)  - The ID of source thought. Exclude to create an Orphan thought\r\n    Guid 'typeId' (Optional)  - The ID of the thought type\r\n            \r\n    int 'acType' - The access type of the thought\r\n         Public = 0\r\n         Private = 1\r\n            \r\n    int 'kind' - The kind of thought\r\n         Normal = 1\r\n         Type = 2\r\n         Event = 3\r\n         Tag = 4\r\n         System = 5\r\n            \r\n    int 'relation' - The relationship of the created thought to the source thought\r\n         Child = 1\r\n         Parent = 2\r\n         Jump = 3\r\n         Sibling = 4",
+        "description": "Thought properties and expected values:\r\n            \r\n    string 'name' - The Name of the thought\r\n    string 'label' (Optional) - The Label of the thought\r\n    string[] 'aliases' (Optional) - Alternate names of the thought (see updateThought for the rules)\r\n            \r\n    Guid 'sourceThoughtId' (Optional)  - The ID of source thought. Exclude to create an Orphan thought\r\n    Guid 'typeId' (Optional)  - The ID of the thought type\r\n            \r\n    int 'acType' - The access type of the thought\r\n         Public = 0\r\n         Private = 1\r\n            \r\n    int 'kind' - The kind of thought\r\n         Normal = 1\r\n         Type = 2\r\n         Event = 3\r\n         Tag = 4\r\n         System = 5\r\n            \r\n    int 'relation' - The relationship of the created thought to the source thought\r\n         Child = 1\r\n         Parent = 2\r\n         Jump = 3\r\n         Sibling = 4",
         "operationId": "createThought",
         "parameters": [
           {
@@ -2642,9 +2645,6 @@
           "404": {
             "description": "If the 'sourceId' thought was not found"
           },
-          "401": {
-            "description": "If the API Key is missing or invalid"
-          },
           "400": {
             "description": "If the creation of the thought failed"
           },
@@ -2667,6 +2667,9 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
           }
         }
       }
@@ -2701,14 +2704,14 @@
           }
         ],
         "responses": {
+          "200": {
+            "description": "Success"
+          },
           "400": {
             "description": "If the thought failed to be pinned"
           },
           "401": {
             "description": "If the API Key is missing or invalid"
-          },
-          "200": {
-            "description": "Success"
           },
           "404": {
             "description": "If the provided thought was not found"
@@ -2750,11 +2753,11 @@
           "400": {
             "description": "If the thought failed to be un-pinned"
           },
-          "401": {
-            "description": "If the API Key is missing or invalid"
-          },
           "404": {
             "description": "If the provided thought was not found"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
           }
         }
       }
@@ -2779,6 +2782,12 @@
           }
         ],
         "responses": {
+          "400": {
+            "description": "If the list of pinned thoughts failed to be retrieved"
+          },
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
           "200": {
             "description": "Success",
             "content": {
@@ -2807,12 +2816,6 @@
                 }
               }
             }
-          },
-          "400": {
-            "description": "If the list of pinned thoughts failed to be retrieved"
-          },
-          "401": {
-            "description": "If the API Key is missing or invalid"
           }
         }
       }
@@ -2823,7 +2826,7 @@
           "Thoughts"
         ],
         "summary": "Gets a list of modification logs for the specified thought",
-        "description": "`modType` values and their corresponding actions:\r\n            \r\n- **Generic Actions:**\r\n  - 101: Created\r\n  - 102: Deleted\r\n  - 103: Changed Name\r\n  - 104: Created By Paste\r\n  - 105: Modified By Paste\r\n            \r\n- **Thoughts and Links:**\r\n  - 201: Changed Color\r\n  - 202: Changed Label\r\n  - 203: Set Type\r\n  - 204: Changed Color2\r\n  - 205: Created Icon\r\n  - 206: Deleted Icon\r\n  - 207: Changed Icon\r\n  - 208: Changed Field Instance\r\n  - 209: Created Field Instance\r\n  - 210: Deleted Field Instance\r\n            \r\n- **Thought Specific:**\r\n  - 301: Forgot\r\n  - 302: Remembered\r\n  - 303: Changed Thought Access Type\r\n  - 304: Changed Kind\r\n            \r\n- **Link Specific:**\r\n  - 401: Changed Thickness\r\n  - 402: Moved Link\r\n  - 403: Changed Direction\r\n  - 404: Changed Meaning\r\n  - 405: Changed Relation\r\n            \r\n- **Attachment Specific:**\r\n  - 501: Changed Content\r\n  - 502: Changed Location\r\n  - 503: Changed Position\r\n            \r\n- **Brain and Brain Setting Specific:**\r\n  - 601: Changed Setting\r\n  - 602: Reordered Pins\r\n            \r\n- **Brain Access Specific:**\r\n  - 701: Changed Brain Access Entry\r\n            \r\n- **Note Specific:**\r\n  - 801: Created Note\r\n  - 802: Deleted Note\r\n  - 803: Changed Note\r\n  - 804: Deleted Note Asset\r\n  - 805: Created Note Asset\r\n  - 806: Changed Note Asset\r\n  - 807: Deleted Markdown Image\r\n  - 808: Created Markdown Image\r\n  - 809: Changed Markdown Image\r\n  - 810: Deleted Dynamic Wallpaper Image\r\n  - 811: Created Dynamic Wallpaper Image\r\n  - 812: Changed Dynamic Wallpaper Image\r\n            \r\n- **Calendar Event Specific:**\r\n  - 900: Created Calendar Event\r\n  - 901: Modified Calendar Event\r\n  - 902: Deleted Calendar Event\r\n  - 903: Deleted Calendar Event Recurring Instance\r\n            \r\n- **Field Definition Specific:**\r\n  - 1001: Changed Field Definition\r\n  - 1002: Created Field Definition\r\n  - 1003: Deleted Field Definition\r\n            \r\n<hr />\r\n            \r\n`entityType` values (used by `sourceType`, `extraAType` and `extraBType`)\r\n            \r\n  - -1: Unknown\r\n  - 1: Brain\r\n  - 2: Thought\r\n  - 3: Link\r\n  - 4: Attachment\r\n  - 5: Brain Setting\r\n  - 6: Brain Access Entry\r\n  - 7: Calendar Event\r\n  - 8: Field Instance\r\n  - 9: Field Definition",
+        "description": "`modType` values and their corresponding actions:\r\n            \r\n- **Generic Actions:**\r\n  - 101: Created\r\n  - 102: Deleted\r\n  - 103: Changed Name\r\n  - 104: Created By Paste\r\n  - 105: Modified By Paste\r\n            \r\n- **Thoughts and Links:**\r\n  - 201: Changed Color\r\n  - 202: Changed Label\r\n  - 203: Set Type\r\n  - 204: Changed Color2\r\n  - 205: Created Icon\r\n  - 206: Deleted Icon\r\n  - 207: Changed Icon\r\n  - 208: Changed Field Instance\r\n  - 209: Created Field Instance\r\n  - 210: Deleted Field Instance\r\n  - 211: Changed Aliases\r\n            \r\n- **Thought Specific:**\r\n  - 301: Forgot\r\n  - 302: Remembered\r\n  - 303: Changed Thought Access Type\r\n  - 304: Changed Kind\r\n            \r\n- **Link Specific:**\r\n  - 401: Changed Thickness\r\n  - 402: Moved Link\r\n  - 403: Changed Direction\r\n  - 404: Changed Meaning\r\n  - 405: Changed Relation\r\n            \r\n- **Attachment Specific:**\r\n  - 501: Changed Content\r\n  - 502: Changed Location\r\n  - 503: Changed Position\r\n            \r\n- **Brain and Brain Setting Specific:**\r\n  - 601: Changed Setting\r\n  - 602: Reordered Pins\r\n            \r\n- **Brain Access Specific:**\r\n  - 701: Changed Brain Access Entry\r\n            \r\n- **Note Specific:**\r\n  - 801: Created Note\r\n  - 802: Deleted Note\r\n  - 803: Changed Note\r\n  - 804: Deleted Note Asset\r\n  - 805: Created Note Asset\r\n  - 806: Changed Note Asset\r\n  - 807: Deleted Markdown Image\r\n  - 808: Created Markdown Image\r\n  - 809: Changed Markdown Image\r\n  - 810: Deleted Dynamic Wallpaper Image\r\n  - 811: Created Dynamic Wallpaper Image\r\n  - 812: Changed Dynamic Wallpaper Image\r\n            \r\n- **Calendar Event Specific:**\r\n  - 900: Created Calendar Event\r\n  - 901: Modified Calendar Event\r\n  - 902: Deleted Calendar Event\r\n  - 903: Deleted Calendar Event Recurring Instance\r\n            \r\n- **Field Definition Specific:**\r\n  - 1001: Changed Field Definition\r\n  - 1002: Created Field Definition\r\n  - 1003: Deleted Field Definition\r\n            \r\n<hr />\r\n            \r\n`entityType` values (used by `sourceType`, `extraAType` and `extraBType`)\r\n            \r\n  - -1: Unknown\r\n  - 1: Brain\r\n  - 2: Thought\r\n  - 3: Link\r\n  - 4: Attachment\r\n  - 5: Brain Setting\r\n  - 6: Brain Access Entry\r\n  - 7: Calendar Event\r\n  - 8: Field Instance\r\n  - 9: Field Definition",
         "operationId": "getThoughtModifications",
         "parameters": [
           {
@@ -2927,6 +2930,9 @@
           }
         ],
         "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
           "200": {
             "description": "Success",
             "content": {
@@ -2958,9 +2964,6 @@
           },
           "400": {
             "description": "If the list of Types failed to be retrieved"
-          },
-          "401": {
-            "description": "If the API Key is missing or invalid"
           }
         }
       }
@@ -2985,6 +2988,9 @@
           }
         ],
         "responses": {
+          "400": {
+            "description": "If the list of Tags failed to be retrieved"
+          },
           "200": {
             "description": "Success",
             "content": {
@@ -3014,9 +3020,6 @@
               }
             }
           },
-          "400": {
-            "description": "If the list of Tags failed to be retrieved"
-          },
           "401": {
             "description": "If the API Key is missing or invalid"
           }
@@ -3031,6 +3034,9 @@
         "summary": "Returns details about the active user's TeamBrain Organization members",
         "operationId": "getOrganizationMembers",
         "responses": {
+          "401": {
+            "description": "If the API Key is missing or invalid"
+          },
           "200": {
             "description": "Returns details about the TeamBrain Organization members ",
             "content": {
@@ -3050,9 +3056,6 @@
                 }
               }
             }
-          },
-          "401": {
-            "description": "If the API Key is missing or invalid"
           },
           "404": {
             "description": "If the user is not found."
@@ -3513,6 +3516,7 @@
           208,
           209,
           210,
+          211,
           301,
           302,
           303,
@@ -3546,7 +3550,9 @@
           903,
           1001,
           1002,
-          1003
+          1003,
+          1101,
+          1102
         ],
         "type": "integer",
         "format": "int32"
@@ -3761,6 +3767,13 @@
             "type": "string",
             "nullable": true
           },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
           "typeId": {
             "type": "string",
             "format": "uuid",
@@ -3841,6 +3854,13 @@
           },
           "label": {
             "type": "string",
+            "nullable": true
+          },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
             "nullable": true
           },
           "foregroundColor": {
