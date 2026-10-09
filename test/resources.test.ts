@@ -5,10 +5,11 @@ import {
   LOG_PAGE_SIZE,
   compareLogTime,
   logEntryKey,
+  normalizeAliases,
   replayThoughtIds,
   warnIfFencedCode,
 } from "../src/api/index.js";
-import type { ModificationLogDto, ThoughtDto } from "../src/api/types.js";
+import { aliasesOf, type ModificationLogDto, type ThoughtDto } from "../src/api/types.js";
 
 const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
 const THOUGHT = "bbbbbbbb-0000-4000-8000-000000000002";
@@ -151,6 +152,239 @@ describe("updating a thought: flat fields become JSON Patch", () => {
     const { api, fetchImpl } = apiWith([["PATCH /api/thoughts", () => 200]]);
     await api.thoughts.update(BRAIN, THOUGHT, {});
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("aliases", () => {
+  const patches = (calls: Array<{ method: string; body: unknown }>): unknown[] =>
+    calls.filter((c) => c.method === "PATCH").map((c) => c.body);
+
+  /**
+   * A thought whose aliases a PATCH really changes. As measured on the live
+   * API, the reads that follow a write still return the old list for a while:
+   * `staleReads` of them here.
+   */
+  const withThought = (dto: ThoughtDto, staleReads = 0) => {
+    let current = dto;
+    let old = dto;
+    let stale = 0;
+    return apiWith([
+      [
+        "/api/thoughts/",
+        () => {
+          if (stale === 0) return current;
+          stale -= 1;
+          return old;
+        },
+      ],
+      [
+        "PATCH /api/thoughts",
+        (_url, init) => {
+          const ops = JSON.parse(String(init?.body)) as Array<{
+            op: string;
+            path: string;
+            value?: string[];
+          }>;
+          for (const op of ops) {
+            if (op.path !== "/aliases") continue;
+            old = current;
+            current = { ...current, aliases: op.op === "remove" ? [] : (op.value ?? []) };
+            stale = staleReads;
+          }
+          return 200;
+        },
+      ],
+    ]);
+  };
+
+  /** A brain whose home thought looks the way `home` says, and a create that works. */
+  const creatable = (home: ThoughtDto) =>
+    apiWith([
+      ["/api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: home.id })],
+      ["/api/thoughts/", () => home],
+      ["POST /api/thoughts", () => ({ id: THOUGHT })],
+    ]);
+  const posts = (calls: Array<{ method: string; body: unknown }>): unknown[] =>
+    calls.filter((c) => c.method === "POST").map((c) => c.body);
+
+  it("go out with the create request", async () => {
+    const { api, calls } = creatable(thought(TYPE, "home", { aliases: [] }));
+    await api.thoughts.create(BRAIN, { name: "RAG", aliases: ["Retrieval-augmented generation"] });
+    expect(posts(calls)).toEqual([
+      expect.objectContaining({ name: "RAG", aliases: ["Retrieval-augmented generation"] }),
+    ]);
+  });
+
+  it("a build without aliases is asked for none: the create is refused first", async () => {
+    // What such a build does with the field is unknown. If it ignored it, the
+    // thought would exist and its aliases would be reported as written.
+    const { api, calls } = creatable(thought(TYPE, "home"));
+    await expect(
+      api.thoughts.create(BRAIN, { name: "RAG", aliases: ["Retrieval"] }),
+    ).rejects.toMatchObject({ kind: "bad_request", message: expect.stringMatching(/15\.0\.621/) });
+    expect(posts(calls)).toEqual([]);
+
+    // Without aliases the same build creates thoughts as before.
+    await api.thoughts.create(BRAIN, { name: "plain" });
+    expect(posts(calls)).toHaveLength(1);
+  });
+
+  it("the build is asked once; a yes is remembered", async () => {
+    const { api, calls } = creatable(thought(TYPE, "home", { aliases: [] }));
+    await api.thoughts.create(BRAIN, { name: "one", aliases: ["a"] });
+    await api.thoughts.create(BRAIN, { name: "two", aliases: ["b"] });
+    expect(calls.filter((c) => c.url.pathname.includes("/api/brains/"))).toHaveLength(1);
+    expect(posts(calls)).toHaveLength(2);
+  });
+
+  it("when the build cannot be asked, the create goes ahead", async () => {
+    const { api, calls } = apiWith([["POST /api/thoughts", () => ({ id: THOUGHT })]]);
+    await api.thoughts.create(BRAIN, { name: "RAG", aliases: ["Retrieval"] });
+    expect(posts(calls)).toEqual([expect.objectContaining({ aliases: ["Retrieval"] })]);
+  });
+
+  it("stay out of the create request when there are none", async () => {
+    // A build without aliases should never be sent the field unasked.
+    const { api, calls } = apiWith([["POST /api/thoughts", () => ({ id: THOUGHT })]]);
+    await api.thoughts.create(BRAIN, { name: "plain" });
+    await api.thoughts.create(BRAIN, { name: "plain", aliases: [] });
+    for (const call of calls) expect(call.body).not.toHaveProperty("aliases");
+  });
+
+  it("a list replaces the whole of /aliases", async () => {
+    const { api, calls } = apiWith([["PATCH /api/thoughts", () => 200]]);
+    await api.thoughts.update(BRAIN, THOUGHT, { name: "RAG", aliases: ["a", "b"] });
+    expect(calls[0]!.body).toEqual([
+      { op: "replace", path: "/name", value: "RAG" },
+      { op: "replace", path: "/aliases", value: ["a", "b"] },
+    ]);
+  });
+
+  it("null and an empty list both clear with remove", async () => {
+    const { api, calls } = apiWith([["PATCH /api/thoughts", () => 200]]);
+    await api.thoughts.update(BRAIN, THOUGHT, { aliases: null });
+    await api.thoughts.update(BRAIN, THOUGHT, { aliases: [] });
+    expect(patches(calls)).toEqual([
+      [{ op: "remove", path: "/aliases" }],
+      [{ op: "remove", path: "/aliases" }],
+    ]);
+  });
+
+  it("adding keeps what the thought already has", async () => {
+    const { api, calls } = withThought(thought(THOUGHT, "RAG", { aliases: ["Retrieval"] }));
+    const outcome = await api.thoughts.changeAliases(BRAIN, THOUGHT, { add: [" R.A.G. "] });
+    expect(patches(calls)).toEqual([
+      [{ op: "replace", path: "/aliases", value: ["Retrieval", "R.A.G."] }],
+    ]);
+    expect(outcome).toEqual({
+      aliases: ["Retrieval", "R.A.G."],
+      added: ["R.A.G."],
+      removed: [],
+      readBack: true,
+    });
+  });
+
+  it("an alias already there, in any case, is not written again", async () => {
+    const { api, calls } = withThought(thought(THOUGHT, "RAG", { aliases: ["Retrieval"] }));
+    const outcome = await api.thoughts.changeAliases(BRAIN, THOUGHT, {
+      add: ["retrieval", "RETRIEVAL", "  "],
+    });
+    expect(patches(calls)).toEqual([]);
+    expect(outcome).toEqual({ aliases: ["Retrieval"], added: [], removed: [], readBack: true });
+  });
+
+  it("an alias equal to the name, in any case, is not written: the API drops it", async () => {
+    const { api, calls } = withThought(thought(THOUGHT, "RAG", { aliases: [] }));
+    const outcome = await api.thoughts.changeAliases(BRAIN, THOUGHT, { add: [" RAG ", "rag"] });
+    expect(patches(calls)).toEqual([]);
+    expect(outcome.added).toEqual([]);
+  });
+
+  it("returns only once the written list reads back", async () => {
+    // Measured: a read straight after the write returns the old list, and a
+    // second edit built on it left only the second alias.
+    const { api, calls } = withThought(thought(THOUGHT, "RAG", { aliases: [] }), 3);
+    const first = await api.thoughts.changeAliases(BRAIN, THOUGHT, { add: ["one"] });
+    expect(first.readBack).toBe(true);
+    // One read to learn the list, three stale ones, and the one that agrees.
+    expect(calls.filter((c) => c.method === "GET")).toHaveLength(5);
+
+    const second = await api.thoughts.changeAliases(BRAIN, THOUGHT, { add: ["two"] });
+    expect(second.aliases).toEqual(["one", "two"]);
+    expect(patches(calls).at(-1)).toEqual([
+      { op: "replace", path: "/aliases", value: ["one", "two"] },
+    ]);
+  });
+
+  it("says so when the written list never reads back, instead of waiting forever", async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = withThought(thought(THOUGHT, "RAG", { aliases: [] }), Infinity);
+      const pending = api.thoughts.changeAliases(BRAIN, THOUGHT, { add: ["one"] });
+      await vi.advanceTimersByTimeAsync(5000);
+      await expect(pending).resolves.toMatchObject({ added: ["one"], readBack: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a list that would pass a hundred is refused before anything is written", async () => {
+    // The API keeps the first hundred and drops the rest without a word.
+    const full = Array.from({ length: 99 }, (_, i) => `alias ${i}`);
+    const { api, calls } = withThought(thought(THOUGHT, "RAG", { aliases: full }));
+    await expect(
+      api.thoughts.changeAliases(BRAIN, THOUGHT, { add: ["one more", "and another"] }),
+    ).rejects.toMatchObject({ kind: "bad_request", message: expect.stringMatching(/101/) });
+    await expect(
+      api.thoughts.changeAliases(BRAIN, THOUGHT, { add: ["one more"] }),
+    ).resolves.toMatchObject({ added: ["one more"] });
+    expect(patches(calls)).toHaveLength(1);
+  });
+
+  it("removal ignores case, and runs before addition so one call can swap", async () => {
+    const { api, calls } = withThought(
+      thought(THOUGHT, "RAG", { aliases: ["Retreival", "R.A.G."] }),
+    );
+    const outcome = await api.thoughts.changeAliases(BRAIN, THOUGHT, {
+      remove: ["retreival", "never there"],
+      add: ["Retrieval"],
+    });
+    expect(patches(calls)).toEqual([
+      [{ op: "replace", path: "/aliases", value: ["R.A.G.", "Retrieval"] }],
+    ]);
+    expect(outcome.removed).toEqual(["Retreival"]);
+    expect(outcome.added).toEqual(["Retrieval"]);
+  });
+
+  it("removing the last alias clears the list", async () => {
+    const { api, calls } = withThought(thought(THOUGHT, "RAG", { aliases: ["Retrieval"] }));
+    await api.thoughts.changeAliases(BRAIN, THOUGHT, { remove: ["Retrieval"] });
+    expect(patches(calls)).toEqual([[{ op: "remove", path: "/aliases" }]]);
+  });
+
+  it("a thought from a build without aliases reads as having none", async () => {
+    // Before 15.0.621 the field is absent altogether; `thought()` omits it too.
+    const old = thought(THOUGHT, "RAG");
+    expect(old).not.toHaveProperty("aliases");
+    expect(aliasesOf(old)).toEqual([]);
+    expect(aliasesOf({ aliases: null })).toEqual([]);
+
+    const { api, calls } = withThought(old);
+    const outcome = await api.thoughts.changeAliases(BRAIN, THOUGHT, { remove: ["x"] });
+    expect(outcome).toEqual({ aliases: [], added: [], removed: [], readBack: true });
+
+    // Adding is another matter: there is nowhere to put it.
+    await expect(
+      api.thoughts.changeAliases(BRAIN, THOUGHT, { add: ["Retrieval"] }),
+    ).rejects.toMatchObject({ kind: "bad_request", message: expect.stringMatching(/15\.0\.621/) });
+    expect(patches(calls)).toEqual([]);
+  });
+
+  it("normalizeAliases trims, drops blanks and keeps the first of two spellings", () => {
+    expect(normalizeAliases([" RAG ", "rag", "", "   ", "Retrieval", "RETRIEVAL"])).toEqual([
+      "RAG",
+      "Retrieval",
+    ]);
   });
 });
 

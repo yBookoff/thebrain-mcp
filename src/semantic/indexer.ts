@@ -19,6 +19,7 @@ import {
   ModType,
   REEMBED_MOD_TYPES,
   ThoughtKind,
+  aliasesOf,
   type ModificationLogDto,
 } from "../api/types.js";
 import { replayThoughtIds } from "../api/resources/thoughts.js";
@@ -344,6 +345,7 @@ export class SemanticIndexer {
         id: graph.thought.id,
         name: graph.thought.name ?? "",
         kind: graph.thought.kind,
+        aliases: aliasesOf(graph.thought),
         label: graph.thought.label,
         typeName: graph.type?.name ?? null,
         tagNames: graph.tags.map((t) => t.name ?? "").filter((n) => n.length > 0),
@@ -368,6 +370,8 @@ export class SemanticIndexer {
  * Measured against the live API:
  *   { modType: 801, sourceType: 4, sourceId: <attachment>,
  *     extraAId: <thought>, extraAType: 2 }
+ *   { modType: 211, sourceType: 2, sourceId: <thought>, extraAType: -1 }
+ * So an alias change is an ordinary thought event, unlike a note.
  */
 export function logThoughtId(log: ModificationLogDto): string | null {
   if (log.sourceType === EntityType.Thought) return log.sourceId;

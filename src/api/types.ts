@@ -141,6 +141,7 @@ export const ModType = {
   Deleted: 102,
   NameChanged: 103,
   TypeSet: 203,
+  AliasesChanged: 211,
   Forgotten: 301,
   Remembered: 302,
   NoteCreated: 801,
@@ -151,6 +152,7 @@ export const ModType = {
 /** Codes after which a thought must be re-embedded in the semantic index. */
 export const REEMBED_MOD_TYPES: ReadonlySet<number> = new Set([
   ModType.NameChanged,
+  ModType.AliasesChanged,
   ModType.NoteCreated,
   ModType.NoteDeleted,
   ModType.NoteChanged,
@@ -217,6 +219,12 @@ export interface ThoughtDto {
   acType: number;
   kind: number;
   label: string | null;
+  /**
+   * Alternate names, matched by TheBrain's own search. `[]` when there are
+   * none. Builds before 15.0.621 have no aliases and omit the field, so read
+   * it through `aliasesOf()`.
+   */
+  aliases?: string[] | null;
   foregroundColor: string | null;
   backgroundColor: string | null;
 }
@@ -329,6 +337,11 @@ export interface StatisticsDto {
   assignedIcons: number;
   internalFilesSize: number;
   iconsFilesSize: number;
+}
+
+/** A thought's aliases, whether the API sent a list, `null` or no field at all. */
+export function aliasesOf(thought: Pick<ThoughtDto, "aliases">): string[] {
+  return thought.aliases ?? [];
 }
 
 /** The "no note" sentinel in `NotesDto.modificationDateTime`. */

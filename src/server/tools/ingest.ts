@@ -6,10 +6,11 @@ import { z } from "zod";
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { warnIfFencedCode } from "../../api/index.js";
+import { MAX_ALIASES, warnIfFencedCode } from "../../api/index.js";
 import { IngestValidationError, ingest } from "../../operations/ingest.js";
 import type { ServerContext } from "../context.js";
 import { bullet, fail, guard, join, ok, section, table } from "../respond.js";
+import { ALIAS_COST } from "./write.js";
 
 const relation = z
   .enum(["child", "parent", "jump", "sibling"])
@@ -20,7 +21,7 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
     "brain_ingest",
     {
       description:
-        "Writes a whole structure of thoughts, links, notes and tags in a single call. " +
+        "Writes a whole structure of thoughts, links, notes, tags and aliases in a single call. " +
         "Call it once you have decomposed some material (an article, a document, a " +
         "discussion) into several connected thoughts — creating them one by one at that " +
         "volume is slow and breaks halfway.\n" +
@@ -53,6 +54,14 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
               typeId: z.string().optional().describe("Type from brain_list_types_and_tags."),
               tagIds: z.array(z.string()).optional().describe("Tags by identifier."),
               label: z.string().optional(),
+              aliases: z
+                .array(z.string())
+                .max(MAX_ALIASES)
+                .optional()
+                .describe(
+                  "Alternate names. A thought that already existed keeps its own and " +
+                    `gains these. ${ALIAS_COST}`,
+                ),
             }),
           )
           .min(1)
@@ -119,6 +128,9 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
               `links created: ${outcome.linksCreated}`,
               `notes written: ${outcome.notesWritten}`,
               `tags attached: ${outcome.tagsAttached}`,
+              ...(thoughts.some((t) => t.aliases !== undefined)
+                ? [`thoughts given aliases: ${outcome.aliasesWritten}`]
+                : []),
             ]),
           ),
           outcome.linksReused.length === 0

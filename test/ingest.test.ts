@@ -13,18 +13,34 @@ const ROOT = "bbbbbbbb-0000-4000-8000-000000000002";
 
 /** In-memory fake brain: keeps what was created and can list children. */
 function fakeBrain(
-  existing: Array<{ id: string; name: string; parent?: string }> = [],
+  existing: Array<{ id: string; name: string; parent?: string; aliases?: string[] }> = [],
 ) {
   let counter = 0;
   const thoughts = new Map(
-    existing.map((e) => [e.id, { ...e, note: "", tags: [] as string[] }]),
+    existing.map((e) => [
+      e.id,
+      { ...e, note: "", tags: [] as string[], aliases: e.aliases ?? [] },
+    ]),
   );
+  /** Whole-list alias writes after creation: the only kind the API offers. */
+  const aliasWrites: Array<{ id: string; aliases: string[] }> = [];
+  /**
+   * Thoughts created here whose aliases do not read back yet. On the live API
+   * that happens now and then for a moment; here, to every new thought until
+   * `settle()`, which is the case the code has to survive.
+   */
+  const unsettled = new Set<string>();
+  /** Flip `aliases` off to stand in for a build from before 15.0.621. */
+  const build = { aliases: true };
   const links: Array<{ a: string; b: string; relation: number; name?: string }> = [];
   const failOn = new Set<string>();
 
   const api = {
     thoughts: {
-      async create(_b: string, input: { name: string; sourceThoughtId?: string }) {
+      async create(
+        _b: string,
+        input: { name: string; sourceThoughtId?: string; aliases?: readonly string[] },
+      ) {
         if (failOn.has(input.name)) throw new Error("server refused");
         counter += 1;
         const id = `new-${counter}`;
@@ -34,7 +50,9 @@ function fakeBrain(
           ...(input.sourceThoughtId !== undefined ? { parent: input.sourceThoughtId } : {}),
           note: "",
           tags: [],
+          aliases: [...(input.aliases ?? [])],
         });
+        unsettled.add(id);
         // The real API creates a parent link alongside the thought — without
         // this the fake diverges from reality on link deduplication.
         if (input.sourceThoughtId !== undefined) {
@@ -49,6 +67,29 @@ function fakeBrain(
             .filter((t) => t.parent === id)
             .map((t) => ({ id: t.id, name: t.name })),
         };
+      },
+      async supportsAliases() {
+        return build.aliases;
+      },
+      // As the real method: reads the list, adds what is new ignoring case,
+      // and writes only when something was.
+      async changeAliases(_b: string, id: string, changes: { add?: readonly string[] }) {
+        const t = thoughts.get(id)!;
+        if (failOn.has(`aliases of ${t.name}`)) throw new Error("server refused");
+        // The read comes back empty for an unsettled thought, and the write
+        // that follows replaces whatever the thought really had.
+        if (unsettled.delete(id)) t.aliases = [];
+        const has = new Set(t.aliases.map((a) => a.toLowerCase()));
+        const added = (changes.add ?? []).filter((a) => {
+          if (has.has(a.toLowerCase())) return false;
+          has.add(a.toLowerCase());
+          return true;
+        });
+        if (added.length > 0) {
+          t.aliases = [...t.aliases, ...added];
+          aliasWrites.push({ id, aliases: t.aliases });
+        }
+        return { aliases: t.aliases, added, removed: [], readBack: true };
       },
     },
     notes: {
@@ -85,7 +126,16 @@ function fakeBrain(
       },
     },
   };
-  return { api: api as unknown as TheBrainApi, thoughts, links, failOn };
+  const settle = (): void => unsettled.clear();
+  return {
+    api: api as unknown as TheBrainApi,
+    thoughts,
+    links,
+    failOn,
+    aliasWrites,
+    build,
+    settle,
+  };
 }
 
 describe("plan validation before any write", () => {
@@ -262,6 +312,110 @@ describe("writing a batch", () => {
     expect(links).toHaveLength(afterFirst);
     expect(second.linksCreated).toBe(0);
     expect(second.linksReused).toHaveLength(1);
+  });
+});
+
+describe("aliases in a batch", () => {
+  const RAG = "cccccccc-0000-4000-8000-000000000003";
+  const plan: IngestPlan = {
+    thoughts: [
+      { tempId: "rag", name: "RAG", parent: ROOT, aliases: ["Retrieval-augmented generation"] },
+      { tempId: "plain", name: "No aliases", parent: ROOT },
+    ],
+  };
+
+  it("a new thought is created with its aliases, in the same request", async () => {
+    const { api, thoughts, aliasWrites } = fakeBrain([{ id: ROOT, name: "root" }]);
+    const outcome = await ingest(api, BRAIN, plan);
+
+    const id = outcome.created.find((c) => c.tempId === "rag")!.thoughtId;
+    expect(thoughts.get(id)?.aliases).toEqual(["Retrieval-augmented generation"]);
+    expect(aliasWrites).toEqual([]);
+    expect(outcome.aliasesWritten).toBe(1);
+  });
+
+  it("a thought that already existed keeps its aliases and gains the plan's", async () => {
+    const { api, thoughts } = fakeBrain([
+      { id: ROOT, name: "root" },
+      { id: RAG, name: "RAG", parent: ROOT, aliases: ["R.A.G."] },
+    ]);
+    const outcome = await ingest(api, BRAIN, plan);
+
+    expect(outcome.reused.map((r) => r.thoughtId)).toEqual([RAG]);
+    expect(thoughts.get(RAG)?.aliases).toEqual(["R.A.G.", "Retrieval-augmented generation"]);
+    expect(outcome.aliasesWritten).toBe(1);
+  });
+
+  it("a repeat run writes no alias twice", async () => {
+    const { api, aliasWrites, settle } = fakeBrain([{ id: ROOT, name: "root" }]);
+    await ingest(api, BRAIN, plan);
+    settle();
+    const second = await ingest(api, BRAIN, plan);
+
+    expect(second.reused).toHaveLength(2);
+    expect(second.aliasesWritten).toBe(0);
+    expect(aliasWrites).toEqual([]);
+  });
+
+  it("two plan items for one thought add their aliases in a single write", async () => {
+    // The API replaces the whole list, so two writes racing each other would
+    // leave whichever landed last.
+    const { api, thoughts, aliasWrites } = fakeBrain([
+      { id: ROOT, name: "root" },
+      { id: RAG, name: "RAG", parent: ROOT },
+    ]);
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [
+        { tempId: "x", name: "RAG", parent: ROOT, aliases: ["one"] },
+        { tempId: "y", name: "RAG", parent: ROOT, aliases: ["two", " "] },
+      ],
+    });
+
+    expect(aliasWrites).toHaveLength(1);
+    expect(thoughts.get(RAG)?.aliases).toEqual(["one", "two"]);
+    expect(outcome.aliasesWritten).toBe(1);
+  });
+
+  it("a thought created and then repeated in the same batch keeps both sets of aliases", async () => {
+    // The new thought does not read back with its aliases yet. Adding the
+    // second item's to what the read shows would leave "two" alone.
+    const { api, thoughts } = fakeBrain([{ id: ROOT, name: "root" }]);
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [
+        { tempId: "x", name: "RAG", parent: ROOT, aliases: ["one"] },
+        { tempId: "y", name: "RAG", parent: ROOT, aliases: ["two"] },
+      ],
+    });
+
+    const id = outcome.created[0]!.thoughtId;
+    expect(outcome.reused.map((r) => r.thoughtId)).toEqual([id]);
+    expect([...thoughts.get(id)!.aliases].sort()).toEqual(["one", "two"]);
+    expect(outcome.aliasesWritten).toBe(1);
+  });
+
+  it("a build without aliases rejects the plan before any write", async () => {
+    const { api, thoughts, build } = fakeBrain([{ id: ROOT, name: "root" }]);
+    build.aliases = false;
+    await expect(ingest(api, BRAIN, plan)).rejects.toThrowError(IngestValidationError);
+    await expect(ingest(api, BRAIN, plan)).rejects.toThrowError(/15\.0\.621/);
+    expect(thoughts.size).toBe(1);
+
+    // The same plan without aliases is none of that build's business.
+    const plain = { thoughts: plan.thoughts.map(({ aliases: _aliases, ...t }) => t) };
+    expect((await ingest(api, BRAIN, plain)).created).toHaveLength(2);
+  });
+
+  it("a failed alias write shows in the report and stops nothing else", async () => {
+    const { api, failOn } = fakeBrain([
+      { id: ROOT, name: "root" },
+      { id: RAG, name: "RAG", parent: ROOT },
+    ]);
+    failOn.add("aliases of RAG");
+    const outcome = await ingest(api, BRAIN, plan);
+
+    expect(outcome.created).toHaveLength(1);
+    expect(outcome.aliasesWritten).toBe(0);
+    expect(outcome.failures).toEqual([{ what: 'aliases for "RAG"', reason: "server refused" }]);
   });
 });
 

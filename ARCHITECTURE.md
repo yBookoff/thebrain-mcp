@@ -99,7 +99,7 @@ Five modules, each with one job:
 | Module | Job |
 |---|---|
 | `store.ts` | `node:sqlite`, vectors as BLOBs, brute-force cosine. Lazy in-memory cache. Also holds index metadata (brain, model, dimensions, sync watermark) |
-| `document.ts` | Builds the text that gets embedded: name, label, type, tags, first 1500 characters of the note. Hashes it so unchanged thoughts are skipped |
+| `document.ts` | Builds the text that gets embedded: name, aliases, label, type, tags, first 1500 characters of the note. Hashes it so unchanged thoughts are skipped |
 | `embedder.ts` | Dynamic import of the optional embeddings package; `EmbedderUnavailableError` carries install instructions |
 | `indexer.ts` | Full rebuild and incremental sync |
 | `search.ts` | Vector search, with lexical fan-out as the degraded mode |
@@ -167,9 +167,8 @@ So the agent thinks, and the server's job is to make that thinking *informed*
 
 ## 4. Tool design
 
-Seventeen tools. Measured against the published build: the descriptions total
-about 1050 tokens, and the full `tools/list` payload including schemas about
-3900.
+Seventeen tools. Measured on the built server: the descriptions total about 1050
+tokens, and the full `tools/list` payload including schemas about 4200.
 
 **One tool per intent, not per endpoint.** `brain_get_thought` returns the
 thought, its graph neighbourhood, and its note — three endpoints, one call,
@@ -317,6 +316,8 @@ Measured against a live API by polling until the result appeared:
 |---|---|
 | `create` → `get(id)` | instant |
 | `rename` → `get(id)` | ~0.1 s |
+| `set aliases` → `get(id)` | ~0.1 s, 0.2 s at the most |
+| `create` with aliases → `get(id)` shows them | usually instant, up to 0.15 s |
 | `set note` → `get note` | ~0.2 s |
 | `attachTag` → `graph.tags` | ~0.1–0.5 s |
 | **`create` → `findByName`** | **~5.6 s** |
@@ -349,6 +350,44 @@ the target thought.
 It is the target's `kind=4` that flips the behaviour.
 
 `statistics.links` does not count tags — links with `meaning=5` are excluded.
+
+### Aliases: a list that only replaces
+
+TheBrain 15.0.621 gave thoughts aliases: alternate names its own search
+matches. The API sets them as a whole list and refuses element paths, so
+"add this one" is a read followed by a write. That shaped three decisions.
+
+**The tools add and remove; they never replace.** `brain_update_thought` takes
+`addAliases` and `removeAliases`, and `brain_ingest` adds a plan's aliases to
+the ones an existing thought has. A flat `aliases` field meaning "the whole
+list" would mirror the API, and an agent that had not read the thought first
+would wipe what was there, with a success message. The read-modify-write lives
+in `thoughts.changeAliases()`.
+
+**That method waits for its write to read back.** After a `PATCH` a read
+usually still returns the old list: measured over 82 writes, the new one showed
+up 50–100 ms later, 0.2 s at the most. Two edits in a row built on that stale
+read left only the second alias. `changeAliases` polls until the list it wrote
+is the list it reads, and reports it when two seconds were not enough. It also
+refuses a list that would pass 100: the API keeps the first hundred of a longer
+one and says nothing.
+
+Creation has the same delay, only rarely: of 60 thoughts created with aliases,
+3 read back without them for a moment. One try had said "at once", and the
+first version of the contract test asserted it. `brain_ingest` meets this when
+a plan names the same new thought twice: the second item's aliases are added
+to the first's, and the first's are taken from the plan, not from the read.
+
+**The cost is on the argument, not in a consent dialog.** Per the spec, saving
+the first alias in a brain makes it require TheBrain 15.0.621 or later on every
+device. That is the user's call, and the server cannot tell a first alias from
+a tenth: there is no way to ask whether a brain has any. So every argument that
+can write one says what it costs, and the skill tells the agent to ask before
+the first. A test checks that the sentence is on all three.
+
+Builds before 15.0.621 send thoughts without the field; reads take that as no
+aliases, and writes are refused before anything is sent, because what such a
+build does with the field could not be measured.
 
 ### Enumerating all thoughts
 
@@ -565,6 +604,12 @@ note, and never on the ones that do not.
 > invalidates existing indexes instead of leaving them ranked against vectors
 > built to older rules.
 
+The format went to 3 when aliases joined the document, on the line after the
+name and with no prefix: they are other titles for the same thought. An index
+built before that reports itself incompatible and wants a rebuild. No retrieval
+benchmark has been run for aliases; that they belong in the vector is an
+argument, not a measurement.
+
 Incremental sync takes its watermark at the moment the run starts. A small
 overlap is harmless: unchanged documents are skipped by content hash. It reads
 every change since the watermark, page by page (§7, *Reading the whole log*):
@@ -572,7 +617,9 @@ one request would keep only the newest changes and drop the oldest, while the
 watermark moved past them regardless. Mapping a
 log entry to its thought goes through `logThoughtId()`, which reads `sourceId`
 for ordinary events and `extraAId` for note events — otherwise an edit that
-touches only a note leaves the thought unmarked and its vector stale.
+touches only a note leaves the thought unmarked and its vector stale. A rename,
+an alias change and a note event re-embed the thought; an alias change is an
+ordinary event, keyed by the thought.
 
 Measured on a live 45-thought brain: first index 1.5 s, second run 0.1 s
 (everything skipped by hash), empty sync 0.1 s.

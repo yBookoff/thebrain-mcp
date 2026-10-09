@@ -11,7 +11,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { compareLogTime } from "../../api/log.js";
-import { ThoughtKind, type ModificationLogDto } from "../../api/types.js";
+import { ThoughtKind, aliasesOf, type ModificationLogDto } from "../../api/types.js";
 import { describeChange, isSettingNoise, subjectIds } from "../../operations/changes.js";
 import { traverse } from "../../operations/traverse.js";
 import { mapWithConcurrency } from "../../semantic/indexer.js";
@@ -76,7 +76,7 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
     "brain_get_thought",
     {
       description:
-        "A thought in full: note, parents, children, jumps, tags, type and attachments in one call. " +
+        "A thought in full: note, aliases, parents, children, jumps, tags, type and attachments in one call. " +
         "The main way to understand a thought's context. Call it when you need to know " +
         "what a thought is about and how it connects, before changing or extending it.",
       inputSchema: {
@@ -102,6 +102,8 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       return ok(
         join([
           `# ${graph.thought.name ?? "(unnamed)"}\n${graph.thought.id}`,
+          // One per line: an alias may hold a comma, and the list gets edited by value.
+          section("Aliases", bullet(aliasesOf(graph.thought))),
           graph.type ? section("Type", graph.type.name ?? "") : null,
           graph.tags.length > 0
             ? section("Tags", graph.tags.map((t) => t.name ?? "").join(", "))

@@ -14,7 +14,7 @@
  *     continue rather than start over.
  */
 
-import type { TheBrainApi } from "../api/index.js";
+import { ALIASES_UNSUPPORTED, normalizeAliases, type TheBrainApi } from "../api/index.js";
 import { Relation } from "../api/types.js";
 import { mapWithConcurrency } from "../semantic/indexer.js";
 
@@ -35,6 +35,11 @@ export interface IngestThought {
   typeId?: string | undefined;
   tagIds?: readonly string[] | undefined;
   label?: string | undefined;
+  /**
+   * Alternate names. A new thought is created with them; one that already
+   * existed keeps its own and gains these.
+   */
+  aliases?: readonly string[] | undefined;
   /** A `tempId` from this batch, or the real UUID of an existing thought. */
   parent?: string | undefined;
   relation?: RelationName | undefined;
@@ -69,6 +74,8 @@ export interface IngestOutcome {
   linksReused: Array<{ from: string; to: string; note: string }>;
   notesWritten: number;
   tagsAttached: number;
+  /** Thoughts whose alias list was written, at creation or by adding to it. */
+  aliasesWritten: number;
   /** What failed. Everything else has already been written. */
   failures: Array<{ what: string; reason: string }>;
 }
@@ -164,6 +171,15 @@ export async function ingest(
   const levels = planLevels(plan);
   const dedupe = plan.deduplicate !== false;
 
+  // Asked before the first write, like the rest of validation: a build without
+  // aliases would otherwise take the thoughts and lose their aliases.
+  if (
+    plan.thoughts.some((t) => planAliases(t).length > 0) &&
+    !(await api.thoughts.supportsAliases(brainId))
+  ) {
+    throw new IngestValidationError(ALIASES_UNSUPPORTED);
+  }
+
   const outcome: IngestOutcome = {
     created: [],
     reused: [],
@@ -171,8 +187,14 @@ export async function ingest(
     linksReused: [],
     notesWritten: 0,
     tagsAttached: 0,
+    aliasesWritten: 0,
     failures: [],
   };
+
+  /** Thoughts given aliases. A set: one thought can be reached by two plan items. */
+  const aliased = new Set<string>();
+  /** What each thought created here was created with. */
+  const bornWith = new Map<string, string[]>();
 
   /** tempId or real UUID -> real UUID. */
   const resolved = new Map<string, string>();
@@ -228,6 +250,7 @@ export async function ingest(
           }
         }
 
+        const aliases = planAliases(t);
         const creation = api.thoughts.create(brainId, {
           name: t.name,
           ...(parentId !== null ? { sourceThoughtId: parentId } : {}),
@@ -236,12 +259,17 @@ export async function ingest(
             : {}),
           ...(t.typeId !== undefined ? { typeId: t.typeId } : {}),
           ...(t.label !== undefined ? { label: t.label } : {}),
+          ...(aliases.length > 0 ? { aliases } : {}),
         });
         if (dedupe) inFlight.set(key, creation);
 
         const thoughtId = await creation;
         resolved.set(t.tempId, thoughtId);
         outcome.created.push({ tempId: t.tempId, thoughtId, name: t.name });
+        if (aliases.length > 0) {
+          aliased.add(thoughtId);
+          bornWith.set(thoughtId, aliases);
+        }
 
         if (parentId !== null) {
           (await childrenOf(parentId)).set(t.name.trim(), thoughtId);
@@ -291,6 +319,37 @@ export async function ingest(
     }
   });
 
+  // A created thought got its aliases with the create request. One that already
+  // existed gains the plan's on top of its own. Grouped by thought: two plan
+  // items can resolve to the same one, and the API only replaces whole lists.
+  //
+  // A thought created a moment ago can still read back without its aliases
+  // (measured: 3 times in 60), and adding to that empty list would erase them.
+  // So what it was born with goes into the list again rather than being trusted
+  // to the read.
+  const reusedTempIds = new Set(outcome.reused.map((r) => r.tempId));
+  const aliasJobs = new Map<string, { name: string; add: string[] }>();
+  for (const t of plan.thoughts) {
+    const id = resolved.get(t.tempId);
+    const aliases = planAliases(t);
+    if (id === undefined || !reusedTempIds.has(t.tempId) || aliases.length === 0) continue;
+    const job = aliasJobs.get(id) ?? { name: t.name, add: [...(bornWith.get(id) ?? [])] };
+    job.add.push(...aliases);
+    aliasJobs.set(id, job);
+  }
+  await mapWithConcurrency([...aliasJobs], 6, async ([id, job]) => {
+    try {
+      const { added } = await api.thoughts.changeAliases(brainId, id, { add: job.add });
+      if (added.length > 0) aliased.add(id);
+    } catch (error) {
+      outcome.failures.push({
+        what: `aliases for "${job.name}"`,
+        reason: describe(error),
+      });
+    }
+  });
+  outcome.aliasesWritten = aliased.size;
+
   await mapWithConcurrency(plan.links ?? [], 6, async (link) => {
     const from = resolve(link.from);
     const to = resolve(link.to);
@@ -338,6 +397,11 @@ export async function ingest(
   });
 
   return outcome;
+}
+
+/** The aliases a plan item asks for, blanks and repeats dropped. */
+function planAliases(t: IngestThought): string[] {
+  return normalizeAliases(t.aliases ?? []);
 }
 
 function describe(error: unknown): string {

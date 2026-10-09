@@ -93,7 +93,7 @@ exactly as Settings shows it (`http://localhost:11522/api/`) is fine.
 | Tool | What it does |
 |---|---|
 | `brain_list` | Brains, which one is open, whether the index is ready |
-| `brain_get_thought` | A thought, its graph and its note in one call |
+| `brain_get_thought` | A thought, its aliases, its graph and its note in one call |
 | `brain_search` | Search by meaning |
 | `brain_traverse` | Walk the graph several hops out |
 | `brain_list_types_and_tags` | The brain's vocabulary |
@@ -104,8 +104,8 @@ exactly as Settings shows it (`http://localhost:11522/api/`) is fine.
 
 | Tool | What it does |
 |---|---|
-| `brain_create_thought` | A thought together with its note, type and tags |
-| `brain_update_thought` | Name, label, type, colours |
+| `brain_create_thought` | A thought together with its note, type, tags and aliases |
+| `brain_update_thought` | Name, label, type, colours; add and remove aliases |
 | `brain_set_note` / `brain_append_note` | Replace or extend a note |
 | `brain_link` | Connect two thoughts, with a label |
 | `brain_tag` | Attach and detach tags |

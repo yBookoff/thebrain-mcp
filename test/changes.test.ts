@@ -43,10 +43,12 @@ const noteChanged = entry({
 const urlAttached = { ...noteChanged, sourceId: "att-1", modType: 101 };
 const wallpaper = entry({ sourceId: "wall", sourceType: 4, extraAId: "brain", extraAType: 1 });
 const viewZoomed = entry({ sourceId: "setting", sourceType: 5, modType: 601 });
+const aliasesChanged = entry({ sourceId: "t1", sourceType: 2, modType: 211 });
 
 describe("subjectIds", () => {
   it("a thought event is about its source", () => {
     expect(subjectIds(thoughtCreated)).toEqual(["t1"]);
+    expect(subjectIds(aliasesChanged)).toEqual(["t1"]);
   });
 
   it("a link event is about both ends, not the unnamed link", () => {
@@ -78,6 +80,7 @@ describe("describeChange", () => {
 
   it("a code that already says what it is about is left alone", () => {
     expect(describeChange(noteChanged)).toBe("note changed");
+    expect(describeChange(aliasesChanged)).toBe("aliases changed");
   });
 });
 

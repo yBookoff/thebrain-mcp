@@ -13,6 +13,7 @@ import {
   section,
   table,
 } from "../src/server/respond.js";
+import { describeAliasOutcome } from "../src/server/tools/write.js";
 
 describe("response shape", () => {
   it("success is not flagged as an error", () => {
@@ -112,6 +113,35 @@ describe("formatting", () => {
 
   it("join drops empty parts", () => {
     expect(join(["first", null, "second"])).toBe("first\n\nsecond");
+  });
+});
+
+describe("reporting an alias edit", () => {
+  it("says what was added and removed, and what the list is now", () => {
+    expect(
+      describeAliasOutcome({
+        aliases: ["b", "c"],
+        added: ["c"],
+        removed: ["a"],
+        readBack: true,
+      }),
+    ).toEqual(['aliases added: ["c"]', 'aliases removed: ["a"]', 'aliases now: ["b","c"]']);
+  });
+
+  it("an edit with nothing to do says so instead of claiming a change", () => {
+    const lines = describeAliasOutcome({ aliases: ["b"], added: [], removed: [], readBack: true });
+    expect(lines[0]).toMatch(/unchanged/);
+    expect(lines.at(-1)).toBe('aliases now: ["b"]');
+  });
+
+  it("a write that does not read back yet warns against editing again", () => {
+    const lines = describeAliasOutcome({
+      aliases: ["b"],
+      added: ["b"],
+      removed: [],
+      readBack: false,
+    });
+    expect(lines.at(-1)).toMatch(/do not read back yet.*brain_get_thought/);
   });
 });
 

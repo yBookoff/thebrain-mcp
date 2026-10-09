@@ -3,7 +3,7 @@
  *
  * A thought's name is the strongest signal but not enough on its own: "Unity"
  * and "engine for 3D games" share no words, and that is exactly where the
- * model fails. Type, tags and the start of the note add context.
+ * model fails. Aliases, type, tags and the start of the note add context.
  *
  * Notes are never truncated when read by tools, but only their beginning is
  * embedded: the model has a limited window anyway, and the tail of a long note
@@ -16,6 +16,7 @@ export interface IndexableThought {
   id: string;
   name: string;
   kind: number;
+  aliases?: readonly string[];
   label?: string | null;
   typeName?: string | null;
   tagNames?: readonly string[];
@@ -35,8 +36,11 @@ export const NOTE_EXCERPT_LIMIT = 1500;
  * Bumped to 2 when notes actually started reaching the embedder: until then a
  * bug in note detection meant every vector was built from name, type and tags
  * alone, and the document hash never changed, so no rebuild would repair it.
+ *
+ * Bumped to 3 when aliases joined the document. A thought that already had
+ * aliases would otherwise keep its old vector until something else touched it.
  */
-export const DOCUMENT_FORMAT = 2;
+export const DOCUMENT_FORMAT = 3;
 
 /** What an index records as its model: the embedder plus the document format. */
 export function indexModelId(embedderId: string): string {
@@ -47,10 +51,14 @@ export function indexModelId(embedderId: string): string {
  * Builds the text to embed.
  *
  * The name comes first deliberately: with mean pooling this pulls the vector
- * towards the thought's title rather than its note.
+ * towards the thought's title rather than its note. Aliases follow it
+ * unprefixed, because they are other titles for the same thought.
  */
 export function buildDocument(thought: IndexableThought): string {
   const parts: string[] = [thought.name];
+
+  const aliases = thought.aliases ?? [];
+  if (aliases.length > 0) parts.push(aliases.join(", "));
 
   if (thought.label) parts.push(thought.label);
   if (thought.typeName) parts.push(`type: ${thought.typeName}`);

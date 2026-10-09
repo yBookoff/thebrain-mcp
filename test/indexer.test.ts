@@ -48,6 +48,11 @@ interface FakeThought {
   typeName?: string;
   tags?: string[];
   note?: string;
+  /**
+   * Left out, the graph carries no `aliases` field at all, as on builds before
+   * 15.0.621. The current one always sends a list, empty when there are none.
+   */
+  aliases?: string[];
   /** Ids of thoughts linked to this one, as the graph endpoint reports them. */
   children?: string[];
   parents?: string[];
@@ -119,7 +124,13 @@ function fakeApi(
         const t = thoughts.get(id);
         if (t === undefined) throw new Error(`no thought ${id}`);
         return {
-          thought: { id: t.id, name: t.name, kind: t.kind ?? 1, label: null },
+          thought: {
+            id: t.id,
+            name: t.name,
+            kind: t.kind ?? 1,
+            label: null,
+            ...(t.aliases !== undefined ? { aliases: t.aliases } : {}),
+          },
           parents: (t.parents ?? []).map(ref),
           children: (t.children ?? []).map(ref),
           jumps: (t.jumps ?? []).map(ref),
@@ -165,6 +176,10 @@ describe("helpers", () => {
       expect(entry.sourceId).toBe("attachment-9");
       expect(logThoughtId(entry)).toBe("thought-1");
     }
+  });
+
+  it("logThoughtId reads an alias change from sourceId, like any thought event", () => {
+    expect(logThoughtId(log("a", 211, "t1"))).toBe("a");
   });
 
   it("logThoughtId ignores events about other entities", () => {
@@ -255,6 +270,23 @@ describe("initial indexing", () => {
     const embedder = new FakeEmbedder();
     await new SemanticIndexer(api, store, embedder).rebuild(BRAIN);
     expect(embedder.documents.some((d) => d.includes("game engine"))).toBe(true);
+    store.close();
+  });
+
+  it("aliases reach the embedded document", async () => {
+    const thoughts = new Map<string, FakeThought>([
+      ["a", { id: "a", name: "RAG", aliases: ["Retrieval-augmented generation"] }],
+      ["b", { id: "b", name: "no aliases", aliases: [] }],
+    ]);
+    const { api } = fakeApi(thoughts, [
+      log("a", 101, "2026-08-11T09:00:00"),
+      log("b", 101, "2026-08-11T09:01:00"),
+    ]);
+    const store = new VectorStore(":memory:");
+    const embedder = new FakeEmbedder();
+    await new SemanticIndexer(api, store, embedder).rebuild(BRAIN);
+    expect(embedder.documents).toContain("RAG\nRetrieval-augmented generation");
+    expect(embedder.documents).toContain("no aliases");
     store.close();
   });
 
@@ -392,6 +424,22 @@ describe("initial indexing", () => {
     store.close();
   });
 
+  it("an index built to an older document format is incompatible", async () => {
+    // Aliases joined the document in format 3. An index from before would rank
+    // thoughts that have aliases by vectors built without them.
+    const { thoughts, logs } = scenario();
+    const { api } = fakeApi(thoughts, logs);
+    const store = new VectorStore(":memory:");
+    const embedder = new FakeEmbedder();
+    const indexer = new SemanticIndexer(api, store, embedder);
+    await indexer.rebuild(BRAIN);
+    expect(indexer.status(BRAIN).model).toBe("fake@v1#doc3");
+
+    store.setMeta({ ...store.getMeta()!, model: "fake@v1#doc2" });
+    expect(indexer.status(BRAIN).compatible).toBe(false);
+    store.close();
+  });
+
   it("changing the model makes the index incompatible", async () => {
     const { thoughts, logs } = scenario();
     const { api } = fakeApi(thoughts, logs);
@@ -493,6 +541,27 @@ describe("incremental sync", () => {
     logs.push(noteLog("a", 803, "2099-01-01T00:00:00"));
     const result = await indexer.sync(BRAIN);
     expect(result.indexed).toBe(1);
+    store.close();
+  });
+
+  it("an alias change triggers recomputation", async () => {
+    const thoughts = new Map<string, FakeThought>([
+      ["a", { id: "a", name: "RAG", aliases: [] }],
+      ["b", { id: "b", name: "untouched", aliases: [] }],
+    ]);
+    const logs = [log("a", 101, "2026-08-11T09:00:00"), log("b", 101, "2026-08-11T09:00:01")];
+    const { api } = fakeApi(thoughts, logs);
+    const store = new VectorStore(":memory:");
+    const embedder = new FakeEmbedder();
+    const indexer = new SemanticIndexer(api, store, embedder);
+    await indexer.rebuild(BRAIN);
+
+    thoughts.set("a", { id: "a", name: "RAG", aliases: ["Retrieval-augmented generation"] });
+    logs.push(log("a", 211, "2099-01-01T00:00:00"));
+    const result = await indexer.sync(BRAIN);
+
+    expect(result.indexed).toBe(1);
+    expect(embedder.documents.at(-1)).toBe("RAG\nRetrieval-augmented generation");
     store.close();
   });
 

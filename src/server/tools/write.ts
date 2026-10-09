@@ -10,7 +10,12 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { Relation, ThoughtKind } from "../../api/types.js";
-import { warnIfFencedCode } from "../../api/index.js";
+import {
+  MAX_ALIASES,
+  normalizeAliases,
+  warnIfFencedCode,
+  type AliasOutcome,
+} from "../../api/index.js";
 import { confirmDestructive, confirmationInstructions } from "../confirm.js";
 import type { ServerContext } from "../context.js";
 import { bullet, fail, guard, join, ok, section } from "../respond.js";
@@ -18,6 +23,15 @@ import { bullet, fail, guard, join, ok, section } from "../respond.js";
 const brainId = z
   .string()
   .describe("Brain identifier. Take it from brain_list — never guess it.");
+
+/**
+ * What the first alias costs, in the words of TheBrain's own spec. It goes on
+ * every argument that can write one: the choice belongs to the user, and an
+ * agent can only put it to them if it knows.
+ */
+export const ALIAS_COST =
+  "Saving a brain's first alias makes that brain require TheBrain 15.0.621 or " +
+  "later on every device, so write aliases only when the user wants them in this brain.";
 
 const RELATION_VALUES = {
   child: Relation.Child,
@@ -31,7 +45,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
     "brain_create_thought",
     {
       description:
-        "Creates a thought and sets its note, type and tags in the same call. " +
+        "Creates a thought and sets its note, type, tags and aliases in the same call. " +
         "Call it when adding something new. Always supply parentId — a thought with " +
         "no links gets lost in the graph. Search first: a suitable thought may already " +
         "exist, in which case extending it is the better move.",
@@ -56,10 +70,16 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
           .optional()
           .describe("Tag identifiers from brain_list_types_and_tags."),
         label: z.string().optional().describe("Short caption under the title."),
+        aliases: z
+          .array(z.string())
+          .max(MAX_ALIASES)
+          .optional()
+          .describe(`Alternate names that TheBrain's search matches too. ${ALIAS_COST}`),
       },
     },
     guard(async (args) => {
       const { brainId: bid, name, parentId, relation, note, typeId, tagIds, label } = args;
+      const aliases = normalizeAliases(args.aliases ?? []);
 
       const thoughtId = await ctx.api.thoughts.create(bid, {
         name,
@@ -67,9 +87,11 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         ...(relation !== undefined ? { relation: RELATION_VALUES[relation] } : {}),
         ...(typeId !== undefined ? { typeId } : {}),
         ...(label !== undefined ? { label } : {}),
+        ...(aliases.length > 0 ? { aliases } : {}),
       });
 
       const done: string[] = [`created thought "${name}" — ${thoughtId}`];
+      if (aliases.length > 0) done.push(`aliases: ${JSON.stringify(aliases)}`);
       const warnings: string[] = [];
 
       if (note !== undefined && note.trim() !== "") {
@@ -102,7 +124,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
     "brain_update_thought",
     {
       description:
-        "Changes a thought's properties: title, caption, type, colours. " +
+        "Changes a thought's properties: title, caption, aliases, type, colours. " +
         "Call it to rename or reclassify. It does not touch the note — " +
         "use brain_set_note or brain_append_note for that.",
       inputSchema: {
@@ -117,17 +139,39 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
           .optional()
           .describe("Text colour, for example #ff7145."),
         backgroundColor: z.string().nullable().optional().describe("Background colour."),
+        addAliases: z
+          .array(z.string())
+          .max(MAX_ALIASES)
+          .optional()
+          .describe(
+            "Alternate names to add to the ones the thought has; TheBrain's search " +
+              `matches them too. ${ALIAS_COST}`,
+          ),
+        removeAliases: z
+          .array(z.string())
+          .optional()
+          .describe("Aliases to drop, matched ignoring case."),
       },
     },
-    guard(async ({ brainId: bid, thoughtId, ...changes }) => {
+    guard(async ({ brainId: bid, thoughtId, addAliases, removeAliases, ...changes }) => {
       const provided = Object.entries(changes).filter(([, v]) => v !== undefined);
-      if (provided.length === 0) {
+      const editsAliases = (addAliases ?? []).length > 0 || (removeAliases ?? []).length > 0;
+      if (provided.length === 0 && !editsAliases) {
         return fail("no fields were supplied to change");
       }
       await ctx.api.thoughts.update(bid, thoughtId, changes);
-      return ok(
-        section("Done", bullet(provided.map(([k, v]) => `${k} = ${JSON.stringify(v)}`)))!,
-      );
+      const done = provided.map(([k, v]) => `${k} = ${JSON.stringify(v)}`);
+      if (editsAliases) {
+        done.push(
+          ...describeAliasOutcome(
+            await ctx.api.thoughts.changeAliases(bid, thoughtId, {
+              add: addAliases,
+              remove: removeAliases,
+            }),
+          ),
+        );
+      }
+      return ok(section("Done", bullet(done))!);
     }),
   );
 
@@ -367,6 +411,26 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       );
     }),
   );
+}
+
+/** What an alias edit did, including the case where it had nothing to do. */
+export function describeAliasOutcome(outcome: AliasOutcome): string[] {
+  const lines: string[] = [];
+  if (outcome.added.length > 0) lines.push(`aliases added: ${JSON.stringify(outcome.added)}`);
+  if (outcome.removed.length > 0) {
+    lines.push(`aliases removed: ${JSON.stringify(outcome.removed)}`);
+  }
+  if (lines.length === 0) {
+    lines.push("aliases unchanged: nothing new to add, nothing found to remove");
+  }
+  lines.push(`aliases now: ${JSON.stringify(outcome.aliases)}`);
+  if (!outcome.readBack) {
+    lines.push(
+      "the new aliases are written but do not read back yet: check them with " +
+        "brain_get_thought before editing this thought's aliases again, or the edit will undo them",
+    );
+  }
+  return lines;
 }
 
 export { ThoughtKind };

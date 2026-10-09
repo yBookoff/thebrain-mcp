@@ -42,7 +42,12 @@ export { compareLogTime, logEntryKey } from "./log.js";
 export { LOG_PAGE_SIZE } from "./resources/brains.js";
 export * from "./types.js";
 export {
+  ALIASES_UNSUPPORTED,
+  MAX_ALIASES,
+  normalizeAliases,
   replayThoughtIds,
+  type AliasChanges,
+  type AliasOutcome,
   type CleanGraph,
   type CreateThoughtInput,
   type UpdateThoughtInput,

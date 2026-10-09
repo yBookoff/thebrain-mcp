@@ -243,7 +243,23 @@ returned to its original state.
 | L13 | **A note is an attachment, and its log events are keyed by it.** `graph.attachments` carries `{isNotes: true, type: 1}` for a thought with a note and is empty without one. The log entry reads `{modType: 801/802/803, sourceType: 4, sourceId: <attachment>, extraAId: <thought>, extraAType: 2}` | Anything deciding "does this thought have a note" from `sourceId` silently sees nothing. Read `isNotes` from the graph; map log events through `extraAId` |
 | L14 | **The log keeps the newest `maxLogs` entries, with or without `startTime`.** The spec says `maxLogs` counts "beginning from the `startTime`"; it does not. Both bounds are inclusive to the microsecond. `creationDateTime` is UTC with no offset and microsecond precision, trailing zeros trimmed (`…T13:48:59.61898`), and a bound without an offset is read as UTC. Concurrent writes share timestamps: 100 creates at once gave 2–5 shared ones | Read a long log in pages, passing the oldest entry's timestamp back as `endTime` **in the exact string it arrived in**. A `Date` keeps milliseconds only, so the boundary entry would fall off the next page. Drop the repeated boundary entries by content, and grow a page that a single timestamp fills |
 | L12 | **Writes become visible at different speeds.** `create`→`get(id)` instant; `rename`→`get` ~0.1 s; `set note`→`get note` ~0.2 s; `attachTag`→`graph.tags` ~0.1–0.5 s; **`create`→`findByName` ~5.6 s** | After a write, address thoughts **by identifier, never by name**. `nameExact` is not a workaround for "create it and immediately find it" |
+| L16 | **Aliases are set as a whole list, and a write is not visible at once.** `aliases` is on every thought, `[]` when there are none, in `GET thought` and throughout `graph`. `PATCH` takes `replace` or `add` on `/aliases`, each setting the whole list, and `remove` to clear it; an element path such as `/aliases/0` is a 400. The API trims aliases, keeps the first of two spellings that differ only in case, drops one equal to the name in any case, and of a list longer than 100 keeps the first 100 with no error. After a `PATCH` a read usually still returns the old list: over 82 writes the new one showed up 50–100 ms later, 0.2 s at the most, and 7 times it was there at once. A thought created with aliases nearly always reads back with them, but not always: 3 of 60 came back without, for up to 0.15 s. The log entry is `{modType: 211, sourceType: 2, sourceId: <thought>}`, and creating a thought with aliases logs one too. TheBrain's own search finds a thought by an alias | Adding or removing one alias is a read-modify-write, and two in a row left only the second alias. `thoughts.changeAliases()` therefore waits for its write to read back, and refuses a list that would pass 100 rather than let the tail vanish. `brain_ingest` does not trust the read of a thought it has just created, and sends the aliases it was created with again. A 211 entry maps to its thought like any thought event, unlike a note (L13) |
 | L15 | **The local API moved from port 8001 to 11522.** On 15.0.640 a connection to 8001 is refused and `http://localhost:11522` serves the same 48 paths. Settings shows the endpoint with its prefix, as `http://localhost:11522/api/` | With no address configured the client tries 11522, then 8001, and moves on only when the connection is refused — a request that may have been delivered is never repeated. A configured address ending in `/api` loses that suffix, since every path already carries it |
+
+### Aliases — what could not be measured
+
+L16 is measured on 15.0.640 and each claim in it has a contract test. Two things
+about aliases are not, and are taken on trust:
+
+- **The version requirement.** The spec says: "Saving the first alias in a brain
+  makes the brain require TheBrain 15.0.621 or later on every device." Checking
+  it would take a second device on an older build. The tools repeat it on every
+  argument that can write an alias.
+- **Builds before 15.0.621.** They have no aliases, so a thought arrives without
+  the field, and reads treat that as an empty list. What such a build does with
+  `aliases` in a create request is unknown; a field ignored in silence would be
+  reported as written. So before sending aliases the client reads the brain's
+  home thought, and refuses when the field is absent.
 
 ### Tags — the undocumented mechanism
 
@@ -308,8 +324,8 @@ not an error.
 > a type's graph lists its instances there too.
 
 The same log supplies the signals for incremental sync: `101` add, `102` remove,
-`103` re-embed the name, `801`/`802`/`803` re-embed the note. Mind L13 for the
-last group: those entries are keyed by the note's attachment, and the thought is
+`103` re-embed the name, `211` re-embed the aliases, `801`/`802`/`803` re-embed
+the note. Mind L13 for the last group: those entries are keyed by the note's attachment, and the thought is
 in `extraAId`.
 
 ### Error formats — there are five of them

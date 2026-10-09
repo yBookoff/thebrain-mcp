@@ -59,6 +59,12 @@ silent wrong behaviour rather than a loud failure:
   Read it through `brains.allModifications()` / `modificationPages()`. Log
   timestamps carry microseconds; never round-trip one through `Date`.
 - **A thought's type also appears in `parents`.** Filter it in traversal.
+- **Aliases only replace as a whole list, and a read straight after the write
+  usually returns the old one.** Add and remove through
+  `thoughts.changeAliases()`, which waits for the write to read back: two
+  read-modify-writes in a row left only the second alias. Saving a brain's first
+  alias raises the TheBrain version that brain requires, so `ALIAS_COST` stays
+  on every tool argument that can write one.
 - **Markdown round-trip eats the closing ` ``` `.** Warn; suggest indented code.
 - **Tags attach via `POST /api/links` with `relation: 2` against a `kind=4`
   thought.** The server rewrites it to `relation=1, meaning=5`.

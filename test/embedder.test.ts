@@ -124,6 +124,23 @@ describe("building the text to embed", () => {
     expect(doc).toContain("a typo returns nothing");
   });
 
+  it("aliases follow the name, ahead of everything else", () => {
+    const doc = buildDocument({
+      id: "1",
+      name: "RAG",
+      kind: 1,
+      aliases: ["Retrieval-augmented generation", "генерация с дополненной выборкой"],
+      label: "pattern",
+      typeName: "Concept",
+      note: "retrieve, then generate",
+    });
+    expect(doc.split("\n").slice(0, 3)).toEqual([
+      "RAG",
+      "Retrieval-augmented generation, генерация с дополненной выборкой",
+      "pattern",
+    ]);
+  });
+
   it("the name comes first — it is the strongest signal", () => {
     const doc = buildDocument({
       id: "1",
@@ -139,6 +156,7 @@ describe("building the text to embed", () => {
       id: "1",
       name: "clean",
       kind: 1,
+      aliases: [],
       label: null,
       typeName: null,
       tagNames: [],

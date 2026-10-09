@@ -96,6 +96,28 @@ thought.
 "RAG", not "The approach to RAG from Ivanov's paper" — then the next piece of
 material attaches to the same place.
 
+## Aliases
+
+A thought has one name and can carry alternate ones. TheBrain's own search
+matches them, and the semantic index includes them.
+
+Use an alias when the same concept goes by another name that someone will type:
+an abbreviation and its expansion ("RAG" and "Retrieval-augmented generation"),
+the term in the person's second language, a former name. The title stays short,
+and the next piece of material still lands on the same thought.
+
+Not an alias: a broader or narrower concept, a related one, a description. Those
+are thoughts of their own, joined by links.
+
+**Ask before the first one.** Saving the first alias in a brain makes that brain
+require TheBrain 15.0.621 or later on every device that opens it. If
+`brain_get_thought` has shown you no alias anywhere in this brain, tell the
+person and wait for a yes. A brain that already has aliases has paid that price.
+
+`brain_ingest` and `brain_create_thought` take `aliases`. On a thought that
+already existed, `brain_ingest` adds them to the ones it has. Afterwards, change
+them with `brain_update_thought`: `addAliases` and `removeAliases`.
+
 ## Where to attach
 
 The temptation is to hang every concept as a child of the article thought. That

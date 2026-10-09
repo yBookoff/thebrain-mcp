@@ -8,18 +8,25 @@
  * the active brain is dangerous, since a developer may not notice that a real
  * working tab is open.
  *
+ * The alias tests also change the brain itself: per the spec, saving the first
+ * alias in a brain makes it require TheBrain 15.0.621 or later on every device.
+ * One more reason for the brain to be a throwaway.
+ *
  *   THEBRAIN_API_KEY=...  THEBRAIN_TEST_BRAIN_ID=<uuid of a throwaway brain> \
  *     npx vitest run test/resources.integration.test.ts
  *
  * Missing either variable skips the suite.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, type TestContext } from "vitest";
 
 import {
   EntityType,
+  MAX_ALIASES,
   ModType,
   TheBrainApi,
+  TheBrainError,
   ThoughtKind,
+  aliasesOf,
   compareLogTime,
   isUuid,
   logEntryKey,
@@ -522,5 +529,235 @@ suite("resource layer against the live API", () => {
     expect(found?.name).toBe("probe");
     await api.links.delete(brainId, linkId);
     await expect(api.links.between(brainId, a, b)).resolves.toBeNull();
+  });
+
+  /**
+   * Measured on TheBrain 15.0.640. Most of it is what the OpenAPI description
+   * says; the read-back delay and the keying of the log entry are not in it.
+   * How aliases read when there are none is in test/integration.test.ts.
+   */
+  describe("aliases", () => {
+    let supported: boolean | undefined;
+    /** Builds before 15.0.621 have no aliases; there is nothing to test on them. */
+    const requireAliases = async (ctx: TestContext): Promise<void> => {
+      if (supported === undefined) {
+        const probe = await api.thoughts.get(brainId, await make("alias-probe"));
+        supported = "aliases" in probe;
+      }
+      if (!supported) ctx.skip();
+    };
+
+    const makeWith = async (name: string, aliases: string[]): Promise<string> => {
+      const id = await api.thoughts.create(brainId, { name: PREFIX + name, aliases });
+      created.push(id);
+      return id;
+    };
+    const stored = (id: string, ok: (aliases: string[]) => boolean): Promise<string[]> =>
+      eventually(
+        async () => aliasesOf(await api.thoughts.get(brainId, id)),
+        ok,
+      );
+    const sameSet = (expected: string[]) => (aliases: string[]): boolean =>
+      [...aliases].sort().join("\n") === [...expected].sort().join("\n");
+    const patch = (id: string, op: "add" | "replace" | "remove", path: string, value?: unknown) =>
+      api.client.patch(`/api/thoughts/${brainId}/${id}`, {
+        jsonPatch: [{ op, path, ...(value === undefined ? {} : { value }) }],
+      });
+
+    it("aliases given at creation are stored, and the graph carries them too", async (ctx) => {
+      await requireAliases(ctx);
+      // Not asserted as immediate, because it is not quite: over 60 creations
+      // the thought itself read back at once every time, and 3 times without
+      // its aliases, which followed within 0.15 s. A single try says "at once".
+      const wanted = [`${PREFIX}alias-one`, `${PREFIX}alias-two`];
+      const id = await makeWith("alias-create", wanted);
+
+      expect(await stored(id, sameSet(wanted))).toEqual(wanted);
+      const graph = await api.thoughts.getGraph(brainId, id);
+      expect(aliasesOf(graph.thought)).toEqual(wanted);
+    });
+
+    it("replace and add both set the whole list, and remove clears it", async (ctx) => {
+      await requireAliases(ctx);
+      const id = await makeWith("alias-patch", [`${PREFIX}first`]);
+
+      await patch(id, "replace", "/aliases", [`${PREFIX}second`]);
+      expect(await stored(id, sameSet([`${PREFIX}second`]))).toEqual([`${PREFIX}second`]);
+
+      // `add` does not append: it sets the list, as `replace` does.
+      await patch(id, "add", "/aliases", [`${PREFIX}third`]);
+      expect(await stored(id, sameSet([`${PREFIX}third`]))).toEqual([`${PREFIX}third`]);
+
+      await patch(id, "remove", "/aliases");
+      expect(await stored(id, (a) => a.length === 0)).toEqual([]);
+
+      // The flat facade the tools use, both ways.
+      await api.thoughts.update(brainId, id, { aliases: [`${PREFIX}fourth`] });
+      expect(await stored(id, sameSet([`${PREFIX}fourth`]))).toEqual([`${PREFIX}fourth`]);
+      await api.thoughts.update(brainId, id, { aliases: [] });
+      expect(await stored(id, (a) => a.length === 0)).toEqual([]);
+    });
+
+    it("an element path is refused and leaves the list alone", async (ctx) => {
+      await requireAliases(ctx);
+      const before = [`${PREFIX}kept`];
+      const id = await makeWith("alias-element", before);
+      await stored(id, sameSet(before));
+
+      for (const [op, path] of [
+        ["replace", "/aliases/0"],
+        ["add", "/aliases/-"],
+        ["remove", "/aliases/0"],
+      ] as const) {
+        const refused = await patch(
+          id,
+          op,
+          path,
+          op === "remove" ? undefined : `${PREFIX}other`,
+        ).catch((error: unknown) => error);
+        expect(refused, `${op} ${path}`).toBeInstanceOf(TheBrainError);
+        expect((refused as TheBrainError).kind, `${op} ${path}`).toBe("bad_request");
+      }
+      await settle();
+      expect(aliasesOf(await api.thoughts.get(brainId, id))).toEqual(before);
+    });
+
+    it("aliases are trimmed, deduplicated ignoring case, and dropped when equal to the name", async (ctx) => {
+      await requireAliases(ctx);
+      const name = `${PREFIX}alias-rules`;
+      const id = await make("alias-rules");
+      await api.thoughts.update(brainId, id, {
+        aliases: [`  ${PREFIX}Spaced  `, `${PREFIX}spaced`, name, `${PREFIX}other`],
+      });
+
+      // Of two spellings the first survives, and the order is kept.
+      expect(await stored(id, (a) => a.length > 0)).toEqual([`${PREFIX}Spaced`, `${PREFIX}other`]);
+
+      // The name is dropped in another case too, which the spec does not say.
+      // `changeAliases` relies on it to tell that such an alias changes nothing.
+      await api.thoughts.update(brainId, id, {
+        aliases: [name.toUpperCase(), `${PREFIX}another`],
+      });
+      expect(await stored(id, sameSet([`${PREFIX}another`]))).toEqual([`${PREFIX}another`]);
+    });
+
+    it(`a list longer than ${MAX_ALIASES} keeps its first ${MAX_ALIASES}, with no error`, async (ctx) => {
+      await requireAliases(ctx);
+      const id = await make("alias-cap");
+      const many = Array.from({ length: MAX_ALIASES + 5 }, (_, i) => `${PREFIX}cap-${i}`);
+      // Through the client: `changeAliases` refuses a list this long itself,
+      // because the API cuts it without saying so.
+      await patch(id, "replace", "/aliases", many);
+
+      expect(await stored(id, (a) => a.length > 0)).toEqual(many.slice(0, MAX_ALIASES));
+    });
+
+    it("an alias change is logged as 211 against the thought itself", async (ctx) => {
+      await requireAliases(ctx);
+      // The semantic index re-embeds a thought on this entry. It finds the
+      // thought through `logThoughtId`, which reads `sourceId` for everything
+      // but notes. Notes once taught this project not to assume that.
+      const id = await make("alias-log");
+      await api.thoughts.update(brainId, id, { aliases: [`${PREFIX}logged`] });
+
+      const mentions = (l: ModificationLogDto): boolean =>
+        l.modType === ModType.AliasesChanged && [l.sourceId, l.extraAId, l.extraBId].includes(id);
+      const logs = await eventually(
+        () => api.brains.modifications(brainId, { maxLogs: 200 }),
+        (entries) => entries.some(mentions),
+      );
+      // Found by code and by the id in any position, so a failure below shows
+      // how the entry is really keyed.
+      const event = logs.find(mentions);
+      expect(event, "no 211 entry mentions the thought").toBeDefined();
+      expect({ sourceType: event!.sourceType, sourceId: event!.sourceId }).toEqual({
+        sourceType: EntityType.Thought,
+        sourceId: id,
+      });
+      expect(event!.extraAType).toBe(EntityType.Unknown);
+      expect(logThoughtId(event!)).toBe(id);
+      expect(subjectIds(event!)).toEqual([id]);
+      expect(describeChange(event!)).toBe("aliases changed");
+
+      // A thought created with aliases logs its own 211 after the `created`.
+      const born = await makeWith("alias-log-born", [`${PREFIX}born`]);
+      const later = await eventually(
+        () => api.brains.modifications(brainId, { maxLogs: 200 }),
+        (entries) =>
+          entries.some((l) => l.modType === ModType.AliasesChanged && l.sourceId === born),
+      );
+      const kinds = later.filter((l) => l.sourceId === born).map((l) => l.modType);
+      expect(kinds.sort()).toEqual([ModType.Created, ModType.AliasesChanged]);
+    }, 30_000);
+
+    it("changeAliases adds to a stored list and removes from it", async (ctx) => {
+      await requireAliases(ctx);
+      const id = await makeWith("alias-change", [`${PREFIX}kept`, `${PREFIX}gone`]);
+      await stored(id, (a) => a.length === 2);
+
+      const outcome = await api.thoughts.changeAliases(brainId, id, {
+        add: [`${PREFIX}new`, `${PREFIX}KEPT`],
+        remove: [`${PREFIX}GONE`],
+      });
+      expect(outcome.added).toEqual([`${PREFIX}new`]);
+      expect(outcome.removed).toEqual([`${PREFIX}gone`]);
+
+      const wanted = [`${PREFIX}kept`, `${PREFIX}new`];
+      expect((await stored(id, sameSet(wanted))).sort()).toEqual(wanted);
+      // What it reported is what the API holds.
+      expect([...outcome.aliases].sort()).toEqual(wanted);
+    });
+
+    it("a read straight after a write usually still returns the old list", async (ctx) => {
+      await requireAliases(ctx);
+      // Measured over 82 writes: the first read already had the new list 7
+      // times; otherwise it showed up 50–100 ms later, 0.2 s at the most. A
+      // rename behaves the same.
+      const id = await make("alias-lag");
+      let previous: string[] = [];
+      let stale = 0;
+      for (let i = 0; i < 10; i++) {
+        const next = [`${PREFIX}lag-${i}`];
+        await api.thoughts.update(brainId, id, { aliases: next });
+        const atOnce = aliasesOf(await api.thoughts.get(brainId, id));
+        if (sameSet(previous)(atOnce)) stale += 1;
+        else expect(atOnce).toEqual(next);
+        expect(await stored(id, sameSet(next))).toEqual(next);
+        previous = next;
+      }
+      expect(stale).toBeGreaterThan(0);
+    });
+
+    it("two changeAliases calls in a row both land", async (ctx) => {
+      await requireAliases(ctx);
+      // Without the wait inside `changeAliases` the second call reads the old,
+      // empty list and writes only its own alias: measured, the first was lost.
+      const id = await make("alias-twice");
+      const first = await api.thoughts.changeAliases(brainId, id, { add: [`${PREFIX}one`] });
+      const second = await api.thoughts.changeAliases(brainId, id, { add: [`${PREFIX}two`] });
+
+      expect(first.readBack).toBe(true);
+      expect(second.readBack).toBe(true);
+      // No waiting here: by the time the call returned, a read agreed.
+      expect(aliasesOf(await api.thoughts.get(brainId, id))).toEqual([
+        `${PREFIX}one`,
+        `${PREFIX}two`,
+      ]);
+    });
+
+    it("TheBrain's own search finds a thought by an alias", async (ctx) => {
+      await requireAliases(ctx);
+      // The tool descriptions and the skills say so, on the spec's word. The
+      // search is prefix-based and its index lags by up to 15 seconds.
+      const alias = `${PREFIX}aka${Date.now()}`;
+      const id = await makeWith("alias-search", [alias]);
+
+      const hits = await eventually(
+        () => api.search.inBrain(brainId, alias, { maxResults: 10 }),
+        (found) => found.some((h) => h.thought.id === id),
+        { timeoutMs: 25_000, stepMs: 500 },
+      );
+      expect(hits.map((h) => h.thought.id)).toContain(id);
+    }, 40_000);
   });
 });

@@ -77,6 +77,10 @@ Safe and reversible, after showing the person the list:
 - **Merging duplicates.** Requires deciding which thought is primary and what
   happens to both notes. Describe the option, wait for agreement.
 - **Renaming.** The name is an authorial choice.
+- **Aliases.** The name that loses a merge or a rename can stay on the thought
+  as an alias (`brain_update_thought` with `addAliases`), so a search for it
+  still lands. Propose it rather than do it: the first alias in a brain makes
+  that brain require TheBrain 15.0.621 or later on every device.
 - **Deleting.** Even with deletion permitted, ask separately for each thought,
   never as a list — "shall I delete all of these?".
 - **Restructuring the hierarchy.** Mass-moving branches is almost always a bad

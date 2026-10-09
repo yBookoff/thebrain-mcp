@@ -93,6 +93,37 @@ suite("live API", () => {
     expect(Array.isArray(graph.children)).toBe(true);
   });
 
+  it("a thought carries its aliases as a list, in the thought and throughout its graph", async (ctx) => {
+    // Measured on 15.0.640: `[]` when there are none, never null and never
+    // absent. Builds before 15.0.621 have no aliases, so nothing to check there.
+    type WithAliases = ThoughtDto & { aliases?: unknown };
+    const brains = await getClient().get<BrainDto[]>("/api/brains");
+    for (const brain of brains) {
+      const home = `/api/thoughts/${brain.id}/${brain.homeThoughtId}`;
+      const thought = await getClient().get<WithAliases>(home);
+      if (!("aliases" in thought)) return ctx.skip();
+      expect(thought.aliases).toBeInstanceOf(Array);
+
+      const graph = await getClient().get<{
+        activeThought: WithAliases;
+        parents: WithAliases[] | null;
+        children: WithAliases[] | null;
+        jumps: WithAliases[] | null;
+        tags: WithAliases[] | null;
+        type: WithAliases | null;
+      }>(`${home}/graph`);
+      const around = [
+        graph.activeThought,
+        ...(graph.parents ?? []),
+        ...(graph.children ?? []),
+        ...(graph.jumps ?? []),
+        ...(graph.tags ?? []),
+        ...(graph.type === null ? [] : [graph.type]),
+      ];
+      for (const t of around) expect(t.aliases, t.id).toBeInstanceOf(Array);
+    }
+  });
+
   it("an unreachable port yields kind=network rather than a crash", async () => {
     const dead = new TheBrainClient({
       apiKey: apiKey!,
