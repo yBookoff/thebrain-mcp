@@ -1,9 +1,10 @@
 # TheBrain Local API — endpoint map
 
-Source: `http://localhost:8001/api/v1/docs.json` (OpenAPI 3.0.1, `TheBrain Local API v1.0`).
+Source: `http://localhost:11522/api/v1/docs.json` (OpenAPI 3.0.1, `TheBrain Local API v1.0`),
+as served by TheBrain 15.0.640.
 A copy of the spec: [`thebrain-local-api.openapi.json`](./thebrain-local-api.openapi.json).
 
-- Base: `http://localhost:8001`
+- Base: `http://localhost:11522`; builds from before the port moved listen on `http://localhost:8001` (L15)
 - Auth: `Authorization: Bearer <apiKey>`; the key lives in the desktop app under **Settings > User > Local API Key**
 - Total: **48 paths**, 29 schemas, 9 tags
 - The local API ≈ the cloud API plus a unique **App Control** group (`/api/app/*`)
@@ -219,7 +220,7 @@ FileDownload paths plus BrainAccess/Users need no wrapper.
 
 ---
 
-## Live observations (verified against localhost:8001, TheBrain 15)
+## Live observations (verified against a live TheBrain 15)
 
 Verified on the `brain-mcp` brain; test entities were deleted and the brain
 returned to its original state.
@@ -242,6 +243,7 @@ returned to its original state.
 | L13 | **A note is an attachment, and its log events are keyed by it.** `graph.attachments` carries `{isNotes: true, type: 1}` for a thought with a note and is empty without one. The log entry reads `{modType: 801/802/803, sourceType: 4, sourceId: <attachment>, extraAId: <thought>, extraAType: 2}` | Anything deciding "does this thought have a note" from `sourceId` silently sees nothing. Read `isNotes` from the graph; map log events through `extraAId` |
 | L14 | **The log keeps the newest `maxLogs` entries, with or without `startTime`.** The spec says `maxLogs` counts "beginning from the `startTime`"; it does not. Both bounds are inclusive to the microsecond. `creationDateTime` is UTC with no offset and microsecond precision, trailing zeros trimmed (`…T13:48:59.61898`), and a bound without an offset is read as UTC. Concurrent writes share timestamps: 100 creates at once gave 2–5 shared ones | Read a long log in pages, passing the oldest entry's timestamp back as `endTime` **in the exact string it arrived in**. A `Date` keeps milliseconds only, so the boundary entry would fall off the next page. Drop the repeated boundary entries by content, and grow a page that a single timestamp fills |
 | L12 | **Writes become visible at different speeds.** `create`→`get(id)` instant; `rename`→`get` ~0.1 s; `set note`→`get note` ~0.2 s; `attachTag`→`graph.tags` ~0.1–0.5 s; **`create`→`findByName` ~5.6 s** | After a write, address thoughts **by identifier, never by name**. `nameExact` is not a workaround for "create it and immediately find it" |
+| L15 | **The local API moved from port 8001 to 11522.** On 15.0.640 a connection to 8001 is refused and `http://localhost:11522` serves the same 48 paths. Settings shows the endpoint with its prefix, as `http://localhost:11522/api/` | With no address configured the client tries 11522, then 8001, and moves on only when the connection is refused — a request that may have been delivered is never repeated. A configured address ending in `/api` loses that suffix, since every path already carries it |
 
 ### Tags — the undocumented mechanism
 

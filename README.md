@@ -71,7 +71,7 @@ anywhere.
 | Variable | Default | Purpose |
 |---|---|---|
 | `THEBRAIN_API_KEY` | — | Required |
-| `THEBRAIN_BASE_URL` | `http://localhost:8001` | Local API address |
+| `THEBRAIN_BASE_URL` | `http://localhost:11522`, then `:8001` | Local API address |
 | `THEBRAIN_DATA_DIR` | `~/.thebrain-mcp` | Where indexes are stored |
 | `THEBRAIN_ALLOW_DESTRUCTIVE` | `0` | Allow deleting thoughts |
 | `THEBRAIN_EMBEDDING_MODEL` | `Xenova/multilingual-e5-small` | Embedding model |
@@ -80,6 +80,11 @@ anywhere.
 
 Changing the model or the precision makes an existing index unusable — the server
 will say so and ask for a rebuild.
+
+`THEBRAIN_BASE_URL` rarely needs setting. A TheBrain update moved the local API
+from port 8001 to 11522, so the server tries the new port and falls back to the
+old one. Set the variable only if TheBrain listens somewhere else; the endpoint
+exactly as Settings shows it (`http://localhost:11522/api/`) is fine.
 
 ## Tools
 

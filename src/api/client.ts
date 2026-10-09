@@ -38,8 +38,31 @@ export function assertUuid(value: string, field: string): void {
   }
 }
 
+/**
+ * Where TheBrain listens when no address is configured, newest first.
+ *
+ * An update moved the local API from port 8001 to 11522 (measured on
+ * 15.0.640), and both builds are in use.
+ */
+export const DEFAULT_BASE_URLS: readonly string[] = [
+  "http://localhost:11522",
+  "http://localhost:8001",
+];
+
+/**
+ * Settings shows the endpoint as `http://localhost:11522/api/`, while every
+ * path here already starts with `/api` — so a pasted value loses that suffix.
+ */
+export function normalizeBaseUrl(value: string): string {
+  return value
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/api$/i, "");
+}
+
 export interface ClientOptions {
   apiKey: string;
+  /** One fixed address. Omitted: `DEFAULT_BASE_URLS`, tried in order. */
   baseUrl?: string;
   timeoutMs?: number;
   /** Replaced in tests. */
@@ -65,7 +88,8 @@ export interface JsonPatchOp {
 
 export class TheBrainClient {
   readonly #apiKey: string;
-  readonly #baseUrl: string;
+  /** Addresses to try, the one that last answered first. */
+  #baseUrls: readonly string[];
   readonly #timeoutMs: number;
   readonly #fetch: typeof fetch;
 
@@ -74,7 +98,10 @@ export class TheBrainClient {
       throw new TheBrainError("auth", "no API key provided");
     }
     this.#apiKey = options.apiKey;
-    this.#baseUrl = (options.baseUrl ?? "http://localhost:8001").replace(/\/+$/, "");
+    this.#baseUrls =
+      options.baseUrl !== undefined
+        ? [normalizeBaseUrl(options.baseUrl)]
+        : DEFAULT_BASE_URLS;
     this.#timeoutMs = options.timeoutMs ?? 30_000;
     this.#fetch = options.fetchImpl ?? globalThis.fetch;
   }
@@ -101,11 +128,6 @@ export class TheBrainClient {
   }
 
   async #request<T>(method: string, path: string, options: RequestOptions): Promise<T> {
-    const url = new URL(this.#baseUrl + path);
-    for (const [key, value] of Object.entries(options.query ?? {})) {
-      if (value !== undefined) url.searchParams.set(key, String(value));
-    }
-
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.#apiKey}`,
       Accept: "application/json",
@@ -119,24 +141,7 @@ export class TheBrainClient {
       body = JSON.stringify(options.json);
     }
 
-    let response: Response;
-    try {
-      response = await this.#fetch(url, {
-        method,
-        headers,
-        ...(body !== undefined ? { body } : {}),
-        signal: AbortSignal.timeout(this.#timeoutMs),
-      });
-    } catch (cause) {
-      const timedOut = cause instanceof Error && cause.name === "TimeoutError";
-      throw new TheBrainError(
-        "network",
-        timedOut
-          ? `request exceeded ${this.#timeoutMs} ms`
-          : `could not reach ${this.#baseUrl} — is TheBrain running?`,
-        { method, path, cause },
-      );
-    }
+    const response = await this.#send(method, path, options.query, headers, body);
 
     const contentType = response.headers.get("content-type");
 
@@ -188,6 +193,69 @@ export class TheBrainClient {
       });
     }
   }
+
+  /**
+   * Sends to the first address that accepts the connection.
+   *
+   * Only a refused connection moves on to the next address: nothing listened,
+   * so nothing was sent, and repeating even a write is safe. A timeout or a
+   * dropped connection may have reached TheBrain and is never repeated.
+   */
+  async #send(
+    method: string,
+    path: string,
+    query: RequestOptions["query"],
+    headers: Record<string, string>,
+    body: string | undefined,
+  ): Promise<Response> {
+    const tried: string[] = [];
+    let failure: unknown;
+
+    for (const baseUrl of this.#baseUrls) {
+      const url = new URL(baseUrl + path);
+      for (const [key, value] of Object.entries(query ?? {})) {
+        if (value !== undefined) url.searchParams.set(key, String(value));
+      }
+
+      tried.push(baseUrl);
+      try {
+        const response = await this.#fetch(url, {
+          method,
+          headers,
+          ...(body !== undefined ? { body } : {}),
+          signal: AbortSignal.timeout(this.#timeoutMs),
+        });
+        // TheBrain can move mid-session — an update restarts it on the new
+        // port — so the preference follows whichever address answered last.
+        if (baseUrl !== this.#baseUrls[0]) {
+          this.#baseUrls = [baseUrl, ...this.#baseUrls.filter((u) => u !== baseUrl)];
+        }
+        return response;
+      } catch (cause) {
+        failure = cause;
+        if (!isConnectionRefused(cause)) break;
+      }
+    }
+
+    const timedOut = failure instanceof Error && failure.name === "TimeoutError";
+    throw new TheBrainError(
+      "network",
+      timedOut
+        ? `request exceeded ${this.#timeoutMs} ms`
+        : `could not reach ${tried.join(" or ")} — is TheBrain running?`,
+      { method, path, cause: failure },
+    );
+  }
+}
+
+/**
+ * Did nothing listen on the port? `fetch` reports that as a `TypeError` whose
+ * cause carries the code: an `AggregateError` when `localhost` resolved to both
+ * ::1 and 127.0.0.1, a plain `Error` for a single address.
+ */
+function isConnectionRefused(error: unknown): boolean {
+  const cause = error instanceof Error ? error.cause : undefined;
+  return cause instanceof Error && "code" in cause && cause.code === "ECONNREFUSED";
 }
 
 function routeMissMessage(): string {

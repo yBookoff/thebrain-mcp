@@ -64,7 +64,7 @@ plus `mcp.types` (per `-X importtime`: `mcp` 178 ms, `mcp.client.session` 96 ms,
 `pydantic_settings` 34 ms).
 
 **Runtime — a tie.** The server is I/O-bound: a thin proxy to
-`localhost:8001`. Latency is set by the TheBrain API. A concurrent
+`localhost:11522`. Latency is set by the TheBrain API. A concurrent
 breadth-first graph traversal is equally comfortable on `Promise.all` and on
 `asyncio` plus `httpx`.
 

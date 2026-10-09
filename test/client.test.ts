@@ -5,10 +5,12 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  DEFAULT_BASE_URLS,
   TheBrainClient,
   assertUuid,
   emptyOn400,
   isUuid,
+  normalizeBaseUrl,
 } from "../src/api/client.js";
 import { TheBrainError } from "../src/api/errors.js";
 
@@ -209,6 +211,140 @@ describe("request construction", () => {
     });
     await expect(client.get("/api/brains")).rejects.toMatchObject({ kind: "network" });
     await expect(client.get("/api/brains")).rejects.toThrowError(/is TheBrain running/);
+  });
+});
+
+/**
+ * What Node 22's fetch throws when nothing listens on the port, captured from
+ * a real refusal: `localhost` resolves to both ::1 and 127.0.0.1, so the cause
+ * is an AggregateError; a literal 127.0.0.1 gives a plain Error.
+ */
+const REFUSALS = {
+  localhost: (): Error =>
+    Object.assign(new AggregateError([new Error("::1"), new Error("127.0.0.1")]), {
+      code: "ECONNREFUSED",
+    }),
+  "127.0.0.1": (): Error =>
+    Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8001"), { code: "ECONNREFUSED" }),
+};
+
+/** A machine where TheBrain answers on some ports and nothing listens on the rest. */
+function machine(
+  listening: string[],
+  options: { baseUrl?: string; refusal?: keyof typeof REFUSALS } = {},
+) {
+  const ports = new Set(listening);
+  const fetchImpl = vi.fn(
+    async (input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]): Promise<Response> => {
+      if (!ports.has((input as URL).port)) {
+        throw new TypeError("fetch failed", {
+          cause: REFUSALS[options.refusal ?? "localhost"](),
+        });
+      }
+      return new Response("[]", { headers: { "content-type": "application/json" } });
+    },
+  );
+  const client = new TheBrainClient({
+    apiKey: KEY,
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    ...(options.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
+  });
+  const called = (): string[] => fetchImpl.mock.calls.map(([input]) => (input as URL).port);
+  return { client, ports, called };
+}
+
+describe("finding TheBrain", () => {
+  it("knows the current port and the one before the move", () => {
+    expect(DEFAULT_BASE_URLS).toEqual(["http://localhost:11522", "http://localhost:8001"]);
+  });
+
+  it("asks the current port first", async () => {
+    const { client, called } = machine(["11522", "8001"]);
+    await client.get("/api/brains");
+    expect(called()).toEqual(["11522"]);
+  });
+
+  it.each(["localhost", "127.0.0.1"] as const)(
+    "falls back to the old port when the new one refuses (%s)",
+    async (refusal) => {
+      const { client, called } = machine(["8001"], { refusal });
+      await expect(client.get("/api/brains")).resolves.toEqual([]);
+      expect(called()).toEqual(["11522", "8001"]);
+    },
+  );
+
+  it("stays on the port that answered", async () => {
+    const { client, called } = machine(["8001"]);
+    await client.get("/api/brains");
+    await client.get("/api/brains");
+    expect(called()).toEqual(["11522", "8001", "8001"]);
+  });
+
+  it("follows TheBrain when an update moves it mid-session", async () => {
+    const { client, ports, called } = machine(["8001"]);
+    await client.get("/api/brains");
+    ports.delete("8001");
+    ports.add("11522");
+    await expect(client.get("/api/brains")).resolves.toEqual([]);
+    expect(called().at(-1)).toBe("11522");
+  });
+
+  it("names every address it tried when nothing listens", async () => {
+    const { client } = machine([]);
+    await expect(client.get("/api/brains")).rejects.toMatchObject({
+      kind: "network",
+      message: expect.stringMatching(/localhost:11522 or http:\/\/localhost:8001.*is TheBrain running/),
+    });
+  });
+
+  it("never second-guesses an explicit address", async () => {
+    const { client, called } = machine(["11522", "8001"], { baseUrl: "http://localhost:9000" });
+    const failure = await client.get("/api/brains").catch((e: unknown) => e as TheBrainError);
+    expect(failure).toMatchObject({ kind: "network" });
+    expect((failure as TheBrainError).message).not.toMatch(/11522|8001/);
+    expect(called()).toEqual(["9000"]);
+  });
+
+  // The request may have reached TheBrain, and a repeated write is a duplicate.
+  it.each([
+    ["a timeout", (): Error => new DOMException("timed out", "TimeoutError")],
+    [
+      "a dropped connection",
+      (): Error =>
+        new TypeError("fetch failed", {
+          cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+        }),
+    ],
+  ])("does not repeat a write after %s", async (_name, failure) => {
+    const fetchImpl = vi.fn(
+      async (_input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]): Promise<Response> => {
+        throw failure();
+      },
+    );
+    const client = new TheBrainClient({
+      apiKey: KEY,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await expect(
+      client.post(`/api/thoughts/${BRAIN}`, { json: { name: "A" } }),
+    ).rejects.toMatchObject({ kind: "network" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["http://localhost:11522/api/", "http://localhost:11522"],
+    ["http://localhost:11522/api", "http://localhost:11522"],
+    ["http://localhost:11522/", "http://localhost:11522"],
+    ["  http://localhost:11522  ", "http://localhost:11522"],
+    ["http://localhost:11522", "http://localhost:11522"],
+  ])("takes the endpoint as Settings shows it: %j", (given, expected) => {
+    expect(normalizeBaseUrl(given)).toBe(expected);
+  });
+
+  it("an address pasted with /api does not double the prefix", async () => {
+    const { client, called } = machine(["11522"], { baseUrl: "http://localhost:11522/api/" });
+    await client.get("/api/brains");
+    expect(called()).toEqual(["11522"]);
   });
 });
 

@@ -23,7 +23,7 @@ export class ServerContext {
     this.config = config;
     this.api = new TheBrainApi({
       apiKey: config.apiKey,
-      baseUrl: config.baseUrl,
+      ...(config.baseUrl !== undefined ? { baseUrl: config.baseUrl } : {}),
       timeoutMs: config.requestTimeoutMs,
     });
     this.embedder = new LocalEmbedder({

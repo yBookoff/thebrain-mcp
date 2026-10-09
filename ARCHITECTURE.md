@@ -56,7 +56,7 @@ ingest operation.
   │    indexer, search, document │    resources/* (typed calls)     │
   └──────────────────────────────┴──────────────────────────────────┘
               node:sqlite                  TheBrain local API
-        (+ optional transformers)          http://localhost:8001
+        (+ optional transformers)          http://localhost:11522
 ```
 
 The dependency rule is one-directional: `server` → `operations` → {`semantic`,
@@ -82,6 +82,15 @@ that matter most:
 
 `emptyOn400()` wraps the endpoints that answer 400 when a collection is empty
 (`/types`, `/tags`) — an API quirk, not a caller error.
+
+**The address is found, not assumed.** A TheBrain update moved the local API
+from port 8001 to 11522, and `npx` hands every user the newest server whatever
+build of TheBrain they run. So with no `THEBRAIN_BASE_URL` the client tries
+11522, then 8001, and keeps to whichever answered last. Only a *refused*
+connection moves on to the next address: nothing listened, so nothing was sent,
+and repeating even a write is safe. A timeout or a dropped connection may have
+reached TheBrain, so it is reported rather than retried elsewhere. An explicit
+`THEBRAIN_BASE_URL` is used alone, with no fallback.
 
 ### `src/semantic/` — meaning-based retrieval
 

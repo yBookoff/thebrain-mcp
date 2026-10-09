@@ -103,6 +103,6 @@ The API key lives in TheBrain under Settings → User → Local API Key. Pass it
 through the environment; never commit it.
 
 ```
-http://localhost:8001/api/v1/docs.json   # OpenAPI
-http://localhost:8001/api/index.html     # Swagger UI
+http://localhost:11522/api/v1/docs.json   # OpenAPI
+http://localhost:11522/api/index.html     # Swagger UI
 ```

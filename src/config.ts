@@ -8,9 +8,12 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { normalizeBaseUrl } from "./api/client.js";
+
 export interface Config {
   apiKey: string;
-  baseUrl: string;
+  /** Address of the local API. Unset: the client tries the ports it knows. */
+  baseUrl: string | undefined;
   /** Directory for indexes. One file per brain. */
   dataDir: string;
   /** Embedding model; changing it invalidates any existing index. */
@@ -39,6 +42,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
 
+  const baseUrl = env["THEBRAIN_BASE_URL"]?.trim();
+
   const dtype = (env["THEBRAIN_EMBEDDING_DTYPE"] ?? "q8").trim();
   if (!VALID_DTYPES.has(dtype)) {
     throw new ConfigError(
@@ -49,7 +54,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   return {
     apiKey,
-    baseUrl: (env["THEBRAIN_BASE_URL"] ?? "http://localhost:8001").replace(/\/+$/, ""),
+    baseUrl: baseUrl ? normalizeBaseUrl(baseUrl) : undefined,
     dataDir: env["THEBRAIN_DATA_DIR"] ?? join(homedir(), ".thebrain-mcp"),
     embeddingModel: env["THEBRAIN_EMBEDDING_MODEL"] ?? "Xenova/multilingual-e5-small",
     embeddingDtype: dtype as Config["embeddingDtype"],

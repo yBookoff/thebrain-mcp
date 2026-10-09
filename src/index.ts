@@ -7,6 +7,7 @@
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
+import { DEFAULT_BASE_URLS } from "./api/client.js";
 import { ConfigError, loadConfig } from "./config.js";
 import { createServer } from "./server/index.js";
 
@@ -37,7 +38,8 @@ async function main(): Promise<void> {
   process.once("SIGTERM", shutdown("SIGTERM"));
 
   await server.connect(new StdioServerTransport());
-  log(`connected to ${config.baseUrl}, indexes in ${config.dataDir}`);
+  const address = config.baseUrl ?? DEFAULT_BASE_URLS.join(" or ");
+  log(`connected, TheBrain expected at ${address}, indexes in ${config.dataDir}`);
 }
 
 main().catch((error: unknown) => {

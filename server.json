@@ -25,7 +25,7 @@
         },
         {
           "name": "THEBRAIN_BASE_URL",
-          "description": "Address of the local API. Default http://localhost:8001",
+          "description": "Address of the local API. Default http://localhost:11522, then http://localhost:8001 for older TheBrain builds",
           "isRequired": false,
           "isSecret": false,
           "format": "string"
