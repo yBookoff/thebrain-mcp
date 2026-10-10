@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { TheBrainApi } from "../src/api/index.js";
+import { TheBrainError, type TheBrainApi } from "../src/api/index.js";
 import {
   IngestValidationError,
   ingest,
@@ -13,7 +13,13 @@ const ROOT = "bbbbbbbb-0000-4000-8000-000000000002";
 
 /** In-memory fake brain: keeps what was created and can list children. */
 function fakeBrain(
-  existing: Array<{ id: string; name: string; parent?: string; aliases?: string[] }> = [],
+  existing: Array<{
+    id: string;
+    name: string;
+    parent?: string;
+    aliases?: string[];
+    typeId?: string;
+  }> = [],
 ) {
   let counter = 0;
   const thoughts = new Map(
@@ -34,12 +40,20 @@ function fakeBrain(
   const build = { aliases: true };
   const links: Array<{ a: string; b: string; relation: number; name?: string }> = [];
   const failOn = new Set<string>();
+  /** The brain's types, and each read that asked whether something is one. */
+  const types = new Set<string>();
+  const typeReads: string[] = [];
 
   const api = {
     thoughts: {
       async create(
         _b: string,
-        input: { name: string; sourceThoughtId?: string; aliases?: readonly string[] },
+        input: {
+          name: string;
+          sourceThoughtId?: string;
+          aliases?: readonly string[];
+          typeId?: string;
+        },
       ) {
         if (failOn.has(input.name)) throw new Error("server refused");
         counter += 1;
@@ -48,6 +62,7 @@ function fakeBrain(
           id,
           name: input.name,
           ...(input.sourceThoughtId !== undefined ? { parent: input.sourceThoughtId } : {}),
+          ...(input.typeId !== undefined ? { typeId: input.typeId } : {}),
           note: "",
           tags: [],
           aliases: [...(input.aliases ?? [])],
@@ -70,6 +85,14 @@ function fakeBrain(
       },
       async supportsAliases() {
         return build.aliases;
+      },
+      // As the real method: throws unless the identifier names a type.
+      async requireType(_b: string, typeId: string) {
+        typeReads.push(typeId);
+        if (!types.has(typeId)) {
+          throw new TheBrainError("not_a_type", `typeId ${typeId} is not a type`);
+        }
+        return { id: typeId, kind: 2 };
       },
       // As the real method: reads the list, adds what is new ignoring case,
       // and writes only when something was.
@@ -132,6 +155,8 @@ function fakeBrain(
     thoughts,
     links,
     failOn,
+    types,
+    typeReads,
     aliasWrites,
     build,
     settle,
@@ -416,6 +441,51 @@ describe("aliases in a batch", () => {
     expect(outcome.created).toHaveLength(1);
     expect(outcome.aliasesWritten).toBe(0);
     expect(outcome.failures).toEqual([{ what: 'aliases for "RAG"', reason: "server refused" }]);
+  });
+});
+
+describe("types in a batch", () => {
+  const TYPE = "cccccccc-0000-4000-8000-000000000003";
+  const OTHER = "dddddddd-0000-4000-8000-000000000004";
+  const plan = (leafType: string): IngestPlan => ({
+    thoughts: [
+      { tempId: "top", name: "Retrieval", parent: ROOT, typeId: TYPE, note: "summary" },
+      { tempId: "mid", name: "RAG", parent: "top", typeId: TYPE },
+      { tempId: "leaf", name: "Chunking", parent: "mid", typeId: leafType },
+    ],
+  });
+
+  it("a typeId that is not a type rejects the plan before any write", async () => {
+    // The API would take it, with a 200, and make a parent or a tag of it.
+    // Refused at its own turn instead, the thought would leave those under it
+    // created with no parent.
+    const { api, thoughts, types } = fakeBrain([{ id: ROOT, name: "root" }]);
+    types.add(TYPE);
+    await expect(ingest(api, BRAIN, plan(OTHER))).rejects.toMatchObject({
+      kind: "not_a_type",
+      message: expect.stringContaining(OTHER),
+    });
+    expect([...thoughts.keys()]).toEqual([ROOT]);
+  });
+
+  it("ahead of the writes each type is read once, however many thoughts carry it", async () => {
+    const { api, thoughts, types, typeReads } = fakeBrain([{ id: ROOT, name: "root" }]);
+    types.add(TYPE).add(OTHER);
+    const outcome = await ingest(api, BRAIN, plan(OTHER));
+
+    expect(typeReads.sort()).toEqual([TYPE, OTHER].sort());
+    expect(outcome.failures).toEqual([]);
+    expect(outcome.created.map((c) => thoughts.get(c.thoughtId)?.typeId)).toEqual([
+      TYPE,
+      TYPE,
+      OTHER,
+    ]);
+  });
+
+  it("a plan without types reads none", async () => {
+    const { api, typeReads } = fakeBrain([{ id: ROOT, name: "root" }]);
+    await ingest(api, BRAIN, { thoughts: [{ tempId: "a", name: "A", parent: ROOT }] });
+    expect(typeReads).toEqual([]);
   });
 });
 

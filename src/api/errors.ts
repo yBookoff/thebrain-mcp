@@ -20,6 +20,13 @@ export type ApiErrorKind =
   | "route_miss"
   /** Local validation: argument is not a UUID. Never reaches the network. */
   | "invalid_uuid"
+  /**
+   * A `typeId` that names a thought of another kind, nothing, or the thought it
+   * is for. The API has no such error: it answers 200, and makes a parent or a
+   * tag of what it was given or does nothing at all. Raised ahead of the
+   * write, so nothing was written.
+   */
+  | "not_a_type"
   /** Connection failed or dropped. */
   | "network"
   /** A response arrived but could not be parsed. */

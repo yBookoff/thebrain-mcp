@@ -68,8 +68,8 @@ export interface IngestOutcome {
   linksCreated: number;
   /**
    * Links that already existed. Cases where the requested kind did not match
-   * the actual one are flagged separately: asking for a jump between a thought
-   * and its own parent renames the hierarchical link instead of adding a new one.
+   * the actual one are flagged separately: a jump asked for between a thought and
+   * its own parent is not posted, since the API would turn the parent link into it.
    */
   linksReused: Array<{ from: string; to: string; note: string }>;
   notesWritten: number;
@@ -179,6 +179,13 @@ export async function ingest(
   ) {
     throw new IngestValidationError(ALIASES_UNSUPPORTED);
   }
+
+  // Types too are read before the first write, once each. The API takes a
+  // typeId that is no type and makes a parent or a tag of it, and a thought
+  // refused in the middle of a batch leaves those under it created with no
+  // parent. `create` reads its type again: 200 such reads took 37 ms.
+  const typeIds = new Set(plan.thoughts.flatMap((t) => (t.typeId === undefined ? [] : [t.typeId])));
+  await mapWithConcurrency([...typeIds], 6, (typeId) => api.thoughts.requireType(brainId, typeId));
 
   const outcome: IngestOutcome = {
     created: [],

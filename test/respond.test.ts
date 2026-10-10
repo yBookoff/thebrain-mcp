@@ -51,6 +51,15 @@ describe("error explanations point at the next step", () => {
     expect(text).toMatch(/do not invent/);
   });
 
+  it("a typeId that is not a type points at the list of types, and says nothing was written", () => {
+    const text = describeError(
+      new TheBrainError("not_a_type", 'typeId 1f0e is not a type: it is the tag "gotcha"'),
+    );
+    expect(text).toMatch(/is not a type: it is the tag "gotcha"\./);
+    expect(text).toMatch(/Nothing was written/);
+    expect(text).toMatch(/brain_list_types_and_tags/);
+  });
+
   it("a key problem says where to find the key", () => {
     expect(describeError(new TheBrainError("auth", "Invalid API Key"))).toMatch(
       /Settings > User > Local API Key/,

@@ -69,7 +69,7 @@ without a protocol harness.
 Its whole job is to turn a hostile HTTP surface into typed calls that either
 return data or throw a `TheBrainError` with a machine-readable `kind`
 (`auth | forbidden | not_found | bad_request | server | route_miss |
-invalid_uuid | network | malformed`).
+invalid_uuid | not_a_type | network | malformed`).
 
 "Hostile" is not an exaggeration — see §7 for the catalogue. The two defences
 that matter most:
@@ -223,8 +223,8 @@ Four properties, each of which took a bug to get right:
   same level resolve to one thought rather than racing each other into two. (This
   was a real bug, caught by a unit test.)
 - **Honest about what it did not do.** If a requested jump is between a thought
-  and its own parent, the API silently renames the existing hierarchy link
-  instead of creating a jump. The report carries a "Links that already existed"
+  and its own parent, the API would turn the hierarchy link into that jump, so
+  the link is left as it is. The report carries a "Links that already existed"
   section with the mismatch spelled out, rather than counting it as created.
 
 ---
@@ -315,6 +315,11 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     with null answers 200 and leaves the type where it was, so `thoughts.update()`
     deletes the link from the type instead, and reads the thought back before it
     calls the type removed.
+15. **`typeId` takes any thought, with a 200.** It is a link from whatever it
+    names: a type becomes the type, a tag is attached, an ordinary thought
+    becomes one more parent, and the last two leave the type as it was. So
+    `update()` and `create()` read the kind before they write, and `update()`
+    waits for the type to read back. A parent link towards a type sets it too.
 
 ### Write visibility
 
@@ -328,6 +333,9 @@ Measured against a live API by polling until the result appeared:
 | `create` with aliases → `get(id)` shows them | usually instant, up to 0.15 s |
 | clear a label or a colour → `get(id)` | up to 0.2 s |
 | delete a type's link → `get(id)` without `typeId` | 20–210 ms |
+| set a type by `PATCH` → `get(id)` | ~0.1 s, 107 ms at the most |
+| `create` with a type → `get(id)` shows it | instant |
+| the first `PATCH` after a burst of creates → `get(id)` | 0.6–0.8 s after 150, 2.6 s after 300 with a type |
 | `set note` → `get note` | ~0.2 s |
 | `attachTag` → `graph.tags` | ~0.1–0.5 s |
 | `attach URL` → `by-location` | instant |

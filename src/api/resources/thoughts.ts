@@ -30,6 +30,7 @@ export interface CreateThoughtInput {
   label?: string;
   /** Alternate names. See `UpdateThoughtInput.aliases` for what saving one costs. */
   aliases?: readonly string[];
+  /** Has to name a type, which is read first: see `requireType`. */
   typeId?: string;
   acType?: number;
 }
@@ -67,7 +68,13 @@ export const MAX_ALIASES = 100;
  *
  * Aliases, measured over 82 writes: the new list showed up 50–100 ms later,
  * 0.2 s at the most, and 7 times it was there at once. A removed type, over 13
- * removals: 20–210 ms, and not once on the first read.
+ * removals: 20–210 ms, and not once on the first read. A type set by a patch,
+ * over 160: up to 107 ms, 92 at the median, and 24 times it was there at once.
+ *
+ * That is a quiet brain. Writes queue up: the first patch after 150 thoughts
+ * created in a burst took 0.6–0.8 s to read back, and after thoughts created
+ * with a type 2.6 s for 300 and 5.3 s for 600, which is past the timeout.
+ * Three seconds after the burst it was 0.1 s again.
  */
 const READ_BACK = { stepMs: 25, timeoutMs: 2000 };
 
@@ -204,7 +211,9 @@ export class ThoughtsResource {
     if (input.sourceThoughtId !== undefined) {
       assertUuid(input.sourceThoughtId, "sourceThoughtId");
     }
-    if (input.typeId !== undefined) assertUuid(input.typeId, "typeId");
+    // Ahead of the request: one made with a tag or an ordinary thought for a
+    // type would leave a thought behind, tagged or with one parent too many.
+    if (input.typeId !== undefined) await this.requireType(brainId, input.typeId);
     const aliases = input.aliases ?? [];
     if (aliases.length > 0 && !(await this.supportsAliases(brainId))) {
       throw new TheBrainError("bad_request", ALIASES_UNSUPPORTED);
@@ -237,6 +246,11 @@ export class ThoughtsResource {
    * label (403) and for a colour (400), and for a type it answers 200 and
    * changes nothing, so a type goes through `removeType` instead.
    *
+   * A `typeId` has to name a type other than the thought itself, and is read
+   * before anything is sent (`requireType`). Once the patch is in, the call
+   * waits for the thought to read back with the type, and throws when it does
+   * not.
+   *
    * The API applies a patch one operation at a time and keeps what it wrote
    * before the one it refuses: an update that throws may have landed in part.
    */
@@ -248,7 +262,15 @@ export class ThoughtsResource {
     assertUuid(brainId, "brainId");
     assertUuid(thoughtId, "thoughtId");
     const { aliases, typeId, ...fields } = changes;
-    if (typeof typeId === "string") assertUuid(typeId, "typeId");
+    // A 200 that sets nothing, also when the thought is a type and so passes
+    // the check of its kind. Case aside: the API reads a UUID in capitals too.
+    if (typeof typeId === "string" && typeId.toLowerCase() === thoughtId.toLowerCase()) {
+      throw new TheBrainError(
+        "not_a_type",
+        `a thought cannot be its own type: typeId ${typeId} is the thought being updated`,
+      );
+    }
+    const type = typeof typeId === "string" ? await this.requireType(brainId, typeId) : null;
 
     const ops: JsonPatchOp[] = Object.entries(fields)
       .filter(([, value]) => value !== undefined)
@@ -257,9 +279,7 @@ export class ThoughtsResource {
           ? { op: "remove", path: `/${key}` }
           : { op: "replace", path: `/${key}`, value },
       );
-    if (typeof typeId === "string") {
-      ops.push({ op: "replace", path: "/typeId", value: typeId });
-    }
+    if (type !== null) ops.push({ op: "replace", path: "/typeId", value: type.id });
     if (aliases !== undefined) {
       ops.push(
         aliases === null || aliases.length === 0
@@ -273,7 +293,55 @@ export class ThoughtsResource {
         jsonPatch: ops,
       });
     }
+    // Not for certainty alone: a removal made before this reads back would
+    // find no type to remove.
+    if (
+      type !== null &&
+      !(await this.#readsBack(brainId, thoughtId, (t) => t.typeId === type.id))
+    ) {
+      throw new TheBrainError(
+        "server",
+        "the type was accepted, but the thought does not read back with it yet. After a " +
+          "burst of writes that can take seconds: read the thought before setting the type again",
+      );
+    }
     if (typeId === null) await this.removeType(brainId, thoughtId);
+  }
+
+  /**
+   * The type that `typeId` names. Throws `not_a_type` when it names a thought
+   * of another kind, or nothing.
+   *
+   * The API does not ask. A `typeId`, in a patch as in a create, links the
+   * thought under whatever it names, and that thought's kind decides what the
+   * link is: under a type the type, under a tag an attached tag, under an
+   * ordinary thought one more parent. Each is a 200, and the last two leave
+   * `typeId` as it was. So the kind is read here, ahead of the write.
+   */
+  async requireType(brainId: string, typeId: string): Promise<ThoughtDto> {
+    assertUuid(typeId, "typeId");
+    let named: ThoughtDto;
+    try {
+      named = await this.get(brainId, typeId);
+    } catch (error) {
+      // A thought that does not exist is a 403.
+      if (
+        error instanceof TheBrainError &&
+        (error.kind === "forbidden" || error.kind === "not_found")
+      ) {
+        throw new TheBrainError(
+          "not_a_type",
+          `typeId ${typeId} is not a type: no thought in this brain has that identifier`,
+        );
+      }
+      throw error;
+    }
+    if (named.kind === ThoughtKind.Type) return named;
+    throw new TheBrainError(
+      "not_a_type",
+      `typeId ${typeId} is not a type: it is the ` +
+        `${named.kind === ThoughtKind.Tag ? "tag" : "thought"} "${named.name ?? "(unnamed)"}"`,
+    );
   }
 
   /**
@@ -286,7 +354,8 @@ export class ThoughtsResource {
    * It returns once the thought reads back without a type, and throws when it
    * never does: a removal that did not happen must not pass for one that did.
    * The first read is trusted, though, and a type takes up to 0.2 s to read
-   * back: one set a moment ago is not seen here, and stays.
+   * back: one set a moment ago is not seen here, and stays. `update` waits for
+   * the type it sets, so that one is seen.
    */
   async removeType(brainId: string, thoughtId: string): Promise<boolean> {
     const { typeId } = await this.get(brainId, thoughtId);

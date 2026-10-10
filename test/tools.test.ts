@@ -346,6 +346,183 @@ describe("brain_ingest", () => {
   });
 });
 
+describe("a typeId that is not a type", () => {
+  const TYPE = "eeeeeeee-0000-4000-8000-000000000005";
+  const TAG = "ffffffff-0000-4000-8000-000000000006";
+  const NOBODY = "99999999-0000-4000-8000-000000000009";
+
+  /**
+   * A brain where PARENT is an ordinary thought, TAG a tag and TYPE a type.
+   * As on the live API, a write naming any of them as a type is a 200, and
+   * only the type becomes one.
+   */
+  const routes = (): Route[] => {
+    const others: Record<string, { name: string; kind: number }> = {
+      [PARENT]: { name: "Constraints", kind: 1 },
+      [TAG]: { name: "gotcha", kind: 4 },
+      [TYPE]: { name: "Pattern", kind: 2 },
+    };
+    let typeId: string | null = null;
+    return [
+      ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
+      ["GET /graph", () => graph(thought("parent"))],
+      [
+        "GET /api/thoughts/",
+        (url) => {
+          const id = url.pathname.split("/").pop()!;
+          if (id === THOUGHT) return thought("RAG", { typeId, aliases: [] });
+          // A thought that does not exist is a 403.
+          return id in others ? { ...thought("", { aliases: [] }), id, ...others[id] } : 403;
+        },
+      ],
+      [
+        "PATCH /api/thoughts/",
+        (_url, body) => {
+          for (const op of body as Array<{ path: string; value?: string }>) {
+            if (op.path === "/typeId" && op.value === TYPE) typeId = TYPE;
+          }
+          return 200;
+        },
+      ],
+      ["POST /api/thoughts/", () => ({ id: THOUGHT })],
+      ["POST /api/notes/", () => 200],
+      ["POST /api/links/", () => ({ id: LINK })],
+    ];
+  };
+  const refused = [
+    [PARENT, 'it is the thought "Constraints"'],
+    [TAG, 'it is the tag "gotcha"'],
+    [NOBODY, "no thought in this brain has that identifier"],
+  ] as const;
+
+  /** A refusal the model can act on, and not one request that writes. */
+  const expectRefused = (
+    result: { text: string; isError: boolean },
+    calls: Array<{ method: string }>,
+    typeId: string,
+    what: string,
+  ): void => {
+    expect(result.isError, what).toBe(true);
+    expect(result.text).toContain(`typeId ${typeId} is not a type: ${what}`);
+    expect(result.text).toContain("Nothing was written");
+    expect(result.text).toContain("brain_list_types_and_tags");
+    expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+  };
+
+  it("brain_update_thought reports an error, not success, and changes no other field", async () => {
+    // It used to list `typeId = "…"` under Done. The API answers 200, makes a
+    // parent or a tag of what it was given, and leaves the type as it was.
+    for (const [typeId, what] of refused) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_update_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        name: "renamed",
+        typeId,
+        addAliases: ["R.A.G."],
+      });
+      expectRefused(result, calls, typeId, what);
+    }
+  });
+
+  it("brain_update_thought refuses a thought named as its own type without a request", async () => {
+    // A 200 that sets nothing, a type included, which the check of its kind
+    // would let through.
+    for (const id of [THOUGHT, TYPE]) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_update_thought", {
+        brainId: BRAIN,
+        thoughtId: id,
+        name: "renamed",
+        typeId: id,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("a thought cannot be its own type");
+      expect(result.text).toContain("Nothing was written");
+      expect(calls).toEqual([]);
+    }
+  });
+
+  it("brain_create_thought creates nothing", async () => {
+    // Refused after the request, the thought would exist already, and a model
+    // told of an error would create it again.
+    for (const [typeId, what] of refused) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        parentId: PARENT,
+        typeId,
+        note: "body",
+        tagIds: [TAG],
+      });
+      expectRefused(result, calls, typeId, what);
+    }
+  });
+
+  it("brain_ingest writes no part of a plan that has one", async () => {
+    for (const [typeId, what] of refused) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_ingest", {
+        brainId: BRAIN,
+        thoughts: [
+          { tempId: "top", name: "Retrieval", parent: PARENT, typeId: TYPE, note: "body" },
+          { tempId: "rag", name: "RAG", parent: "top", typeId },
+        ],
+      });
+      expectRefused(result, calls, typeId, what);
+    }
+  });
+
+  it("a type is set, and reported as before", async () => {
+    const { call, sent } = await connect(routes());
+    const updated = await call("brain_update_thought", {
+      brainId: BRAIN,
+      thoughtId: THOUGHT,
+      typeId: TYPE,
+    });
+    expect(updated.isError).toBe(false);
+    expect(updated.text).toContain(`typeId = "${TYPE}"`);
+    expect(sent("PATCH")).toEqual([[{ op: "replace", path: "/typeId", value: TYPE }]]);
+
+    for (const [tool, args] of [
+      ["brain_create_thought", { name: "RAG", parentId: PARENT, typeId: TYPE }],
+      [
+        "brain_ingest",
+        { thoughts: [{ tempId: "rag", name: "RAG", parent: PARENT, typeId: TYPE }] },
+      ],
+    ] as const) {
+      const fresh = await connect(routes());
+      const result = await fresh.call(tool, { brainId: BRAIN, ...args });
+      expect(result.isError, tool).toBe(false);
+      expect(fresh.sent("POST"), tool).toEqual([expect.objectContaining({ typeId: TYPE })]);
+    }
+  });
+
+  it("every argument that takes a type says where its identifier comes from", async () => {
+    const { client } = await connect([]);
+    const { tools } = await client.listTools();
+    const properties = (name: string): Record<string, { description?: string }> =>
+      tools.find((t) => t.name === name)!.inputSchema.properties as Record<
+        string,
+        { description?: string }
+      >;
+    const item = (
+      properties("brain_ingest")["thoughts"] as unknown as {
+        items: { properties: Record<string, { description?: string }> };
+      }
+    ).items.properties;
+
+    for (const argument of [
+      properties("brain_create_thought")["typeId"],
+      properties("brain_update_thought")["typeId"],
+      item["typeId"],
+    ]) {
+      expect(argument?.description).toContain("brain_list_types_and_tags");
+    }
+  });
+});
+
 describe("what an alias costs", () => {
   it("is stated on every argument that can write one", async () => {
     // Per TheBrain's spec the first alias raises the version a brain requires

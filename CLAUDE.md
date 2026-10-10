@@ -74,6 +74,10 @@ silent wrong behaviour rather than a loud failure:
   colour a 400, and on `typeId` a 200 that leaves the type in place. Clear
   through `thoughts.update()`: it sends `remove`, and for a type deletes the
   link from the type and waits for the thought to read back without one.
+- **`typeId` takes any thought, with a 200.** A tag gets attached, an ordinary
+  thought becomes a parent, and the type stays as it was. `thoughts.update()`
+  and `create()` read the kind first and throw `not_a_type`; keep new writes
+  behind `requireType()`. A parent link towards a type sets the type as well.
 - **Markdown round-trip eats the closing ` ``` `.** Warn; suggest indented code.
 - **`by-location` compares the host by case, and a URL is stored as given.**
   `Example.com/p` does not find `example.com/p`. Attach through

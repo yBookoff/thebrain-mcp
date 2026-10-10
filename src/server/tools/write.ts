@@ -132,7 +132,11 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         thoughtId: z.string().describe("Which thought to change."),
         name: z.string().optional().describe("New title."),
         label: z.string().nullable().optional().describe("Caption; null clears it."),
-        typeId: z.string().nullable().optional().describe("Type; null removes the type."),
+        typeId: z
+          .string()
+          .nullable()
+          .optional()
+          .describe("Type identifier from brain_list_types_and_tags; null removes the type."),
         foregroundColor: z
           .string()
           .nullable()

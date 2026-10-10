@@ -301,6 +301,169 @@ describe("removing a type", () => {
   });
 });
 
+describe("a typeId that is not a type", () => {
+  const PLAIN = "eeeeeeee-0000-4000-8000-000000000005";
+  const NOBODY = "ffffffff-0000-4000-8000-000000000006";
+  const LINK = "99999999-0000-4000-8000-000000000009";
+
+  /**
+   * A brain with a type, a tag and an ordinary thought in it, and THOUGHT to
+   * write to. A typeId is taken as the live API takes it: a patch naming a
+   * thought is a 200 whatever its kind, only a type becomes the type, and a
+   * read shows it `staleReads` reads later.
+   */
+  const brain = (options: { staleReads?: number } = {}) => {
+    const others: Record<string, ThoughtDto> = {
+      [TYPE]: thought(TYPE, "Constraint", { kind: 2 }),
+      [TAG]: thought(TAG, "gotcha", { kind: 4 }),
+      [PLAIN]: thought(PLAIN, "API constraints"),
+    };
+    let typeId: string | null = null;
+    let stale = 0;
+    return apiWith([
+      [
+        "/api/thoughts/",
+        (url) => {
+          const id = url.pathname.split("/").pop()!;
+          // A thought that does not exist is a 403.
+          if (id !== THOUGHT) return others[id] ?? 403;
+          if (stale === 0) return thought(THOUGHT, "written to", { typeId });
+          stale -= 1;
+          return thought(THOUGHT, "written to");
+        },
+      ],
+      [
+        "PATCH /api/thoughts/",
+        (_url, init) => {
+          const ops = JSON.parse(String(init?.body)) as Array<{ path: string; value?: string }>;
+          for (const op of ops) {
+            if (op.path !== "/typeId") continue;
+            const named = others[op.value ?? ""];
+            if (named === undefined) return 403;
+            if (named.kind !== 2) continue;
+            typeId = named.id;
+            stale = options.staleReads ?? 0;
+          }
+          return 200;
+        },
+      ],
+      ["POST /api/thoughts/", () => ({ id: THOUGHT })],
+      [
+        "/api/links/",
+        () =>
+          typeId === null
+            ? 404
+            : { id: LINK, thoughtIdA: typeId, thoughtIdB: THOUGHT, relation: 1, meaning: 2 },
+      ],
+      ["DELETE /api/links/", () => ((typeId = null), 200)],
+    ]);
+  };
+  const writes = (calls: Array<{ method: string }>): string[] =>
+    calls.filter((c) => c.method !== "GET").map((c) => c.method);
+  const refused = [
+    [PLAIN, /is not a type: it is the thought "API constraints"/],
+    [TAG, /is not a type: it is the tag "gotcha"/],
+    [NOBODY, /is not a type: no thought in this brain has that identifier/],
+  ] as const;
+
+  it("update refuses an ordinary thought, a tag and an identifier nobody has, and sends nothing", async () => {
+    // Measured: the API answers 200 to the first two, makes a parent or a tag
+    // of what it was given and leaves typeId as it was.
+    for (const [typeId, message] of refused) {
+      const { api, calls } = brain();
+      await expect(
+        api.thoughts.update(BRAIN, THOUGHT, { name: "renamed", typeId }),
+      ).rejects.toMatchObject({ kind: "not_a_type", message: expect.stringMatching(message) });
+      expect(writes(calls)).toEqual([]);
+    }
+  });
+
+  it("create refuses the same three, and creates nothing", async () => {
+    for (const [typeId, message] of refused) {
+      const { api, calls } = brain();
+      await expect(
+        api.thoughts.create(BRAIN, { name: "new", sourceThoughtId: PLAIN, typeId }),
+      ).rejects.toMatchObject({ kind: "not_a_type", message: expect.stringMatching(message) });
+      expect(writes(calls)).toEqual([]);
+    }
+  });
+
+  it("a type is read first and sent after", async () => {
+    const { api, calls } = brain();
+    await api.thoughts.update(BRAIN, THOUGHT, { typeId: TYPE });
+    await api.thoughts.create(BRAIN, { name: "new", typeId: TYPE });
+
+    const sent = calls.map((c) => `${c.method} ${c.url.pathname}`);
+    expect(sent.slice(0, 2)).toEqual([
+      `GET /api/thoughts/${BRAIN}/${TYPE}`,
+      `PATCH /api/thoughts/${BRAIN}/${THOUGHT}`,
+    ]);
+    expect(calls[1]!.body).toEqual([{ op: "replace", path: "/typeId", value: TYPE }]);
+    expect(sent.slice(-2)).toEqual([
+      `GET /api/thoughts/${BRAIN}/${TYPE}`,
+      `POST /api/thoughts/${BRAIN}`,
+    ]);
+    expect(calls.at(-1)!.body).toMatchObject({ name: "new", typeId: TYPE });
+  });
+
+  it("update returns only once the thought reads back with the type", async () => {
+    // Measured: a type set by a patch shows on a read up to 107 ms later.
+    const { api, calls } = brain({ staleReads: 3 });
+    await api.thoughts.update(BRAIN, THOUGHT, { typeId: TYPE });
+    const reads = calls.filter((c) => c.method === "GET" && c.url.pathname.endsWith(THOUGHT));
+    // Three stale reads and the one that agrees.
+    expect(reads).toHaveLength(4);
+  });
+
+  it("so a removal straight after finds the type it is to remove", async () => {
+    // `removeType` trusts its first read. Before `update` waited, that read
+    // came back without the type, nothing was removed, and the type stayed.
+    const { api, calls } = brain({ staleReads: 3 });
+    await api.thoughts.update(BRAIN, THOUGHT, { typeId: TYPE });
+    await api.thoughts.update(BRAIN, THOUGHT, { typeId: null });
+    expect(writes(calls)).toEqual(["PATCH", "DELETE"]);
+    expect((await api.thoughts.get(BRAIN, THOUGHT)).typeId).toBeNull();
+  });
+
+  it("throws when the type is accepted and never reads back", async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = brain({ staleReads: Infinity });
+      const pending = api.thoughts.update(BRAIN, THOUGHT, { typeId: TYPE });
+      const outcome = expect(pending).rejects.toMatchObject({
+        kind: "server",
+        message: expect.stringMatching(/does not read back with it/),
+      });
+      await vi.advanceTimersByTimeAsync(5000);
+      await outcome;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a thought named as its own type is refused before any request, a type too", async () => {
+    // Measured: a 200 that sets nothing. A type passes the check of its kind,
+    // and left to the read-back it cost the whole timeout to be told, wrongly,
+    // that the type might yet show.
+    for (const id of [THOUGHT, TYPE]) {
+      const { api, fetchImpl } = brain();
+      await expect(
+        api.thoughts.update(BRAIN, id, { name: "renamed", typeId: id.toUpperCase() }),
+      ).rejects.toMatchObject({
+        kind: "not_a_type",
+        message: expect.stringMatching(/a thought cannot be its own type/),
+      });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a failure to read the type stays what it was", async () => {
+    // Only "no such thought" means "not a type". A rejected key is not that.
+    const { api } = apiWith([["/api/thoughts/", () => 401]]);
+    await expect(api.thoughts.requireType(BRAIN, TYPE)).rejects.toMatchObject({ kind: "auth" });
+  });
+});
+
 describe("aliases", () => {
   const patches = (calls: Array<{ method: string; body: unknown }>): unknown[] =>
     calls.filter((c) => c.method === "PATCH").map((c) => c.body);
