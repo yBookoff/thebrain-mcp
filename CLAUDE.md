@@ -95,7 +95,13 @@ silent wrong behaviour rather than a loud failure:
   host case set aside. That list is a copy refreshed about every 0.1 s, up to
   0.2 s behind a write; `by-location` is not.
 - **Tags attach via `POST /api/links` with `relation: 2` against a `kind=4`
-  thought.** The server rewrites it to `relation=1, meaning=5`.
+  thought.** The server rewrites it to `relation=1, meaning=5`. Against a type
+  the same request sets the thought's type and against an ordinary thought it
+  adds a parent, each with a 200, and the lookup behind a detach returns
+  whatever link the two share. `links.attachTag()` reads the kind first and
+  throws `not_a_tag`, and `detachTag()` deletes only the tag's own link. A
+  caller that writes something before the tag calls `links.requireTag()` ahead
+  of that write.
 - **In the log a tag is only a link.** Attaching one logs nothing against the
   thought: the link's `101` has the tag in `extraAId` and the thought in
   `extraBId`, the same as an ordinary parent link's. Renaming a tag or a type
