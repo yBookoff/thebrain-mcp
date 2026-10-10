@@ -219,6 +219,17 @@ types and tags from 1078 to 1138, a traversal that met three of them from 845
 to 865. The descriptions say nothing of the marks, so `tools/list` is the
 size it was.
 
+What stands under a type or a tag is named for what it is. A type's graph
+lists the thoughts of that type as `children`, and a tag's the thoughts it is
+on (contract tests), and `brain_get_thought` printed both as "Children". On a
+type the section is "Thoughts of this type", on a tag "Thoughts with this
+tag", and on any other thought "Children" as before. A section's name is what
+a model acts on: "Children" under a type or a tag asks for a child, and a
+child added there is refused (§7, items 18 and 21), which is a call spent and
+an error of some 300 characters to read. The names cost 13 characters on a
+type and 14 on a tag, 191 to 204 and 189 to 203 for one with two thoughts,
+and nothing on a thought that is neither.
+
 Left as they were: a thought's tags are names still, because an identifier
 each on every read of a tagged thought is paid far more often than a tag is
 taken off, and `brain_list_types_and_tags` has them; and the active thought of

@@ -49,6 +49,16 @@ brain_get_thought { thoughtId: "<id>" }
 Empty in every link section means an orphan. Propose where to attach it, based on
 a search for something similar.
 
+That holds for an ordinary thought only. A type or a tag is vocabulary, not a
+thought that lost its place: nothing is meant to sit above it, and one that
+nothing uses yet shows a heading and no sections at all, which is exactly what
+an orphan looks like. Tell them apart by the mark that only a type or a tag
+carries, `[type]` or `[tag]`: after the name in `brain_recent_changes`, after
+the identifier in `brain_get_thought`. Leave a marked thought out of the hunt,
+and never propose a parent for it. One that is in use lists its thoughts under
+`Thoughts of this type` or `Thoughts with this tag`; one that is not is unused
+vocabulary, worth at most a line of its own in the report.
+
 ### Stubs
 
 The thought exists, the note does not, and there are one or two links. Either a

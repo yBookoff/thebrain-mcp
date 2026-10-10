@@ -10,6 +10,7 @@ import { z } from "zod";
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
+import { TheBrainError } from "../../api/errors.js";
 import { compareLogTime, logTime } from "../../api/log.js";
 import { ThoughtKind, aliasesOf, type ModificationLogDto } from "../../api/types.js";
 import { describeChange, isSettingNoise, subjectIds } from "../../operations/changes.js";
@@ -24,6 +25,36 @@ const brainId = z
 
 /** Cap on how many names the log resolves: beyond this the output is unreadable anyway. */
 const MAX_RESOLVED_NAMES = 60;
+
+/**
+ * What `brain_recent_changes` prints for a thought it has no name for. Neither
+ * is `(unnamed)`, which here as in the other tools is a thought that is there
+ * and has no name.
+ *
+ * `DELETED`: the read of the thought answered 404, as it does for an
+ * identifier nobody has (docs/api-map.md, L3). The log is this brain's, so the
+ * thought was here and is not now.
+ *
+ * `NOT_READ`: the name was not looked up, being past the cap, or its read
+ * failed some other way. Nothing is known of the thought, least of all that
+ * it is gone.
+ */
+const DELETED = "(deleted)";
+const NOT_READ = "(name not read)";
+
+/**
+ * The title for what a graph lists as `children`. Under a type those are the
+ * thoughts of that type, and under a tag the thoughts the tag is on: a link
+ * with a type or a tag above is the type's or the tag's, never a parent's
+ * (docs/api-map.md, L23 and L24). "Children" there sends a model to add one,
+ * which the write tools refuse (`not_a_parent`, `tag_as_parent`). Any other
+ * thought keeps the title it had.
+ */
+function childrenTitle(kind: number): string {
+  if (kind === ThoughtKind.Type) return "Thoughts of this type";
+  if (kind === ThoughtKind.Tag) return "Thoughts with this tag";
+  return "Children";
+}
 
 /**
  * Cap on search phrasings. Each one costs an embedding and a full scan in
@@ -115,7 +146,7 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
             ? section("Tags", graph.tags.map((t) => t.name ?? "").join(", "))
             : null,
           section("Parents", bullet(names(graph.parents))),
-          section("Children", bullet(names(graph.children))),
+          section(childrenTitle(graph.thought.kind), bullet(names(graph.children))),
           section("Jumps", bullet(names(graph.jumps))),
           includeSiblings ? section("Siblings", bullet(names(graph.siblings))) : null,
           graph.attachments.length > 0
@@ -351,10 +382,16 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       // turns into hundreds of sequential requests.
       const unique = [...new Set(logs.flatMap(subjectIds))].slice(0, MAX_RESOLVED_NAMES);
       const resolved = await mapWithConcurrency(unique, 10, async (id) => {
-        const t = await ctx.api.thoughts.get(bid, id).catch(() => null);
-        // The read that resolves the name has the kind: a tag attached is
-        // logged as a link created, and reads as one unless the tag is marked.
-        return [id, `${t?.name ?? "(unnamed)"}${t ? kindMark(t.kind) : ""}`] as const;
+        const name = await ctx.api.thoughts.get(bid, id).then(
+          // The read that resolves the name has the kind: a tag attached is
+          // logged as a link created, and reads as one unless the tag is marked.
+          (t) => `${t.name ?? "(unnamed)"}${kindMark(t.kind)}`,
+          // Not "(unnamed)" for a read that failed: a thought deleted since
+          // would read as one that is there, in every row about it.
+          (error: unknown) =>
+            error instanceof TheBrainError && error.kind === "not_found" ? DELETED : NOT_READ,
+        );
+        return [id, name] as const;
       });
       const thoughtNames = new Map(resolved);
 
@@ -362,7 +399,7 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
         logTime(l).slice(0, 16).replace("T", " "),
         describeChange(l),
         subjectIds(l)
-          .map((id) => thoughtNames.get(id) ?? "(deleted or not shown)")
+          .map((id) => thoughtNames.get(id) ?? NOT_READ)
           .join(" ↔ "),
       ]);
 

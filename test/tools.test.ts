@@ -245,6 +245,41 @@ describe("a thought's kind in what the read tools print", () => {
       expect(text).toContain(`## Parents\n- Retrieval — ${PARENT}`);
       expect(text).not.toContain("[type]");
     });
+
+    it("what a type or a tag lists under it is not called its children", async () => {
+      // The API's graph has them in `children`: the thoughts of the type, and
+      // the thoughts the tag is on.
+      expect(await view({ ...graph(at(THOUGHT, "Pattern", 2)), children: [plain] })).toBe(
+        `# Pattern\n${THOUGHT} [type]\n\n## Thoughts of this type\n- Embeddings — ${OTHER}`,
+      );
+      expect(await view({ ...graph(at(THOUGHT, "gotcha", 4)), children: [plain] })).toBe(
+        `# gotcha\n${THOUGHT} [tag]\n\n## Thoughts with this tag\n- Embeddings — ${OTHER}`,
+      );
+    });
+
+    it("only that section is renamed, and only for a type or a tag", async () => {
+      const around = { parents: [at(PARENT, "Retrieval")], children: [type, tag], jumps: [plain] };
+      const sections = (text: string): string[] =>
+        text.split("\n").filter((l) => l.startsWith("## "));
+
+      // A type or a tag among an ordinary thought's children leaves them children.
+      expect(sections(await view({ ...graph(thought("RAG")), ...around }))).toEqual([
+        "## Parents",
+        "## Children",
+        "## Jumps",
+      ]);
+      expect(sections(await view({ ...graph(at(THOUGHT, "Pattern", 2)), ...around }))).toEqual([
+        "## Parents",
+        "## Thoughts of this type",
+        "## Jumps",
+      ]);
+      // A kind with no name here is not known to hold anything but children.
+      expect(sections(await view({ ...graph(at(THOUGHT, "Launch", 3)), ...around }))).toEqual([
+        "## Parents",
+        "## Children",
+        "## Jumps",
+      ]);
+    });
   });
 
   describe("brain_search", () => {
@@ -459,6 +494,134 @@ describe("a thought's kind in what the read tools print", () => {
         TYPE,
       ]);
     });
+  });
+});
+
+describe("brain_recent_changes and a thought it has no name for", () => {
+  const GONE = "eeeeeeee-0000-4000-8000-000000000005";
+  const NOBODY = "00000000-0000-0000-0000-000000000000";
+
+  /** A log entry as the API sends it: a thought created, unless `fields` say otherwise. */
+  const entry = (time: string, fields: Record<string, unknown>) => ({
+    sourceId: THOUGHT,
+    sourceType: 2,
+    extraAId: NOBODY,
+    extraAType: -1,
+    extraBId: NOBODY,
+    extraBType: -1,
+    modType: 101,
+    oldValue: null,
+    newValue: null,
+    userId: NOBODY,
+    brainId: BRAIN,
+    creationDateTime: `2026-10-10T12:${time}`,
+    modificationDateTime: `2026-10-10T12:${time}`,
+    syncUpdateDateTime: null,
+    ...fields,
+  });
+
+  /** The table's rows without their time: what happened, and to what. */
+  const rows = (text: string): string[][] =>
+    text
+      .split("\n")
+      .filter((l) => l.startsWith("2026-10-10 12:"))
+      .map((l) => l.split(/\s{2,}/).slice(1));
+
+  const changes = async (routes: Route[]) => {
+    const { call, calls } = await connect(routes);
+    const result = await call("brain_recent_changes", {
+      brainId: BRAIN,
+      since: "2026-10-10T00:00:00Z",
+      limit: 500,
+    });
+    expect(result.isError).toBe(false);
+    const read = calls.filter((c) => c.path.includes("/api/thoughts/"));
+    return { rows: rows(result.text), read: read.map((c) => c.path.split("/").at(-1)) };
+  };
+
+  it("a thought deleted since reads as deleted in every row about it, not as one with no name", async () => {
+    // What is there: one with a name, and one the API sends without.
+    const known = [thought("RAG"), { ...thought("RAG"), id: PARENT, name: null }];
+    const { rows, read } = await changes([
+      [
+        "GET /modifications",
+        () => [
+          entry("00:04", { sourceId: GONE, modType: 102 }),
+          entry("00:03", {
+            sourceId: LINK,
+            sourceType: 3,
+            modType: 102,
+            extraAId: THOUGHT,
+            extraAType: 2,
+            extraBId: GONE,
+            extraBType: 2,
+          }),
+          entry("00:02", { sourceId: PARENT }),
+          entry("00:01", { sourceId: GONE }),
+          entry("00:00", {}),
+        ],
+      ],
+      // The read of a thought nobody has is a 404, a deleted one's included.
+      ["GET /api/thoughts/", (url) => known.find((t) => url.pathname.endsWith(t.id)) ?? 404],
+    ]);
+
+    expect(rows).toEqual([
+      ["deleted", "(deleted)"],
+      ["link deleted", "RAG ↔ (deleted)"],
+      ["created", "(unnamed)"],
+      ["created", "(deleted)"],
+      ["created", "RAG"],
+    ]);
+    // One read of each thought named, as before.
+    expect(read).toEqual([GONE, THOUGHT, PARENT]);
+  });
+
+  it("a read that fails some other way does not make a thought deleted, or unnamed", async () => {
+    const { rows } = await changes([
+      [
+        "GET /modifications",
+        () => [
+          entry("00:02", { sourceId: PARENT }),
+          entry("00:01", { sourceId: GONE }),
+          entry("00:00", {}),
+        ],
+      ],
+      [
+        "GET /api/thoughts/",
+        (url) => {
+          if (url.pathname.endsWith(GONE)) return 500;
+          // The API's catch-all: it names no cause, and is not the read's
+          // answer for a thought nobody has.
+          return url.pathname.endsWith(PARENT) ? generic403() : thought("RAG");
+        },
+      ],
+    ]);
+
+    expect(rows).toEqual([
+      ["created", "(name not read)"],
+      ["created", "(name not read)"],
+      ["created", "RAG"],
+    ]);
+  });
+
+  it("past the cap on names a thought is one whose name was not read, in the same words", async () => {
+    const CAP = 60;
+    const id = (i: number): string => `${String(i).padStart(8, "0")}-0000-4000-8000-000000000009`;
+    const two = (n: number): string => String(n).padStart(2, "0");
+    // One thought more than the cap, the newest first, as the API sends them.
+    const log = Array.from({ length: CAP + 1 }, (_, i) =>
+      entry(`${two(Math.floor((CAP - i) / 60))}:${two((CAP - i) % 60)}`, { sourceId: id(i) }),
+    );
+    const { rows, read } = await changes([
+      ["GET /modifications", () => log],
+      ["GET /api/thoughts/", (url) => thought("RAG", { id: url.pathname.split("/").at(-1) })],
+    ]);
+
+    expect(read).toHaveLength(CAP);
+    expect(rows).toEqual([
+      ...Array.from({ length: CAP }, () => ["created", "RAG"]),
+      ["created", "(name not read)"],
+    ]);
   });
 });
 
