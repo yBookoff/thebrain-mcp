@@ -94,6 +94,14 @@ silent wrong behaviour rather than a loud failure:
   upper end first and throw `not_a_parent`; a tool calls
   `links.requireParent()` before its first write. A jump to a type is an
   ordinary link. A tag above is still let through, and tags the thought.
+- **Nothing is written as a sibling.** The spec's `relation: 4` is a 400 for a
+  link, a 200 and a thought linked to nothing for a create, and a 200 that
+  changes nothing for a patch. Siblings are thoughts with a parent in common;
+  no link joins them. So the tools take `child`, `parent` and `jump`,
+  `Relation` has no fourth, and `thoughts.create()` and `planLevels()` refuse
+  any other relation before the first write. `links.update()` takes no
+  relation either: a patch with 2 swaps the ends on every send. Change what a
+  link is through `links.create()`, which rewrites the link two thoughts share.
 - **Markdown round-trip eats the closing ` ``` `.** Warn; suggest indented code.
 - **`by-location` compares the host by case, and a URL is stored as given.**
   `Example.com/p` does not find `example.com/p`. Attach through
