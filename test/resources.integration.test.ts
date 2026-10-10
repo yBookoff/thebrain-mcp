@@ -621,7 +621,7 @@ suite("resource layer against the live API", () => {
       );
       return logs
         .filter(matches)
-        .sort((a, b) => compareLogTime(a.creationDateTime, b.creationDateTime));
+        .sort((a, b) => compareLogTime(logTime(a), logTime(b)));
     };
 
     const expectThoughtEvent = (event: ModificationLogDto, id: string): void => {
@@ -1114,11 +1114,27 @@ suite("resource layer against the live API", () => {
     expect(two.map(logEntryKey)).not.toContain(logEntryKey(range.at(-1)!));
   }, 30_000);
 
+  /**
+   * A paged read against one request for the same range: every entry once,
+   * newest first. Nothing may be written between the two reads. A new entry
+   * would be in one of them only, and a note changed again takes its 803 out
+   * of its place, as "a run of note changes in the log" pins. Neither caller
+   * writes while it reads.
+   */
+  const sameEntries =(paged: ModificationLogDto[], whole: ModificationLogDto[]): void => {
+    expect(paged.map(logEntryKey).sort()).toEqual(whole.map(logEntryKey).sort());
+    for (let i = 1; i < paged.length; i++) {
+      const order = compareLogTime(logTime(paged[i - 1]!), logTime(paged[i]!));
+      expect(order).toBeGreaterThanOrEqual(0);
+    }
+  };
+
   it("concurrent writes share timestamps, and paging keeps every tied entry once", async () => {
     // Only concurrency produces them: a single request that logs several
     // entries (a cascade delete, a first note) stamps each one apart. Measured
     // over repeated bursts of concurrent creates: 30 at once shared a timestamp
-    // in about half the bursts, 100 at once in every burst, 2 to 5 times.
+    // in about half the bursts, 100 at once in 57 bursts of 59, 4 times at the
+    // median and 11 at the most. Hence the three rounds.
     const BURST = 100;
     const since = new Date().toISOString();
     let tied = false;
@@ -1133,23 +1149,59 @@ suite("resource layer against the live API", () => {
     }
     expect(tied).toBe(true);
 
-    const sameEntries = (paged: ModificationLogDto[], whole: ModificationLogDto[]): void => {
-      expect(paged.map(logEntryKey).sort()).toEqual(whole.map(logEntryKey).sort());
-      for (let i = 1; i < paged.length; i++) {
-        const order = compareLogTime(logTime(paged[i - 1]!), logTime(paged[i]!));
-        expect(order).toBeGreaterThanOrEqual(0);
-      }
-    };
-    // A page of two is bound to split a tie, and often to be filled by one.
+    // A page of two is bound to split a tie, and often to be filled by one: a
+    // pager that dropped the entries stamped at its boundary lost one in each
+    // of 32 such bursts read back from the log.
     sameEntries(
       await api.brains.allModifications(brainId, { since, pageSize: 2 }),
       await api.brains.modifications(brainId, { maxLogs: 10_000, since }),
     );
+    // The same for the newest thousand entries, whatever wrote them, at
+    // another page size. This was the whole log, and a test brain's log only
+    // grows: at 52,000 entries it took 2,291 requests and 34 s, and past
+    // 100,000 the one request it was compared with would have come back short.
+    const recent = await api.brains.modifications(brainId, { maxLogs: 1_000 });
+    const from = logTime(recent.at(-1)!);
     sameEntries(
-      await api.brains.allModifications(brainId, { pageSize: 25 }),
-      await api.brains.modifications(brainId, { maxLogs: 100_000 }),
+      await api.brains.allModifications(brainId, { since: from, pageSize: 25 }),
+      await api.brains.modifications(brainId, { maxLogs: 10_000, since: from }),
     );
   }, 90_000);
+
+  it("a page that ends on an entry filed after its creation keeps the one filed beside it", async (ctx) => {
+    // What the first pager lost. It took a page's oldest creationDateTime as
+    // the next endTime, and a range that ends there leaves out whatever was
+    // filed later. That takes an entry filed a microsecond after its creation
+    // and listed just ahead of one filed in that same microsecond: 6 pairs
+    // among 68,967 entries of two test brains, all from concurrent creates,
+    // about one burst of 100 in twelve. The comparisons above do not show it
+    // unless a page happens to end on such a pair: with a copy of that pager
+    // they came out equal, at pages of 2 and of 25, over ranges that held one.
+    // A pair cannot be had to order: a burst gives one in twelve, and a note
+    // changed alongside a burst was filed at its creation 8 times of 8. So
+    // this looks for the nearest and ends a page on it. A log with none in
+    // its newest 50,000 entries cannot show it, and that many is all this
+    // reads, however long the log.
+    const WINDOW = 50_000;
+    const newest = await api.brains.modifications(brainId, { maxLogs: WINDOW });
+    const at = newest.findIndex((entry, i) => {
+      const next = newest[i + 1];
+      return next !== undefined && compareLogTime(logTime(next), entry.creationDateTime) > 0;
+    });
+    if (at < 0) ctx.skip("no entry filed between another's creation and its filing");
+    const last = newest[at]!;
+    const since = logTime(newest[at + 1]!);
+
+    const whole = await api.brains.modifications(brainId, { maxLogs: 2 * WINDOW, since });
+    const pages: ModificationLogDto[][] = [];
+    for await (const page of api.brains.modificationPages(brainId, { since, pageSize: at + 1 })) {
+      pages.push(page);
+    }
+    // The first page ends where it was aimed, on the entry filed late...
+    expect(logEntryKey(pages[0]!.at(-1)!)).toBe(logEntryKey(last));
+    // ...and the next one still brings its neighbour.
+    sameEntries(pages.flat(), whole);
+  }, 30_000);
 
   it("set replaces the note entirely", async () => {
     const id = await make("overwrite");
@@ -1286,10 +1338,23 @@ suite("resource layer against the live API", () => {
       expect(await api.attachments.byLocation(brainId, lower)).toHaveLength(2);
     });
 
-    it("by-location finds a new attachment at once; the thought's own list is behind", async () => {
-      // Measured over 30 attachments: by-location had each on the first read,
-      // the thought's list had none, and showed it 80–115 ms later.
+    it("by-location finds a new attachment at once; the thought's own list, once read, is behind", async () => {
+      // The list is a copy: made when a thought's attachments are first read,
+      // brought up to date about every 0.1 s after that. Measured over 300
+      // attachments paced as below: by-location had each on the first read; the
+      // list had 16, when a refresh fell in the few milliseconds between the
+      // write and the read, and the rest at the next refresh or the one after,
+      // 7 to 214 ms later with finer polling. Before the first read there is
+      // no copy to be behind: 370 new thoughts of 370 listed their first
+      // attachment at once, and 1 of 60 whose empty list had been read.
       const id = await make("attachment-lag");
+      const PACE = 150;
+
+      const first = `https://example.com/${PREFIX}lag-${Date.now()}-first`;
+      await attach(id, first);
+      expect(await locations(id)).toContain(first);
+      await settle(PACE);
+
       const ROUNDS = 5;
       let listedAtOnce = 0;
       for (let i = 0; i < ROUNDS; i++) {
@@ -1299,8 +1364,18 @@ suite("resource layer against the live API", () => {
 
         const listed = async (): Promise<boolean> => (await locations(id)).includes(url);
         if (await listed()) listedAtOnce += 1;
-        expect(await eventually(listed, Boolean)).toBe(true);
+        // Every round lasts as long, whatever that read said. Left to end as
+        // soon as the list had the attachment, a round listed at once ended
+        // straight after a refresh, and the write that followed was listed at
+        // once 19 times in 79, against 8 in 161 after a round that had to
+        // wait. With the first attachment counted as a round, five in a row
+        // came up once in 60 runs.
+        const [shown] = await Promise.all([eventually(listed, Boolean), settle(PACE)]);
+        expect(shown).toBe(true);
       }
+      // One read in nineteen, and no more often after another: of 60 runs 45
+      // had none at once, 14 had one and 1 had two. All five at once is one
+      // run in a million.
       expect(listedAtOnce).toBeLessThan(ROUNDS);
     });
 

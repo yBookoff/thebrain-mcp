@@ -346,7 +346,7 @@ Measured against a live API by polling until the result appeared:
 | `set note` → `get note` | ~0.2 s |
 | `attachTag` → `graph.tags` | ~0.1–0.5 s |
 | `attach URL` → `by-location` | instant |
-| `attach URL` → the thought's attachment list | ~0.1 s |
+| `attach URL` → the thought's attachment list | up to 0.2 s: a copy refreshed about every 0.1 s. Live on its first read |
 | **`create` → `findByName`** | **~5.6 s** |
 | `create` → full-text search | up to 15 s (per the vendor docs) |
 
@@ -475,7 +475,7 @@ measured on a live TheBrain 15, each point with a contract test:
 | Is `endTime` inclusive? | Yes, to the microsecond; `startTime` too |
 | What zone are the timestamps in? | UTC, with no offset, microsecond precision and trailing zeros trimmed: `2026-09-30T13:48:59.61898` |
 | Does the API read an offsetless bound the same way? | Yes, as UTC. An explicit offset is honoured |
-| Can two entries share a timestamp? | Yes, under concurrent writes: 100 creates at once shared 2–5. A single request that logs several entries stamps each one apart |
+| Can two entries share a timestamp? | Yes, under concurrent writes: 100 creates at once shared one in 57 bursts of 59, with 4 entries repeating another's at the median and 11 at the most. A single request that logs several entries stamps each one apart |
 | Does an entry stay where it was filed? | Not a note's `803` while it is the newest entry TheBrain has logged, in any brain: the next change to that note files it again under the new time, both timestamps, and leaves nothing at the old one. An entry with another above it never moves, nor one that an entry in another brain has followed |
 
 Each page asks for everything up to the oldest `modificationDateTime` of the

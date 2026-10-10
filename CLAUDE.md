@@ -92,7 +92,8 @@ silent wrong behaviour rather than a loud failure:
 - **`by-location` compares the host by case, and a URL is stored as given.**
   `Example.com/p` does not find `example.com/p`. Attach through
   `attachments.attachUrl()`, which also checks the thought's own list with the
-  host case set aside. That list is ~0.1 s behind a write; `by-location` is not.
+  host case set aside. That list is a copy refreshed about every 0.1 s, up to
+  0.2 s behind a write; `by-location` is not.
 - **Tags attach via `POST /api/links` with `relation: 2` against a `kind=4`
   thought.** The server rewrites it to `relation=1, meaning=5`.
 - **In the log a tag is only a link.** Attaching one logs nothing against the
