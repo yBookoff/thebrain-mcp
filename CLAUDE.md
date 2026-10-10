@@ -124,6 +124,14 @@ silent wrong behaviour rather than a loud failure:
 - **A write is in the log before it is in `graph`**, a tag by 0.1–0.5 s. Sync
   leaves its watermark `SYNC_OVERLAP_MS` behind so the next run reads that tail
   again; a watermark at the run's own start lost one tag in four.
+- **A thought that is not created takes what hangs on it, and nothing else.**
+  The thoughts under it used to be created with no parent and listed as
+  created, and every run of the plan made them again. `ingest()` skips what
+  depends on a failure, finishes the branches beside it, and returns
+  `failures` and `skipped` apart; `brain_ingest` makes any of either an
+  `isError` result that asks for the rest alone. A `tempId` is resolved as a
+  `tempId` only: one that reads as a UUID is not an identifier. A create that
+  timed out may have landed (`mayHaveLanded()`): say so, never call it failed.
 - **Search is prefix-based.** This is why `src/semantic/` exists.
 
 ## Semantic layer
