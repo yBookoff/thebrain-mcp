@@ -258,6 +258,24 @@ function isConnectionRefused(error: unknown): boolean {
   return cause instanceof Error && "code" in cause && cause.code === "ECONNREFUSED";
 }
 
+/**
+ * Whether a request that failed may have been carried out all the same: it
+ * went out and no answer came, as on a timeout or a dropped connection. A
+ * refused connection sent nothing, and an answer, whatever it says, is not
+ * this.
+ *
+ * It matters for a create: the thought can be there with no identifier to
+ * name it by. Measured by dropping the answer to a create on its way back:
+ * the thought was there 3 times of 3.
+ */
+export function mayHaveLanded(error: unknown): boolean {
+  return (
+    error instanceof TheBrainError &&
+    error.kind === "network" &&
+    !isConnectionRefused(error.cause)
+  );
+}
+
 function routeMissMessage(): string {
   return (
     "the path missed the API router and returned the app's HTML page — " +

@@ -65,6 +65,30 @@ brain_ingest { thoughts: [...], links: [...] }
 Do not create thoughts one at a time. Fifteen thoughts means fifteen calls plus
 links plus notes — minutes of work, and a failure halfway through.
 
+**If the call comes back as an error**, read which kind before doing anything.
+
+An error that says nothing was written means the plan had a mistake that
+showed before the first write. Fix it and send the plan again.
+
+An error with a "Failed" section means the batch was written in part. When a
+thought could not be created, everything that hangs on it was left out and is
+listed under "Skipped": the thoughts under it, the links to them. The rest of
+the plan is in the brain, with its identifiers in the table.
+
+- Do not send the same plan again while the table lists any thought. A thought
+  the plan created with no parent would be created a second time.
+- Fix the cause, then send a new plan holding only the failed and skipped
+  items. Where one of them refers to a thought from the table, put that
+  thought's identifier in place of its tempId.
+- With no table, no thought was written: fix the cause and send the plan as
+  it was.
+- A note or a tag that failed on a thought from the table: write it with
+  `brain_set_note` or `brain_tag`.
+- A line saying that no answer came: the thought may exist all the same. Look
+  at its parent with `brain_get_thought` before creating it again.
+- Nothing is rolled back, and tidying up by deletion is not yours to decide.
+  Tell the person what is in the brain and what is not.
+
 ### 5. Show the result
 
 ```

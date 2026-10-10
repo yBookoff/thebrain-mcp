@@ -118,14 +118,27 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
         .filter((t) => t.note !== undefined && warnIfFencedCode(t.note) !== null)
         .map((t) => t.name);
 
+      // A batch that left something unwritten is an error, so that it is not
+      // read as done. Its table names each thought by tempId too: the plan
+      // that follows refers to what exists by identifier.
+      const partial = outcome.failures.length > 0 || outcome.skipped.length > 0;
+      const row = (how: string, t: { tempId: string; thoughtId: string; name: string }) => [
+        how,
+        t.name,
+        t.thoughtId,
+        ...(partial ? [t.tempId] : []),
+      ];
       const rows = [
-        ...outcome.created.map((c) => ["created", c.name, c.thoughtId]),
-        ...outcome.reused.map((r) => ["existed", r.name, r.thoughtId]),
+        ...outcome.created.map((c) => row("created", c)),
+        ...outcome.reused.map((r) => row("existed", r)),
       ];
 
-      return ok(
+      return (partial ? fail : ok)(
         join([
-          section("Thoughts", table(["Outcome", "Title", "Identifier"], rows)),
+          section(
+            "Thoughts",
+            table(["Outcome", "Title", "Identifier", ...(partial ? ["tempId"] : [])], rows),
+          ),
           section(
             "Also",
             bullet([
@@ -143,14 +156,15 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
                 "Links that already existed",
                 bullet(outcome.linksReused.map((l) => `${l.from} -> ${l.to}: ${l.note}`)),
               ),
-          outcome.failures.length === 0
-            ? null
-            : section(
-                "Failed",
-                bullet(outcome.failures.map((f) => `${f.what}: ${f.reason}`)) +
-                  "\n\nEverything else was written. There is no rollback — retry only " +
-                  "the failed parts, otherwise you risk duplicates.",
+          section(
+            "Failed",
+            bullet(
+              outcome.failures.map(
+                (f) => `${f.what}: ${f.reason}${f.unanswered ? UNANSWERED : ""}`,
               ),
+            ),
+          ),
+          section("Skipped", bullet(outcome.skipped.map((s) => `${s.what}: ${s.reason}`))),
           fenceWarnings.length === 0
             ? null
             : section(
@@ -161,12 +175,49 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
               ),
           section(
             "Next",
-            "The identifiers above work immediately. To show the result to the user, " +
-              "open the root thought with brain_activate. Refresh the semantic index " +
-              "with brain_index using action=sync.",
+            partial
+              ? afterAFailure(
+                  rows.length > 0,
+                  outcome.failures.some((f) => f.unanswered),
+                )
+              : "The identifiers above work immediately. To show the result to the user, " +
+                  "open the root thought with brain_activate. Refresh the semantic index " +
+                  "with brain_index using action=sync.",
           ),
         ]),
       );
     }),
   );
 }
+
+/**
+ * What follows a batch written in part. It asks for the rest alone: a whole
+ * plan sent again finds a thought only as a child of its parent, and makes
+ * the others a second time. With no thought written there is nothing to make
+ * twice, and the plan is what to send.
+ */
+function afterAFailure(anyThought: boolean, unanswered: boolean): string {
+  if (!anyThought) {
+    return (
+      "None of the plan's thoughts was written" +
+      (unanswered ? ", unless a line under Failed says one may have been" : "") +
+      ", and nothing is rolled back. Fix the cause and send the plan again."
+    );
+  }
+  return (
+    "The batch was written in part, and nothing is rolled back. The thoughts in the " +
+    "table exist, and their identifiers work immediately. What is under Failed and " +
+    "Skipped was not written, a listed thought's note, tags and aliases included" +
+    (unanswered ? ", unless its line says it may have been. " : ". ") +
+    "Fix the cause and write only that: thoughts and links in a new plan, naming " +
+    "each thought of the table by its identifier in place of its tempId; a note, tag " +
+    "or alias of a thought in the table with brain_set_note, brain_tag or " +
+    "brain_update_thought. Do not send the whole plan again: a thought it made with " +
+    "no parent would be made twice."
+  );
+}
+
+/** Added to a create that got no answer, which is not a create that failed. */
+const UNANSWERED =
+  " — no answer came, so TheBrain may have created it all the same: before creating " +
+  "it again, look for it among its parent's children with brain_get_thought";

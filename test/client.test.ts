@@ -10,6 +10,7 @@ import {
   assertUuid,
   emptyOn400,
   isUuid,
+  mayHaveLanded,
   normalizeBaseUrl,
 } from "../src/api/client.js";
 import { TheBrainError } from "../src/api/errors.js";
@@ -325,10 +326,27 @@ describe("finding TheBrain", () => {
       apiKey: KEY,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
-    await expect(
-      client.post(`/api/thoughts/${BRAIN}`, { json: { name: "A" } }),
-    ).rejects.toMatchObject({ kind: "network" });
+    const create = client.post(`/api/thoughts/${BRAIN}`, { json: { name: "A" } });
+    await expect(create).rejects.toMatchObject({ kind: "network" });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // And the caller can tell: the thought may be there with no identifier.
+    expect(mayHaveLanded(await create.catch((e: unknown) => e))).toBe(true);
+  });
+
+  it("a request that went nowhere, or was answered, is not one that may have landed", async () => {
+    const { client } = machine([]);
+    const refused = await client
+      .post(`/api/thoughts/${BRAIN}`, { json: { name: "A" } })
+      .catch((e: unknown) => e);
+    expect(refused).toMatchObject({ kind: "network" });
+    expect(mayHaveLanded(refused)).toBe(false);
+
+    const answered = await clientReturning('"Source Thought x could not be located"', { status: 404 })
+      .client.post(`/api/thoughts/${BRAIN}`, { json: { name: "A" } })
+      .catch((e: unknown) => e);
+    expect(answered).toMatchObject({ kind: "not_found" });
+    expect(mayHaveLanded(answered)).toBe(false);
+    expect(mayHaveLanded(new Error("anything else"))).toBe(false);
   });
 
   it.each([

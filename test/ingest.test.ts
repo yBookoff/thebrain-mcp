@@ -41,6 +41,13 @@ function fakeBrain(
   const build = { aliases: true };
   const links: Array<{ a: string; b: string; relation: number; name?: string }> = [];
   const failOn = new Set<string>();
+  /** By name: what a create throws in place of making the thought. */
+  const failWith = new Map<string, Error>();
+  /**
+   * Creates whose answer is lost on the way back: the thought is made, and the
+   * caller gets what the client makes of a timeout.
+   */
+  const lostOn = new Set<string>();
   /** The brain's types, and each read that asked whether something is one. */
   const types = new Set<string>();
   const typeReads: string[] = [];
@@ -55,6 +62,7 @@ function fakeBrain(
       throw new TheBrainError("not_a_parent", `${field} ${id} cannot be a parent: it is a type`);
     }
   };
+  const known = (id: string): boolean => thoughts.has(id) || types.has(id) || tags.has(id);
 
   const api = {
     thoughts: {
@@ -69,9 +77,18 @@ function fakeBrain(
         },
       ) {
         if (failOn.has(input.name)) throw new Error("server refused");
+        if (failWith.has(input.name)) throw failWith.get(input.name)!;
         // As the real method: a thought is not made the child of a type.
         if (input.sourceThoughtId !== undefined && (input.relation ?? 1) === 1) {
           refuseTypeAsParent(input.sourceThoughtId, "sourceThoughtId");
+        }
+        // As the API: a source no thought has is a 404, and nothing is made.
+        if (input.sourceThoughtId !== undefined && !known(input.sourceThoughtId)) {
+          throw new TheBrainError(
+            "not_found",
+            `Source Thought ${input.sourceThoughtId} could not be located`,
+            { status: 404 },
+          );
         }
         counter += 1;
         const id = `new-${counter}`;
@@ -89,6 +106,9 @@ function fakeBrain(
         // this the fake diverges from reality on link deduplication.
         if (input.sourceThoughtId !== undefined) {
           links.push({ a: input.sourceThoughtId, b: id, relation: 1 });
+        }
+        if (lostOn.has(input.name)) {
+          throw new TheBrainError("network", "request exceeded 30000 ms");
         }
         return id;
       },
@@ -187,6 +207,8 @@ function fakeBrain(
     thoughts,
     links,
     failOn,
+    failWith,
+    lostOn,
     types,
     typeReads,
     tags,
@@ -401,9 +423,12 @@ describe("writing a batch", () => {
     const outcome = await ingest(api, BRAIN, plan);
 
     expect(outcome.created).toHaveLength(2);
-    expect(outcome.failures).toHaveLength(2); // the thought itself and its link
+    expect(outcome.failures).toHaveLength(1);
     expect(outcome.failures[0]!.what).toMatch(/Idea B/);
-    expect(outcome.failures.some((f) => f.reason.includes("was not created"))).toBe(true);
+    // Its link was not tried, which is not a failure of the link.
+    expect(outcome.skipped).toEqual([
+      { what: "link a -> b", reason: 'depends on "b", which was not created' },
+    ]);
   });
 
   it("no note is written for a thought that failed to be created", async () => {
@@ -421,6 +446,18 @@ describe("writing a batch", () => {
     expect(outcome.created).toHaveLength(1);
   });
 
+  it("a parentless thought is found by no later run: a second makes it again", async () => {
+    // Deduplication looks among a parent's children, and here there is none
+    // to look under. It is why a batch written in part asks for the rest alone.
+    const { api, thoughts } = fakeBrain();
+    const lone: IngestPlan = { thoughts: [{ tempId: "single", name: "Orphan" }] };
+    await ingest(api, BRAIN, lone);
+    const second = await ingest(api, BRAIN, lone);
+    expect(second.created).toHaveLength(1);
+    expect(second.reused).toEqual([]);
+    expect(thoughts.size).toBe(2);
+  });
+
   it("an existing link is not duplicated", async () => {
     const { api, links } = fakeBrain([{ id: ROOT, name: "root" }]);
     await ingest(api, BRAIN, plan);
@@ -429,6 +466,220 @@ describe("writing a batch", () => {
     expect(links).toHaveLength(afterFirst);
     expect(second.linksCreated).toBe(0);
     expect(second.linksReused).toHaveLength(1);
+  });
+});
+
+describe("a thought that fails in the middle of a batch", () => {
+  const NOBODY = "99999999-0000-4000-8000-000000000009";
+  const OTHER = "dddddddd-0000-4000-8000-000000000004";
+  const plan = (topParent: string = ROOT): IngestPlan => ({
+    thoughts: [
+      { tempId: "top", name: "Top", parent: topParent, note: "summary" },
+      { tempId: "mid", name: "Mid", parent: "top", note: "body" },
+      { tempId: "leaf", name: "Leaf", parent: "mid", tagIds: [TAG], aliases: ["L"] },
+      { tempId: "side", name: "Side", parent: ROOT },
+      { tempId: "sideleaf", name: "Side leaf", parent: "side", note: "kept" },
+    ],
+    links: [
+      { from: "mid", to: "side", name: "relates" },
+      { from: "leaf", to: "top" },
+      { from: "sideleaf", to: ROOT, name: "back" },
+    ],
+  });
+  const needs = (tempId: string): string => `depends on "${tempId}", which was not created`;
+  type Fake = ReturnType<typeof fakeBrain>;
+  /** The thoughts that hang under nothing, by name. */
+  const roots = ({ thoughts }: Fake): string[] =>
+    [...thoughts.values()].filter((t) => t.parent === undefined).map((t) => t.name);
+  const names = ({ thoughts }: Fake): string[] => [...thoughts.values()].map((t) => t.name).sort();
+
+  it("nothing is made under a thought that was not: what hangs on it is skipped, the rest written", async () => {
+    // The thoughts under it used to be created with no parent and listed as
+    // created, notes, tags and links to them included.
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    fake.failOn.add("Top");
+    const outcome = await ingest(fake.api, BRAIN, plan());
+
+    expect(roots(fake)).toEqual(["root"]);
+    expect(names(fake)).toEqual(["Side", "Side leaf", "root"]);
+    expect(outcome.created.map((c) => c.tempId)).toEqual(["side", "sideleaf"]);
+    expect(outcome.failures).toEqual([{ what: 'thought "Top" (top)', reason: "server refused" }]);
+    expect(outcome.skipped).toEqual([
+      { what: 'thought "Mid" (mid)', reason: needs("top") },
+      { what: 'thought "Leaf" (leaf)', reason: needs("top") },
+      { what: "link mid -> side", reason: needs("top") },
+      { what: "link leaf -> top", reason: needs("top") },
+    ]);
+    // The branch beside it is whole: its note, and its link to what exists.
+    expect(outcome.notesWritten).toBe(1);
+    expect(outcome.tagsAttached).toBe(0);
+    expect(outcome.aliasesWritten).toBe(0);
+    expect(outcome.linksCreated).toBe(1);
+    expect(fake.links.map((l) => l.name)).toContain("back");
+  });
+
+  it("a failure at the second level takes only what is under it", async () => {
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    fake.failOn.add("Mid");
+    const outcome = await ingest(fake.api, BRAIN, plan());
+
+    expect(roots(fake)).toEqual(["root"]);
+    expect(outcome.created.map((c) => c.tempId)).toEqual(["top", "side", "sideleaf"]);
+    expect(outcome.failures).toEqual([{ what: 'thought "Mid" (mid)', reason: "server refused" }]);
+    expect(outcome.skipped).toEqual([
+      { what: 'thought "Leaf" (leaf)', reason: needs("mid") },
+      { what: "link mid -> side", reason: needs("mid") },
+      { what: "link leaf -> top", reason: needs("mid") },
+    ]);
+    expect(outcome.notesWritten).toBe(2);
+    expect(outcome.tagsAttached).toBe(0);
+  });
+
+  it("a parent nobody has fails its children with the API's words, and theirs are skipped", async () => {
+    // Read ahead of the writes it passes for a parent: it is no type.
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    const outcome = await ingest(fake.api, BRAIN, plan(NOBODY));
+
+    expect(roots(fake)).toEqual(["root"]);
+    expect(outcome.failures).toEqual([
+      { what: 'thought "Top" (top)', reason: `Source Thought ${NOBODY} could not be located` },
+    ]);
+    expect(outcome.skipped.map((s) => s.what)).toEqual([
+      'thought "Mid" (mid)',
+      'thought "Leaf" (leaf)',
+      "link mid -> side",
+      "link leaf -> top",
+    ]);
+  });
+
+  it("a second run adds nothing while the failure lasts, and finishes the plan once it is gone", async () => {
+    // Each run used to leave one more "Mid" with no parent, and a "Leaf" under it.
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    fake.failOn.add("Top");
+    const first = await ingest(fake.api, BRAIN, plan());
+    const afterFirst = names(fake);
+
+    const second = await ingest(fake.api, BRAIN, plan());
+    expect(second.created).toEqual([]);
+    expect(second.reused.map((r) => r.tempId)).toEqual(["side", "sideleaf"]);
+    expect(second.failures).toEqual(first.failures);
+    expect(second.skipped).toEqual(first.skipped);
+    expect(names(fake)).toEqual(afterFirst);
+
+    fake.failOn.clear();
+    const third = await ingest(fake.api, BRAIN, plan());
+    expect(third.created.map((c) => c.tempId)).toEqual(["top", "mid", "leaf"]);
+    expect(third.failures).toEqual([]);
+    expect(third.skipped).toEqual([]);
+    expect(names(fake)).toEqual(["Leaf", "Mid", "Side", "Side leaf", "Top", "root"]);
+    expect(roots(fake)).toEqual(["root"]);
+  });
+
+  it("two plan items for one thought fail together, and what is under either is skipped", async () => {
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    fake.failOn.add("Same");
+    const outcome = await ingest(fake.api, BRAIN, {
+      thoughts: [
+        { tempId: "x", name: "Same", parent: ROOT },
+        { tempId: "y", name: "Same", parent: ROOT },
+        { tempId: "under", name: "Leaf", parent: "y" },
+      ],
+    });
+
+    expect(names(fake)).toEqual(["root"]);
+    expect(outcome.failures.map((f) => f.what)).toEqual(['thought "Same" (x)', 'thought "Same" (y)']);
+    expect(outcome.skipped).toEqual([{ what: 'thought "Leaf" (under)', reason: needs("y") }]);
+  });
+
+  it("a link between two branches that both failed names both", async () => {
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    fake.failOn.add("A").add("B");
+    const outcome = await ingest(fake.api, BRAIN, {
+      thoughts: [
+        { tempId: "a", name: "A", parent: ROOT },
+        { tempId: "b", name: "B", parent: ROOT },
+        { tempId: "under", name: "Leaf", parent: "b" },
+      ],
+      links: [
+        { from: "a", to: "under" },
+        { from: "b", to: "under" },
+      ],
+    });
+
+    expect(outcome.skipped).toEqual([
+      { what: 'thought "Leaf" (under)', reason: needs("b") },
+      { what: "link a -> under", reason: 'depends on "a" and "b", which were not created' },
+      { what: "link b -> under", reason: needs("b") },
+    ]);
+    expect(fake.links).toEqual([]);
+  });
+
+  it("a tempId that reads as a UUID is still a tempId: nothing lands on the thought that has it", async () => {
+    // Left unresolved, it used to be taken for the identifier it spells: the
+    // thought under it went under whatever the brain had there, and so did
+    // the link.
+    const fake = fakeBrain([
+      { id: ROOT, name: "root" },
+      { id: OTHER, name: "Existing", parent: ROOT },
+    ]);
+    fake.failOn.add("Top");
+    const outcome = await ingest(fake.api, BRAIN, {
+      thoughts: [
+        { tempId: OTHER, name: "Top", parent: ROOT },
+        { tempId: "leaf", name: "Leaf", parent: OTHER },
+      ],
+      links: [{ from: ROOT, to: OTHER, name: "about" }],
+    });
+
+    expect(names(fake)).toEqual(["Existing", "root"]);
+    expect(fake.links).toEqual([]);
+    expect(outcome.created).toEqual([]);
+    expect(outcome.linksCreated).toBe(0);
+    expect(outcome.skipped).toEqual([
+      { what: 'thought "Leaf" (leaf)', reason: needs(OTHER) },
+      { what: `link ${ROOT} -> ${OTHER}`, reason: needs(OTHER) },
+    ]);
+  });
+
+  it("a create that got no answer is marked: the thought may be there, and the next run finds it", async () => {
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    fake.lostOn.add("Mid");
+    const outcome = await ingest(fake.api, BRAIN, plan());
+
+    expect(roots(fake)).toEqual(["root"]);
+    expect(outcome.failures).toEqual([
+      { what: 'thought "Mid" (mid)', reason: "request exceeded 30000 ms", unanswered: true },
+    ]);
+    expect(outcome.skipped.map((s) => s.what)).toContain('thought "Leaf" (leaf)');
+    // It is there all the same, under its parent, and no identifier came back.
+    const top = outcome.created.find((c) => c.tempId === "top")!.thoughtId;
+    const mid = [...fake.thoughts.values()].find((t) => t.name === "Mid")!;
+    expect(mid.parent).toBe(top);
+    expect(mid.note).toBe("");
+
+    fake.lostOn.clear();
+    const second = await ingest(fake.api, BRAIN, plan());
+    expect(second.reused.map((r) => r.thoughtId)).toContain(mid.id);
+    expect(second.created.map((c) => c.tempId)).toEqual(["leaf"]);
+    expect(fake.thoughts.get(mid.id)?.note).toBe("body");
+    expect(names(fake)).toEqual(["Leaf", "Mid", "Side", "Side leaf", "Top", "root"]);
+  });
+
+  it("only a request that may have gone out is marked: not a refused connection, nor an answer", async () => {
+    const refused = new TheBrainError("network", "could not reach http://localhost:11522", {
+      cause: new TypeError("fetch failed", {
+        cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+      }),
+    });
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    fake.failWith.set("Top", refused).set("Side", new TheBrainError("server", "boom", { status: 500 }));
+    const outcome = await ingest(fake.api, BRAIN, plan());
+
+    expect(names(fake)).toEqual(["root"]);
+    expect(outcome.failures).toEqual([
+      { what: 'thought "Top" (top)', reason: "could not reach http://localhost:11522" },
+      { what: 'thought "Side" (side)', reason: "boom" },
+    ]);
   });
 });
 
@@ -549,8 +800,8 @@ describe("types in a batch", () => {
 
   it("a typeId that is not a type rejects the plan before any write", async () => {
     // The API would take it, with a 200, and make a parent or a tag of it.
-    // Refused at its own turn instead, the thought would leave those under it
-    // created with no parent.
+    // Refused at its own turn instead, the thought would leave the plan
+    // written in part, and nothing under it.
     const { api, thoughts, types } = fakeBrain([{ id: ROOT, name: "root" }]);
     types.add(TYPE);
     await expect(ingest(api, BRAIN, plan(OTHER))).rejects.toMatchObject({

@@ -12,9 +12,20 @@
  *  2. There is no rollback — the API offers no transactions. On a mid-batch
  *     failure a manifest of what was created is returned, so the agent can
  *     continue rather than start over.
+ *  3. A thought that fails takes with it whatever hangs on it, and nothing
+ *     else. The thoughts under it are not created and the links to them are
+ *     not tried: with no parent to go under they used to be created as roots
+ *     and listed as created, and each further run made them again. The
+ *     branches beside it are written to the end, since a second call would
+ *     only write them then.
  */
 
-import { ALIASES_UNSUPPORTED, normalizeAliases, type TheBrainApi } from "../api/index.js";
+import {
+  ALIASES_UNSUPPORTED,
+  mayHaveLanded,
+  normalizeAliases,
+  type TheBrainApi,
+} from "../api/index.js";
 import { Relation } from "../api/types.js";
 import { mapWithConcurrency } from "../semantic/indexer.js";
 
@@ -76,8 +87,17 @@ export interface IngestOutcome {
   tagsAttached: number;
   /** Thoughts whose alias list was written, at creation or by adding to it. */
   aliasesWritten: number;
-  /** What failed. Everything else has already been written. */
-  failures: Array<{ what: string; reason: string }>;
+  /**
+   * What was tried and failed. `unanswered` marks a create that went out and
+   * got no answer: the thought may be there, with no identifier to report.
+   */
+  failures: Array<{ what: string; reason: string; unanswered?: true }>;
+  /**
+   * What was not tried, because a thought it needs was not created: the
+   * thoughts under one that failed, with their notes, tags and aliases, and
+   * the links to any of them. The reason names the thought that failed.
+   */
+  skipped: Array<{ what: string; reason: string }>;
 }
 
 export class IngestValidationError extends Error {
@@ -184,8 +204,8 @@ export async function ingest(
 
   // Types too are read before the first write, once each. The API takes a
   // typeId that is no type and makes a parent or a tag of it, and a thought
-  // refused in the middle of a batch leaves those under it created with no
-  // parent. `create` reads its type again: 200 such reads took 37 ms.
+  // refused in the middle of a batch leaves the plan written in part, with
+  // nothing under it. `create` reads its type again: 200 such reads took 37 ms.
   const typeIds = new Set(plan.thoughts.flatMap((t) => (t.typeId === undefined ? [] : [t.typeId])));
   await mapWithConcurrency([...typeIds], 6, (typeId) => api.thoughts.requireType(brainId, typeId));
 
@@ -214,6 +234,7 @@ export async function ingest(
     tagsAttached: 0,
     aliasesWritten: 0,
     failures: [],
+    skipped: [],
   };
 
   /** Thoughts given aliases. A set: one thought can be reached by two plan items. */
@@ -223,8 +244,25 @@ export async function ingest(
 
   /** tempId or real UUID -> real UUID. */
   const resolved = new Map<string, string>();
+  // A tempId stands for its own thought alone. One that reads as a UUID used
+  // to pass, unresolved, for the identifier it spells.
+  const tempIds = new Set(plan.thoughts.map((t) => t.tempId));
   const resolve = (ref: string): string | null =>
-    resolved.get(ref) ?? (UUID_RE.test(ref) ? ref : null);
+    tempIds.has(ref) ? (resolved.get(ref) ?? null) : UUID_RE.test(ref) ? ref : null;
+
+  /**
+   * tempId of a thought that is not there -> tempId of the one whose failure
+   * is why: itself when it was tried and failed, and for one skipped the
+   * failure at the top of its chain.
+   */
+  const blocked = new Map<string, string>();
+  const needs = (refs: readonly string[]): string => {
+    const causes = [...new Set(refs.flatMap((ref) => blocked.get(ref) ?? []))];
+    return (
+      `depends on ${causes.map((c) => `"${c}"`).join(" and ")}, ` +
+      `which ${causes.length === 1 ? "was" : "were"} not created`
+    );
+  };
 
   /** Children of existing parents — read once per parent. */
   const childrenCache = new Map<string, Map<string, string>>();
@@ -253,6 +291,15 @@ export async function ingest(
 
   for (const level of levels) {
     await mapWithConcurrency(level, 6, async (t) => {
+      // Its parent is of an earlier level, so what became of it is known.
+      if (t.parent !== undefined && blocked.has(t.parent)) {
+        blocked.set(t.tempId, blocked.get(t.parent)!);
+        outcome.skipped.push({
+          what: `thought "${t.name}" (${t.tempId})`,
+          reason: needs([t.parent]),
+        });
+        return;
+      }
       try {
         const parentId = t.parent === undefined ? null : resolve(t.parent);
         const key = slot(parentId, t.name);
@@ -300,9 +347,11 @@ export async function ingest(
           (await childrenOf(parentId)).set(t.name.trim(), thoughtId);
         }
       } catch (error) {
+        blocked.set(t.tempId, t.tempId);
         outcome.failures.push({
           what: `thought "${t.name}" (${t.tempId})`,
           reason: describe(error),
+          ...(mayHaveLanded(error) ? { unanswered: true as const } : {}),
         });
       }
     });
@@ -379,9 +428,9 @@ export async function ingest(
     const from = resolve(link.from);
     const to = resolve(link.to);
     if (from === null || to === null) {
-      outcome.failures.push({
+      outcome.skipped.push({
         what: `link ${link.from} -> ${link.to}`,
-        reason: "one of the thoughts was not created",
+        reason: needs([link.from, link.to]),
       });
       return;
     }

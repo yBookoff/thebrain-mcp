@@ -2199,6 +2199,7 @@ suite("resource layer against the live API", () => {
         thoughts: [
           { tempId: "x", name: `${PREFIX}np-held-type`, parent: root },
           { tempId: "leaf", name: `${PREFIX}np-held-leaf`, parent: "x" },
+          { tempId: "deep", name: `${PREFIX}np-held-deep`, parent: "leaf" },
         ],
       });
       for (const c of outcome.created) created.push(c.thoughtId);
@@ -2207,8 +2208,192 @@ suite("resource layer against the live API", () => {
       expect(outcome.created).toEqual([]);
       expect(outcome.failures).toHaveLength(1);
       expect(outcome.failures[0]!.reason).toMatch(/^sourceThoughtId \S+ cannot be a parent: it is the type/);
+      // Nor is the thought under the refused one made a root in its place.
+      expect(outcome.skipped).toEqual([
+        {
+          what: `thought "${PREFIX}np-held-deep" (deep)`,
+          reason: 'depends on "leaf", which was not created',
+        },
+      ]);
       await settle();
       expect((await api.thoughts.getGraph(brainId, held)).children).toEqual([]);
+    });
+  });
+
+  /**
+   * What ingest leaves behind when a thought of the plan is not created. The
+   * thoughts under it used to be created with no parent and reported as
+   * created, and every further run of the plan made them again: measured on
+   * TheBrain 15.0.640, three batches of three, two more each run.
+   */
+  describe("a batch that fails part way", () => {
+    const needs = (tempId: string): string => `depends on "${tempId}", which was not created`;
+    /** The thoughts the log says were created since `since`. */
+    const madeSince = async (since: string): Promise<string[]> =>
+      (await api.brains.modifications(brainId, { maxLogs: 1000, since }))
+        .filter((l) => l.modType === ModType.Created && l.sourceType === EntityType.Thought)
+        .map((l) => l.sourceId)
+        .sort();
+
+    it("nothing is made under a thought that was not, a second run adds nothing, and the rest lands by identifier", async () => {
+      const root = await make("pf-root");
+      const tagId = await make("pf-tag", ThoughtKind.Tag);
+      const nobody = crypto.randomUUID();
+      const name = (what: string): string => `${PREFIX}pf-${what}`;
+      const top = { tempId: "top", name: name("top"), parent: nobody, note: "top note" };
+      const mid = { tempId: "mid", name: name("mid"), parent: "top", tagIds: [tagId] };
+      const leaf = { tempId: "leaf", name: name("leaf"), parent: "mid", note: "leaf note" };
+      const plan = {
+        thoughts: [
+          top,
+          mid,
+          leaf,
+          { tempId: "side", name: name("side"), parent: root },
+          { tempId: "sideleaf", name: name("sideleaf"), parent: "side", note: "side note" },
+        ],
+        links: [
+          { from: "mid", to: "side", name: "relates" },
+          { from: "sideleaf", to: root, name: "back" },
+        ],
+      };
+      const since = new Date().toISOString();
+
+      const first = await ingest(api, brainId, plan);
+      for (const c of first.created) created.push(c.thoughtId);
+      expect(first.created.map((c) => c.tempId).sort()).toEqual(["side", "sideleaf"]);
+      // The API's own answer for a parent nobody has, and no mark on it: it answered.
+      expect(first.failures).toEqual([
+        {
+          what: `thought "${name("top")}" (top)`,
+          reason: `Source Thought ${nobody} could not be located`,
+        },
+      ]);
+      expect(first.skipped).toEqual([
+        { what: `thought "${name("mid")}" (mid)`, reason: needs("top") },
+        { what: `thought "${name("leaf")}" (leaf)`, reason: needs("top") },
+        { what: "link mid -> side", reason: needs("top") },
+      ]);
+      expect([first.notesWritten, first.tagsAttached, first.linksCreated]).toEqual([1, 0, 1]);
+      const side = first.created.find((c) => c.tempId === "side")!.thoughtId;
+      const written = first.created.map((c) => c.thoughtId).sort();
+      // The log has the two that were reported and no third: a thought made
+      // with no parent hangs on nothing a graph could show.
+      await eventually(
+        () => madeSince(since),
+        (ids) => ids.length >= 2,
+      );
+      await settle();
+      expect(await madeSince(since)).toEqual(written);
+
+      const second = await ingest(api, brainId, plan);
+      for (const c of second.created) created.push(c.thoughtId);
+      expect(second.created).toEqual([]);
+      expect(second.reused.map((r) => r.thoughtId).sort()).toEqual(written);
+      expect(second.failures).toEqual(first.failures);
+      expect(second.skipped).toEqual(first.skipped);
+      await settle();
+      expect(await madeSince(since)).toEqual(written);
+
+      // What the result asks for: the failed and skipped items alone, the
+      // cause fixed, and what exists named by its identifier.
+      const third = await ingest(api, brainId, {
+        thoughts: [{ ...top, parent: root }, mid, leaf],
+        links: [{ from: "mid", to: side, name: "relates" }],
+      });
+      for (const c of third.created) created.push(c.thoughtId);
+      expect(third.created.map((c) => c.tempId)).toEqual(["top", "mid", "leaf"]);
+      expect([third.failures, third.skipped, third.reused]).toEqual([[], [], []]);
+      expect([third.notesWritten, third.tagsAttached, third.linksCreated]).toEqual([2, 1, 1]);
+
+      const made = new Map(third.created.map((c) => [c.tempId, c.thoughtId]));
+      const graph = await eventually(
+        () => api.thoughts.getGraph(brainId, made.get("mid")!),
+        (g) => g.tags.length === 1 && g.jumps.length === 1,
+      );
+      expect(graph.parents.map((p) => p.id)).toEqual([made.get("top")]);
+      expect(graph.jumps.map((j) => j.id)).toEqual([side]);
+      expect(graph.children.map((c) => c.id)).toEqual([made.get("leaf")]);
+      expect(
+        (await api.thoughts.getGraph(brainId, root)).children.map((c) => c.id).sort(),
+      ).toEqual([side, made.get("top")!].sort());
+      expect(await madeSince(since)).toHaveLength(5);
+    }, 30_000);
+
+    it("a create whose answer is lost has made the thought: the batch says it may have, and the next run finds it", async () => {
+      const root = await make("pf-lost-root");
+      const lost = `${PREFIX}pf-lost-mid`;
+      // The request reaches TheBrain and its answer is dropped on the way
+      // back, which is all a timeout on this side knows.
+      const deaf = new TheBrainApi({
+        apiKey: apiKey!,
+        fetchImpl: async (input, init) => {
+          const response = await fetch(input, init);
+          if (typeof init?.body === "string" && init.body.includes(lost)) {
+            throw new DOMException("timed out", "TimeoutError");
+          }
+          return response;
+        },
+      });
+      const plan = {
+        thoughts: [
+          { tempId: "top", name: `${PREFIX}pf-lost-top`, parent: root },
+          { tempId: "mid", name: lost, parent: "top", note: "mid note" },
+          { tempId: "leaf", name: `${PREFIX}pf-lost-leaf`, parent: "mid" },
+        ],
+      };
+
+      const first = await ingest(deaf, brainId, plan);
+      for (const c of first.created) created.push(c.thoughtId);
+      expect(first.created.map((c) => c.tempId)).toEqual(["top"]);
+      expect(first.failures).toEqual([
+        { what: `thought "${lost}" (mid)`, reason: "request exceeded 30000 ms", unanswered: true },
+      ]);
+      expect(first.skipped).toEqual([
+        { what: `thought "${PREFIX}pf-lost-leaf" (leaf)`, reason: needs("mid") },
+      ]);
+
+      // It is there all the same, under its parent, with no note.
+      const top = first.created[0]!.thoughtId;
+      const { children } = await eventually(
+        () => api.thoughts.getGraph(brainId, top),
+        (g) => g.children.length > 0,
+      );
+      for (const c of children) created.push(c.id);
+      expect(children.map((c) => c.name)).toEqual([lost]);
+      expect(await api.notes.get(brainId, children[0]!.id)).toBe("");
+
+      const second = await ingest(api, brainId, plan);
+      for (const c of second.created) created.push(c.thoughtId);
+      expect(second.reused.map((r) => r.thoughtId).sort()).toEqual([top, children[0]!.id].sort());
+      expect(second.created.map((c) => c.tempId)).toEqual(["leaf"]);
+      expect([second.failures, second.skipped]).toEqual([[], []]);
+      await settle();
+      expect((await api.thoughts.getGraph(brainId, top)).children).toHaveLength(1);
+    }, 30_000);
+
+    it("a create under a thought deleted a moment ago is refused in other words, and makes nothing either", async () => {
+      // Straight after the deletion of a thought that had lived 0.4 s or more
+      // the answer is a 400 that names nothing: 15 of 15. From 0.3 s on it is
+      // the 404 of an identifier nobody has, 6 of 6, and at once for a
+      // thought deleted as soon as it was made, 3 of 3.
+      const doomed = await make("pf-doomed");
+      await settle(500);
+      const since = new Date().toISOString();
+      await api.thoughts.delete(brainId, doomed);
+      const answer = (): Promise<string> =>
+        api.thoughts
+          .create(brainId, { name: `${PREFIX}pf-never-made`, sourceThoughtId: doomed })
+          .then(
+            (id) => (created.push(id), `created ${id}`),
+            (e: unknown) => (e instanceof TheBrainError ? `${e.status} ${e.message}` : String(e)),
+          );
+      const gone = `404 Source Thought ${doomed} could not be located`;
+
+      expect(["400 Could not create thought.", gone]).toContain(await answer());
+      await settle();
+      expect(await answer()).toBe(gone);
+      await settle();
+      expect(await madeSince(since)).toEqual([]);
     });
   });
 

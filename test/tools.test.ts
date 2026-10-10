@@ -21,7 +21,11 @@ const LINK = "dddddddd-0000-4000-8000-000000000004";
 
 type Route = [needle: string, respond: (url: URL, body: unknown) => unknown];
 
-/** Routes match by method and path substring, first match wins. */
+/**
+ * Routes match by method and path substring, first match wins. A route
+ * answers 200 with what it returns, a bare status for a number, or with the
+ * `Response` it builds itself.
+ */
 async function connect(routes: Route[]) {
   const calls: Array<{ method: string; path: string; body: unknown }> = [];
   const fetchImpl = vi.fn(
@@ -37,6 +41,7 @@ async function connect(routes: Route[]) {
         const [wantMethod, path] = needle.split(" ") as [string, string];
         if (method !== wantMethod || !url.pathname.includes(path)) continue;
         const value = respond(url, body);
+        if (value instanceof Response) return value;
         return new Response(typeof value === "number" ? "" : JSON.stringify(value), {
           status: typeof value === "number" ? value : 200,
           headers: { "content-type": "application/json" },
@@ -343,6 +348,184 @@ describe("brain_ingest", () => {
       thoughts: [{ tempId: "rag", name: "RAG", parent: PARENT }],
     });
     expect(plain.text).not.toContain("aliases");
+  });
+
+  it("a batch written whole reads as it always did: a table, the counts, the next step", async () => {
+    const { call } = await connect(routes);
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [{ tempId: "rag", name: "RAG", parent: PARENT }],
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toBe(
+      [
+        "## Thoughts",
+        "Outcome  Title  Identifier",
+        "───────  ─────  ────────────────────────────────────",
+        `created  RAG    ${THOUGHT}`,
+        "",
+        "## Also",
+        "- links created: 0",
+        "- notes written: 0",
+        "- tags attached: 0",
+        "",
+        "## Next",
+        "The identifiers above work immediately. To show the result to the user, open the " +
+          "root thought with brain_activate. Refresh the semantic index with brain_index " +
+          "using action=sync.",
+      ].join("\n"),
+    );
+  });
+});
+
+describe("brain_ingest when a thought fails in the middle of a batch", () => {
+  const NOBODY = "99999999-0000-4000-8000-000000000009";
+  const SIDE = "eeeeeeee-0000-4000-8000-000000000005";
+  const TOP = "ffffffff-0000-4000-8000-000000000006";
+  type Create = { name: string; sourceThoughtId?: string };
+
+  /**
+   * A brain where PARENT is an ordinary thought with no children and nobody
+   * has NOBODY. As on the live API, a thought created under an identifier
+   * nobody has is a 404 that says so. `create` answers for the rest.
+   */
+  const routes = (create: (body: Create) => unknown, notes: () => unknown = () => 200): Route[] => [
+    ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
+    ["GET /graph", () => graph(thought("parent"))],
+    [
+      "GET /api/thoughts/",
+      (url) => (url.pathname.endsWith(NOBODY) ? 404 : thought("Constraints", { aliases: [] })),
+    ],
+    [
+      "POST /api/thoughts/",
+      (_url, body) => {
+        const asked = body as Create;
+        return asked.sourceThoughtId === NOBODY
+          ? new Response(JSON.stringify(`Source Thought ${NOBODY} could not be located`), {
+              status: 404,
+              headers: { "content-type": "application/json" },
+            })
+          : create(asked);
+      },
+    ],
+    ["POST /api/notes/", notes],
+    ["POST /api/links/", () => ({ id: LINK })],
+    ["GET /api/links/", () => 404],
+  ];
+  const made = ({ name }: Create): unknown => ({ id: name === "Top" ? TOP : SIDE });
+  const plan = (topParent: string) => ({
+    brainId: BRAIN,
+    thoughts: [
+      { tempId: "top", name: "Top", parent: topParent, note: "summary" },
+      { tempId: "mid", name: "Mid", parent: "top", note: "body" },
+      { tempId: "leaf", name: "Leaf", parent: "mid" },
+      { tempId: "side", name: "Side", parent: PARENT },
+    ],
+    links: [{ from: "leaf", to: "side", name: "relates" }],
+  });
+  const names = (posts: unknown[]): string[] =>
+    posts.flatMap((body) => ((body as Create | undefined)?.name ?? []) as string | never[]);
+
+  it("the result is an error that lists what was written, what failed and what was skipped for it", async () => {
+    // Mid and Leaf used to be created with no parent and listed as created,
+    // under "Everything else was written", in a result that was no error.
+    const { call, sent } = await connect(routes(made));
+    const result = await call("brain_ingest", plan(NOBODY));
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toBe(
+      [
+        "## Thoughts",
+        "Outcome  Title  Identifier                            tempId",
+        "───────  ─────  ────────────────────────────────────  ──────",
+        `created  Side   ${SIDE}  side`,
+        "",
+        "## Also",
+        "- links created: 0",
+        "- notes written: 0",
+        "- tags attached: 0",
+        "",
+        "## Failed",
+        `- thought "Top" (top): Source Thought ${NOBODY} could not be located`,
+        "",
+        "## Skipped",
+        '- thought "Mid" (mid): depends on "top", which was not created',
+        '- thought "Leaf" (leaf): depends on "top", which was not created',
+        '- link leaf -> side: depends on "top", which was not created',
+        "",
+        "## Next",
+        "The batch was written in part, and nothing is rolled back. The thoughts in the " +
+          "table exist, and their identifiers work immediately. What is under Failed and " +
+          "Skipped was not written, a listed thought's note, tags and aliases included. " +
+          "Fix the cause and write only that: thoughts and links in a new plan, naming " +
+          "each thought of the table by its identifier in place of its tempId; a note, tag " +
+          "or alias of a thought in the table with brain_set_note, brain_tag or " +
+          "brain_update_thought. Do not send the whole plan again: a thought it made with " +
+          "no parent would be made twice.",
+      ].join("\n"),
+    );
+    // Asked for once and refused, and nothing was sent for what hangs on it.
+    expect(names(sent("POST")).sort()).toEqual(["Side", "Top"]);
+    expect(sent("POST")).toHaveLength(2);
+  });
+
+  it("with no thought written there is no table, and the plan is what to send again", async () => {
+    const { call, sent } = await connect(routes(made));
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [
+        { tempId: "top", name: "Top", parent: NOBODY },
+        { tempId: "mid", name: "Mid", parent: "top" },
+      ],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).not.toContain("## Thoughts");
+    expect(result.text).toContain('## Skipped\n- thought "Mid" (mid): depends on "top"');
+    expect(result.text).toContain(
+      "## Next\nNone of the plan's thoughts was written, and nothing is rolled back. " +
+        "Fix the cause and send the plan again.",
+    );
+    expect(names(sent("POST"))).toEqual(["Top"]);
+  });
+
+  it("a create that got no answer says the thought may be there all the same", async () => {
+    // What the client makes of a timeout: the request may have reached TheBrain.
+    const { call, sent } = await connect(
+      routes((body) => {
+        if (body.name === "Mid") throw new DOMException("timed out", "TimeoutError");
+        return made(body);
+      }),
+    );
+    const result = await call("brain_ingest", plan(PARENT));
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(
+      '- thought "Mid" (mid): request exceeded 30000 ms — no answer came, so TheBrain may ' +
+        "have created it all the same: before creating it again, look for it among its " +
+        "parent's children with brain_get_thought",
+    );
+    expect(result.text).toContain('- thought "Leaf" (leaf): depends on "mid", which was not created');
+    expect(result.text).toContain(
+      "a listed thought's note, tags and aliases included, unless its line says it may have been. ",
+    );
+    expect(names(sent("POST"))).not.toContain("Leaf");
+  });
+
+  it("a note that fails on a thought that was created is an error too, with nothing skipped", async () => {
+    const { call } = await connect(
+      routes(made, () => new Response(JSON.stringify("boom"), { status: 500 })),
+    );
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [{ tempId: "top", name: "Top", parent: PARENT, note: "summary" }],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(`created  Top    ${TOP}  top`);
+    expect(result.text).toContain('## Failed\n- note for "Top": boom');
+    expect(result.text).not.toContain("## Skipped");
+    expect(result.text).toContain("nothing is rolled back");
   });
 });
 

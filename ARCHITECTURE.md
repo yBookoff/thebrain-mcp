@@ -210,7 +210,7 @@ UUIDs interchangeably, plus links between them.
 }
 ```
 
-Four properties, each of which took a bug to get right:
+Five properties, each of which took a bug to get right:
 
 - **Order-independent.** `planLevels()` topologically sorts by parent reference,
   so the input can be in any order.
@@ -227,6 +227,63 @@ Four properties, each of which took a bug to get right:
   and its own parent, the API would turn the hierarchy link into that jump, so
   the link is left as it is. The report carries a "Links that already existed"
   section with the mismatch spelled out, rather than counting it as created.
+- **A failure takes its own branch and nothing else.** A thought that is not
+  created leaves the thoughts under it unwritten and the links to them
+  untried, and everything that does not hang on it is written to the end. See
+  below.
+
+#### When a thought of the plan is not created
+
+The checks ahead of the first write leave a create few ways to fail: a parent
+identifier nobody has, which the API answers with a 404; a plan thought that
+deduplication lands on a type, so that `create` refuses the one under it (§7,
+item 18); a parent deleted in between; a request that fails on the way.
+
+The thoughts under the one that failed used to be created all the same. Their
+parent resolved to nothing, so they were created with no parent, listed as
+created, and followed by "Everything else was written". Nothing in the graph
+leads to a thought with no parent, and deduplication looks among a parent's
+children, so each further run of the plan made the same thoughts again.
+Measured on a live TheBrain 15.0.640 with a parent nobody has: three batches,
+two such thoughts each, and two more from every second run. A `tempId` that
+read as a UUID was worse off: left unresolved it passed for the identifier it
+spells, and its children went under whatever thought had it.
+
+`ingest()` now keeps, for every `tempId` with no thought behind it, the
+failure that is why. A thought whose parent is among them is not sent, and
+joins them; a link with such an end is not tried; a note, a tag and an alias
+go only to a thought that is there. The outcome has three lists: `created` and
+`reused`, by identifier; `failures`, what was tried and why it failed;
+`skipped`, what was not tried, each with the `tempId` of the failure it waited
+on.
+
+**The branches beside the failure are written to the end**, and the batch is
+not stopped at the first failure. Stopping would not make it whole: there is
+no rollback, up to five more creates of the same level are in flight when one
+fails, and the thoughts already made would be left without their notes, tags
+and links. It would only leave more for a second call, and a second call is
+where duplicates come from: a thought is found again only as a child of its
+parent, and one made with no parent is made twice. What is skipped is what
+could not have been written where the plan put it. What is finished is what
+the second call would have written.
+
+**A batch written in part is `isError`**, though most of it may be there: read
+as a success, its "Failed" section was one more section. The table of thoughts
+gains a `tempId` column, and the last section asks for the failed and skipped
+items alone, in a new plan that names what exists by identifier. That holds
+whatever deduplication would have found. With no thought written there is
+nothing to make twice, and it asks for the plan again. A batch written whole
+reads as it did, to the character.
+
+**A create with no answer is not a create that failed.** A timeout or a
+dropped connection says nothing of what TheBrain did. With the answer to a
+create dropped on its way back the thought was there, 3 times of 3, and the
+batch reported it failed. `mayHaveLanded()` tells such a failure from a
+refused connection and from an answer, and the result says on that line that
+the thought may exist and where to look before creating it again. A thought
+under a parent is found by the next run; one with no parent is not.
+
+Nothing is deleted to tidy up after a failure. Deletion needs a human (§6).
 
 ---
 
