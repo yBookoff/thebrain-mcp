@@ -1,4 +1,4 @@
-import { assertUuid, type JsonPatchOp, type TheBrainClient } from "../client.js";
+import { assertUuid, createdId, type JsonPatchOp, type TheBrainClient } from "../client.js";
 import { TheBrainError } from "../errors.js";
 import {
   type AttachmentDto,
@@ -74,16 +74,27 @@ export class LinksResource {
   /**
    * Links two thoughts. `relation` is what `thoughtIdB` is to `thoughtIdA`.
    *
-   * A parent/child link with a type for its upper end is refused before the
-   * request (`requireParent`): the API would answer 200 and make it the lower
-   * thought's type. A jump to a type, and a type as the lower end, are
-   * ordinary links.
+   * A parent/child link with a type or a tag for its upper end is refused
+   * before the request (`requireParent`): the API would answer 200 and make
+   * it the lower thought's type, or attach the tag. A jump to either, and
+   * either as the lower end, are ordinary links.
+   *
+   * A thought linked to itself is refused as well, whatever the relation:
+   * that is a 200 with an identifier of zeros and no link. Any other answer
+   * of zeros is `zero_id`, from `#post`.
    */
   async create(brainId: string, input: CreateLinkInput): Promise<string> {
     // Here as well as in `#post`: a malformed end sends nothing, a read included.
     assertUuid(brainId, "brainId");
     assertUuid(input.thoughtIdA, "thoughtIdA");
     assertUuid(input.thoughtIdB, "thoughtIdB");
+    // Case aside: the API reads a UUID in capitals too.
+    if (sameId(input.thoughtIdA, input.thoughtIdB)) {
+      throw new TheBrainError(
+        "bad_request",
+        `a thought cannot be linked to itself: both ends of the link are ${input.thoughtIdA}`,
+      );
+    }
     const relation = input.relation ?? Relation.Child;
     if (relation === Relation.Child) {
       await this.requireParent(brainId, input.thoughtIdA, "thoughtIdA");
@@ -94,7 +105,12 @@ export class LinksResource {
     return this.#post(brainId, input);
   }
 
-  /** The request itself, with none of the reading `create` does ahead of it. */
+  /**
+   * The request itself, with none of the reading `create` does ahead of it.
+   *
+   * An answer of zeros is thrown here, as `zero_id`, for `create` and
+   * `attachTag` alike: see `createdId`.
+   */
   async #post(brainId: string, input: CreateLinkInput): Promise<string> {
     assertUuid(brainId, "brainId");
     assertUuid(input.thoughtIdA, "thoughtIdA");
@@ -105,10 +121,15 @@ export class LinksResource {
       relation: input.relation ?? Relation.Child,
     };
     if (input.name !== undefined) body["name"] = input.name;
-    const created = await this.client.post<{ id: string }>(`/api/links/${brainId}`, {
-      json: body,
-    });
-    return created.id;
+    const path = `/api/links/${brainId}`;
+    const created = await this.client.post<{ id: string }>(path, { json: body });
+    return createdId(
+      created,
+      path,
+      `no link was made between ${input.thoughtIdA} and ${input.thoughtIdB}: TheBrain answered ` +
+        "200 with an identifier of zeros, which is its answer for a pair it does not link. " +
+        "Nothing was written",
+    );
   }
 
   /**
@@ -203,14 +224,15 @@ export class LinksResource {
   }
 
   /**
-   * Refuses a type named as a parent, with `not_a_parent`: the upper end of a
-   * parent/child link, or the thought a new one is created under. `field` is
-   * the caller's name for the identifier.
+   * Refuses a type named as a parent, with `not_a_parent`, and a tag, with
+   * `tag_as_parent`: the upper end of a parent/child link, or the thought a
+   * new one is created under. `field` is the caller's name for the
+   * identifier.
    *
    * `create` here and `ThoughtsResource.create` both call it. A caller that
    * writes something else first calls it ahead of that. See `requireParent`
-   * in `kind.ts` for what the API does with a type there, and for what is
-   * let through.
+   * in `kind.ts` for what the API does with a type and with a tag there, and
+   * for what is let through.
    */
   async requireParent(brainId: string, id: string, field: string): Promise<void> {
     return requireParent(this.client, brainId, id, field);

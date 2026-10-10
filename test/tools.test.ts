@@ -1414,6 +1414,505 @@ describe("a type named as a parent", () => {
   });
 });
 
+describe("a tag named as a parent", () => {
+  const TYPE = "eeeeeeee-0000-4000-8000-000000000005";
+  const TAG = "ffffffff-0000-4000-8000-000000000006";
+
+  /**
+   * A brain where PARENT and THOUGHT are ordinary thoughts, TAG a tag and
+   * TYPE a type, and `link` is what joins the two thoughts a call names. As
+   * on the live API, a thought created under any of them and a link posted
+   * towards any of them is a 200: under the tag that is the tag attached, and
+   * a thought with no parent.
+   */
+  const routes = (link: Record<string, unknown> | null = null): Route[] => {
+    const others: Record<string, { name: string; kind: number }> = {
+      [PARENT]: { name: "Constraints", kind: 1 },
+      [THOUGHT]: { name: "RAG", kind: 1 },
+      [TAG]: { name: "gotcha", kind: 4 },
+      [TYPE]: { name: "Pattern", kind: 2 },
+    };
+    return [
+      ["GET /graph", () => graph(thought("parent"))],
+      [
+        "GET /api/thoughts/",
+        (url) => {
+          const id = url.pathname.split("/").pop()!;
+          return id in others ? { ...thought("", { aliases: [] }), id, ...others[id] } : 404;
+        },
+      ],
+      ["POST /api/thoughts/", () => ({ id: THOUGHT })],
+      ["POST /api/notes/", () => 200],
+      ["POST /api/links/", () => ({ id: LINK })],
+      ["GET /api/links/", () => (link === null ? 404 : { id: LINK, ...link })],
+      ["PATCH /api/links/", () => 200],
+    ];
+  };
+  const tagLink = { thoughtIdA: TAG, thoughtIdB: THOUGHT, relation: 1, meaning: 5 };
+  const read = (id: string): string => `GET /api/thoughts/${BRAIN}/${id}`;
+  const sequence = (calls: Array<{ method: string; path: string }>): string[] =>
+    calls.map((c) => `${c.method} ${c.path}`);
+
+  /** A refusal the model can act on, and not one request that writes. */
+  const expectRefused = (
+    result: { text: string; isError: boolean },
+    calls: Array<{ method: string }>,
+    field: string,
+  ): void => {
+    expect(result.isError, field).toBe(true);
+    expect(result.text).toContain(`${field} ${TAG} cannot be a parent: it is the tag "gotcha"`);
+    expect(result.text).toContain("Nothing was written");
+    // Both ways out: the calls that attach a tag, and a parent that is one.
+    expect(result.text).toMatch(/brain_tag, or as tagIds to brain_create_thought or brain_ingest/);
+    expect(result.text).toContain("an ordinary thought");
+    expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+  };
+
+  it("brain_link refuses a parent or child link with a tag above, at the cost of one read", async () => {
+    // It used to answer "link created". The API takes the request with a 200
+    // and attaches the tag: the thought is tagged and has no parent for it.
+    for (const [args, field] of [
+      [{ fromId: THOUGHT, toId: TAG, relation: "parent" }, "toId"],
+      [{ fromId: TAG, toId: THOUGHT, relation: "child" }, "fromId"],
+    ] as const) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_link", { brainId: BRAIN, ...args, name: "marks" });
+      expectRefused(result, calls, field);
+      expect(sequence(calls)).toEqual([read(TAG)]);
+    }
+  });
+
+  it("brain_link refuses it whatever is between the two already, and labels nothing", async () => {
+    // The tag's own attachment used to be given the label, and reported as a
+    // link that existed.
+    const { call, calls } = await connect(routes(tagLink));
+    const result = await call("brain_link", {
+      brainId: BRAIN,
+      fromId: THOUGHT,
+      toId: TAG,
+      relation: "parent",
+      name: "marks",
+    });
+    expectRefused(result, calls, "toId");
+  });
+
+  it("brain_link still jumps to a tag and puts a tag under a thought", async () => {
+    // Measured: both are ordinary links, and neither attaches the tag.
+    for (const [args, relation] of [
+      [{ fromId: THOUGHT, toId: TAG }, 3],
+      [{ fromId: THOUGHT, toId: TAG, relation: "child" }, 1],
+      [{ fromId: TAG, toId: THOUGHT, relation: "parent" }, 2],
+    ] as const) {
+      const { call, sent } = await connect(routes());
+      const result = await call("brain_link", { brainId: BRAIN, ...args });
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain(`link created — ${LINK}`);
+      expect(sent("POST")).toEqual([
+        { thoughtIdA: args.fromId, thoughtIdB: args.toId, relation },
+      ]);
+    }
+  });
+
+  it("brain_create_thought creates nothing under a tag", async () => {
+    // It used to report a thought created. The API makes it, tags it and
+    // gives it no parent.
+    for (const extra of [
+      {},
+      { relation: "child" },
+      { typeId: TYPE, note: "body", tagIds: [TAG] },
+    ] as const) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        parentId: TAG,
+        ...extra,
+      });
+      expectRefused(result, calls, "parentId");
+    }
+  });
+
+  it("brain_create_thought still makes a thought above a tag or beside it", async () => {
+    for (const [relation, sentAs] of [
+      ["parent", 2],
+      ["jump", 3],
+    ] as const) {
+      const { call, calls, sent } = await connect(routes());
+      const result = await call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        parentId: TAG,
+        relation,
+      });
+      expect(result.isError, relation).toBe(false);
+      expect(sent("POST")).toEqual([
+        expect.objectContaining({ sourceThoughtId: TAG, relation: sentAs }),
+      ]);
+      expect(sequence(calls)).toEqual([`POST /api/thoughts/${BRAIN}`]);
+    }
+  });
+
+  it("brain_ingest writes no part of a plan that names a tag as a parent", async () => {
+    // A thought under it used to be reported as created, and a link towards
+    // it as a link, each with "tags attached: 0" beside it.
+    for (const [plan, field] of [
+      [{ thoughts: [{ tempId: "rag", name: "RAG", parent: TAG }] }, "parent"],
+      [{ links: [{ from: "top", to: TAG, relation: "parent" }] }, "to"],
+      [{ links: [{ from: TAG, to: "top", relation: "child" }] }, "from"],
+      [{ links: [{ from: THOUGHT, to: TAG, relation: "parent" }] }, "to"],
+    ] as const) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_ingest", {
+        brainId: BRAIN,
+        thoughts: [
+          { tempId: "top", name: "Retrieval", parent: PARENT, note: "body" },
+          ...("thoughts" in plan ? plan.thoughts : []),
+        ],
+        ...("links" in plan ? { links: plan.links } : {}),
+      });
+      expectRefused(result, calls, field);
+    }
+  });
+
+  it("the ways out it names attach the tag, and say so", async () => {
+    for (const [tool, args, said] of [
+      ["brain_tag", { thoughtId: THOUGHT, add: [TAG] }, `attached ${TAG}`],
+      [
+        "brain_create_thought",
+        { name: "RAG", parentId: PARENT, tagIds: [TAG] },
+        "tags attached: 1",
+      ],
+      [
+        "brain_ingest",
+        { thoughts: [{ tempId: "rag", name: "RAG", parent: PARENT, tagIds: [TAG] }] },
+        "tags attached: 1",
+      ],
+    ] as const) {
+      const { call, sent } = await connect(routes());
+      const result = await call(tool, { brainId: BRAIN, ...args });
+      expect(result.isError, tool).toBe(false);
+      expect(result.text, tool).toContain(said);
+      expect(sent("POST").at(-1), tool).toEqual({
+        thoughtIdA: THOUGHT,
+        thoughtIdB: TAG,
+        relation: 2,
+      });
+    }
+  });
+
+  it("every argument that can put a thought under another says where a tag goes", async () => {
+    const { client } = await connect([]);
+    const { tools } = await client.listTools();
+    const properties = (name: string): Record<string, { description?: string }> =>
+      tools.find((t) => t.name === name)!.inputSchema.properties as Record<
+        string,
+        { description?: string }
+      >;
+    const item = (
+      properties("brain_ingest")["thoughts"] as unknown as {
+        items: { properties: Record<string, { description?: string }> };
+      }
+    ).items.properties;
+
+    for (const argument of [
+      properties("brain_create_thought")["parentId"],
+      item["parent"],
+      properties("brain_ingest")["links"],
+    ]) {
+      expect(argument?.description).toMatch(/tag.*tagIds/s);
+    }
+    expect(properties("brain_link")["relation"]?.description).toMatch(/tag.*brain_tag/s);
+  });
+});
+
+describe("a link that is not made, or is not the one asked for", () => {
+  const TYPE = "eeeeeeee-0000-4000-8000-000000000005";
+  const TAG = "ffffffff-0000-4000-8000-000000000006";
+  const ROOT = "12121212-0000-4000-8000-000000000012";
+  const ZEROS = "00000000-0000-0000-0000-000000000000";
+
+  /**
+   * A brain where ROOT, PARENT and THOUGHT are ordinary thoughts, TAG a tag
+   * and TYPE a type. `link` is what joins the two thoughts a call names, and
+   * `answer` the identifier a posted link comes back with: the live API
+   * answers a link it does not make with a 200 and zeros.
+   */
+  const routes = (link: Record<string, unknown> | null = null, answer = LINK): Route[] => {
+    const others: Record<string, { name: string; kind: number }> = {
+      [ROOT]: { name: "Reading", kind: 1 },
+      [PARENT]: { name: "Constraints", kind: 1 },
+      [THOUGHT]: { name: "RAG", kind: 1 },
+      [TAG]: { name: "gotcha", kind: 4 },
+      [TYPE]: { name: "Pattern", kind: 2 },
+    };
+    return [
+      ["GET /graph", () => graph(thought("parent"))],
+      [
+        "GET /api/thoughts/",
+        (url) => {
+          const id = url.pathname.split("/").pop()!;
+          return id in others ? { ...thought("", { aliases: [] }), id, ...others[id] } : 404;
+        },
+      ],
+      ["POST /api/thoughts/", () => ({ id: THOUGHT })],
+      ["POST /api/links/", () => ({ id: answer })],
+      ["GET /api/links/", () => (link === null ? 404 : { id: LINK, ...link })],
+      ["PATCH /api/links/", () => 200],
+    ];
+  };
+  // As the API stores them: `thoughtIdA` is the upper end, the tag or the
+  // type, and a link written as a parent's reads back as a child's.
+  const jump = { thoughtIdA: THOUGHT, thoughtIdB: PARENT, relation: 3, meaning: 1 };
+  const toAbove = { thoughtIdA: PARENT, thoughtIdB: THOUGHT, relation: 1, meaning: 1 };
+  const fromAbove = { thoughtIdA: THOUGHT, thoughtIdB: PARENT, relation: 1, meaning: 1 };
+  const label = [{ op: "replace", path: "/name", value: "contradicts" }];
+
+  it("brain_link does not link a thought to itself, and sends no write", async () => {
+    // The API answers 200 with an identifier of zeros and makes no link. It
+    // used to read "link created" with the zeros after it.
+    for (const relation of [undefined, "jump", "child", "parent"]) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_link", {
+        brainId: BRAIN,
+        fromId: THOUGHT,
+        toId: THOUGHT,
+        ...(relation !== undefined ? { relation } : {}),
+        name: "itself",
+      });
+      expect(result.isError, relation).toBe(true);
+      expect(result.text).toContain(
+        `a thought cannot be linked to itself: both ends of the link are ${THOUGHT}`,
+      );
+      expect(result.text).not.toContain("link created");
+      expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+    }
+  });
+
+  it("brain_link reports an identifier of zeros as an error, not as a link created", async () => {
+    const { call } = await connect(routes(null, ZEROS));
+    const result = await call("brain_link", { brainId: BRAIN, fromId: THOUGHT, toId: PARENT });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(`no link was made between ${THOUGHT} and ${PARENT}`);
+    expect(result.text).toContain("identifier of zeros");
+    expect(result.text).toContain("Nothing was written");
+    expect(result.text).not.toContain("link created");
+  });
+
+  it("brain_ingest rejects a plan that links a thought to itself, with nothing sent", async () => {
+    // It used to count under "links created".
+    for (const link of [
+      { from: "top", to: "top", name: "itself" },
+      { from: THOUGHT, to: THOUGHT, relation: "child" },
+    ]) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_ingest", {
+        brainId: BRAIN,
+        thoughts: [{ tempId: "top", name: "Retrieval", parent: ROOT }],
+        links: [link],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("Plan rejected, nothing was written");
+      expect(result.text).toContain(
+        `the link ${link.from} -> ${link.to} joins a thought to itself`,
+      );
+      expect(calls).toEqual([]);
+    }
+  });
+
+  it("brain_ingest lists a link answered with zeros under Failed, and counts none created", async () => {
+    const { call } = await connect(routes(null, ZEROS));
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [{ tempId: "top", name: "Retrieval", parent: ROOT }],
+      links: [{ from: "top", to: TYPE, name: "an example of" }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("links created: 0");
+    expect(result.text).toContain(
+      `## Failed\n- link top -> ${TYPE}: no link was made between ${THOUGHT} and ${TYPE}`,
+    );
+  });
+
+  it("brain_link says what joins the two when it is not the link asked for", async () => {
+    // It used to answer "Link already existed" and no more, whatever the link.
+    for (const [relation, link, note] of [
+      ["parent", jump, "as jump, the requested parent-child with toId above was not added"],
+      ["child", jump, "as jump, the requested parent-child with fromId above was not added"],
+      [undefined, toAbove, "as parent-child with toId above, the requested jump was not added"],
+      ["jump", fromAbove, "as parent-child with fromId above, the requested jump was not added"],
+      [
+        "child",
+        toAbove,
+        "as parent-child with toId above, the requested parent-child with fromId above " +
+          "was not added",
+      ],
+      [
+        "parent",
+        fromAbove,
+        "as parent-child with fromId above, the requested parent-child with toId above " +
+          "was not added",
+      ],
+    ] as const) {
+      const ends = { brainId: BRAIN, fromId: THOUGHT, toId: PARENT };
+      const asked = relation !== undefined ? { relation } : {};
+      const bare = await connect(routes(link));
+      const unnamed = await bare.call("brain_link", { ...ends, ...asked });
+      expect(unnamed.isError, note).toBe(false);
+      expect(unnamed.text).toBe(
+        `## Link already existed\nidentifier ${LINK}: the link already existed ${note}`,
+      );
+      expect(bare.calls.filter((c) => c.method !== "GET")).toEqual([]);
+
+      // The label goes onto the link that is there, and the result says so.
+      const labelled = await connect(routes(link));
+      const named = await labelled.call("brain_link", { ...ends, ...asked, name: "contradicts" });
+      expect(named.isError, note).toBe(false);
+      expect(named.text).toBe(
+        `## Link already existed\nidentifier ${LINK}: the link already existed ${note}` +
+          " — only the label was updated",
+      );
+      expect(labelled.sent("PATCH")).toEqual([label]);
+      expect(labelled.sent("POST")).toEqual([]);
+    }
+  });
+
+  it("brain_link answers as it did when the link is the one asked for", async () => {
+    for (const [relation, link] of [
+      [undefined, jump],
+      ["jump", jump],
+      // A parent's link is stored from the other end, and is no mismatch.
+      ["parent", toAbove],
+      ["child", fromAbove],
+    ] as const) {
+      const ends = { brainId: BRAIN, fromId: THOUGHT, toId: PARENT };
+      const asked = relation !== undefined ? { relation } : {};
+      const bare = await connect(routes(link));
+      expect((await bare.call("brain_link", { ...ends, ...asked })).text).toBe(
+        `## Link already existed\nidentifier ${LINK}`,
+      );
+      expect(bare.calls.filter((c) => c.method !== "GET")).toEqual([]);
+
+      const labelled = await connect(routes(link));
+      const named = await labelled.call("brain_link", { ...ends, ...asked, name: "contradicts" });
+      expect(named.text).toBe(`## Link already existed\nidentifier ${LINK}, label updated`);
+      expect(labelled.sent("PATCH")).toEqual([label]);
+    }
+  });
+
+  it("brain_link adds nothing over a tag or a type, labels neither, and calls neither a link", async () => {
+    // Each used to be given the label and reported as "Link already existed".
+    const tagOnThought = { thoughtIdA: TAG, thoughtIdB: THOUGHT, relation: 1, meaning: 5 };
+    const typeOfThought = { thoughtIdA: TYPE, thoughtIdB: THOUGHT, relation: 1, meaning: 2 };
+    const over = ", and two thoughts share one link: the requested";
+    for (const [args, link, note] of [
+      [
+        { fromId: THOUGHT, toId: TAG },
+        tagOnThought,
+        `toId is a tag on fromId${over} jump was not added in its place`,
+      ],
+      [
+        { fromId: TAG, toId: THOUGHT, relation: "jump" },
+        tagOnThought,
+        `fromId is a tag on toId${over} jump was not added in its place`,
+      ],
+      [
+        { fromId: THOUGHT, toId: TAG, relation: "child" },
+        tagOnThought,
+        `toId is a tag on fromId${over} parent-child with fromId above was not added in its place`,
+      ],
+      [
+        { fromId: THOUGHT, toId: TYPE },
+        typeOfThought,
+        `toId is the type of fromId${over} jump was not added in its place`,
+      ],
+      [
+        { fromId: THOUGHT, toId: TYPE, relation: "child" },
+        typeOfThought,
+        `toId is the type of fromId${over} parent-child with fromId above ` +
+          "was not added in its place",
+      ],
+    ] as const) {
+      const bare = await connect(routes(link));
+      const unnamed = await bare.call("brain_link", { brainId: BRAIN, ...args });
+      expect(unnamed.isError, note).toBe(false);
+      expect(unnamed.text).toBe(`## No link added\n${note}`);
+
+      const labelled = await connect(routes(link));
+      const named = await labelled.call("brain_link", { brainId: BRAIN, ...args, name: "about" });
+      expect(named.isError, note).toBe(false);
+      expect(named.text).toBe(`## No link added\n${note}, and no label was written`);
+      for (const { calls } of [bare, labelled]) {
+        expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+      }
+    }
+  });
+
+  it("brain_ingest says the same of a plan's links, and lists a tag or a type apart", async () => {
+    const plan = (link: Record<string, unknown>) => ({
+      brainId: BRAIN,
+      thoughts: [{ tempId: "top", name: "Retrieval", parent: ROOT }],
+      links: [{ from: "top", ...link, name: "contradicts" }],
+    });
+    // The thought the plan makes comes back as THOUGHT, so "top" is THOUGHT.
+    for (const [link, joined, section, note, labelled] of [
+      [
+        { to: PARENT, relation: "parent" },
+        toAbove,
+        "Links that already existed",
+        "the link already existed, label updated",
+        true,
+      ],
+      [
+        { to: PARENT, relation: "child" },
+        toAbove,
+        "Links that already existed",
+        `the link already existed as parent-child with ${PARENT} above, the requested ` +
+          "parent-child with top above was not added — only the label was updated",
+        true,
+      ],
+      [
+        { to: PARENT, relation: "parent" },
+        jump,
+        "Links that already existed",
+        `the link already existed as jump, the requested parent-child with ${PARENT} above ` +
+          "was not added — only the label was updated",
+        true,
+      ],
+      [
+        { to: TAG },
+        { thoughtIdA: TAG, thoughtIdB: THOUGHT, relation: 1, meaning: 5 },
+        "Links not added",
+        `${TAG} is a tag on top, and two thoughts share one link: the requested jump was ` +
+          "not added in its place, and no label was written",
+        false,
+      ],
+      [
+        { to: TYPE },
+        { thoughtIdA: TYPE, thoughtIdB: THOUGHT, relation: 1, meaning: 2 },
+        "Links not added",
+        `${TYPE} is the type of top, and two thoughts share one link: the requested jump ` +
+          "was not added in its place, and no label was written",
+        false,
+      ],
+    ] as const) {
+      const { call, sent } = await connect(routes(joined));
+      const result = await call("brain_ingest", plan(link));
+      expect(result.isError, note).toBe(false);
+      expect(result.text).toContain(`## ${section}\n- top -> ${link.to}: ${note}\n`);
+      expect(result.text).toContain("links created: 0");
+      expect(sent("PATCH")).toEqual(labelled ? [label] : []);
+    }
+  });
+
+  it("brain_link says that two thoughts share one link, and that the result names it", async () => {
+    const { client } = await connect([]);
+    const { tools } = await client.listTools();
+    expect(tools.find((t) => t.name === "brain_link")!.description).toMatch(
+      /share one link.*nothing is added.*what is there/s,
+    );
+  });
+});
+
 describe("a sibling is no relation", () => {
   /**
    * A brain that answers 200 to what it is sent. The live API does so to a

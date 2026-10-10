@@ -43,7 +43,7 @@ import {
   type ThoughtGraphDto,
 } from "../src/api/index.js";
 import { describeChange, subjectIds } from "../src/operations/changes.js";
-import { IngestValidationError, ingest } from "../src/operations/ingest.js";
+import { IngestValidationError, ingest, linkFound } from "../src/operations/ingest.js";
 import type { Embedder } from "../src/semantic/embedder.js";
 import {
   SemanticIndexer,
@@ -2118,11 +2118,17 @@ suite("resource layer against the live API", () => {
       expect((await api.thoughts.getGraph(brainId, other)).children).toEqual([]);
     });
 
-    it("only a type is refused: under a tag a thought is created tagged, and nobody's identifier is the API's to answer", async () => {
+    it("under a tag a thought is created tagged and with no parent, and nobody's identifier is the API's to answer", async () => {
       const tagId = await make("np-tag", ThoughtKind.Tag);
-      const id = await api.thoughts.create(brainId, {
-        name: `${PREFIX}np-under-tag`,
-        sourceThoughtId: tagId,
+      // As the API takes it: `create` refuses a tag above, as it does a type.
+      const { id } = await api.client.post<{ id: string }>(`/api/thoughts/${brainId}`, {
+        json: {
+          name: `${PREFIX}np-under-tag`,
+          kind: ThoughtKind.Normal,
+          acType: 0,
+          sourceThoughtId: tagId,
+          relation: Relation.Child,
+        },
       });
       created.push(id);
 
@@ -2130,6 +2136,10 @@ suite("resource layer against the live API", () => {
       expect(ids(graph.tags)).toEqual([tagId]);
       expect(graph.parents).toEqual([]);
       expect(isTagLink((await api.links.between(brainId, id, tagId))!)).toBe(true);
+      // The tag's graph has it among `children`, which is where a second run
+      // of a plan looked for it, and found it.
+      const marked = await graphOf(tagId, (g) => ids(g.children).includes(id));
+      expect(ids(marked.children)).toEqual([id]);
 
       // An identifier nobody has is left to the write, which answers for it.
       const nobody = crypto.randomUUID();
@@ -2218,6 +2228,346 @@ suite("resource layer against the live API", () => {
       await settle();
       expect((await api.thoughts.getGraph(brainId, held)).children).toEqual([]);
     });
+  });
+
+  /**
+   * A tag named as a parent. What the API does with one is pinned above: a
+   * thought linked or created under a tag is tagged, and has no parent for
+   * it. `brain_link` reported that as a link created, and
+   * `brain_create_thought` and `brain_ingest` as a thought created, five of
+   * five each on TheBrain 15.0.640.
+   */
+  describe("a tag named as a parent", () => {
+    const ids = (thoughts: readonly ThoughtDto[]): string[] => thoughts.map((t) => t.id);
+    const refusal = (field: string, tag: string) => ({
+      kind: "tag_as_parent",
+      message: expect.stringMatching(
+        new RegExp(`^${field} \\S+ cannot be a parent: it is the tag "${PREFIX}${tag}"$`),
+      ),
+    });
+
+    it("links.create and create refuse a tag above, and write nothing", async () => {
+      const tagId = await make("tp-tag", ThoughtKind.Tag);
+      const lowerTag = await make("tp-lower-tag", ThoughtKind.Tag);
+      const typeId = await make("tp-type", ThoughtKind.Type);
+      const bare = await make("tp-bare");
+
+      // An ordinary thought, a type and another tag: each would be tagged.
+      for (const id of [bare, typeId, lowerTag]) {
+        await expect(
+          api.links.create(brainId, {
+            thoughtIdA: id,
+            thoughtIdB: tagId,
+            relation: Relation.Parent,
+          }),
+        ).rejects.toMatchObject(refusal("thoughtIdB", "tp-tag"));
+        await expect(
+          api.links.create(brainId, {
+            thoughtIdA: tagId,
+            thoughtIdB: id,
+            relation: Relation.Child,
+          }),
+        ).rejects.toMatchObject(refusal("thoughtIdA", "tp-tag"));
+      }
+      await expect(
+        api.thoughts.create(brainId, { name: `${PREFIX}tp-never-made`, sourceThoughtId: tagId }),
+      ).rejects.toMatchObject(refusal("sourceThoughtId", "tp-tag"));
+
+      await settle();
+      for (const id of [bare, typeId, lowerTag]) {
+        expect((await api.thoughts.getGraph(brainId, id)).links, id).toEqual([]);
+      }
+      // No thought was made: a tag's graph lists what it marks as children.
+      expect((await api.thoughts.getGraph(brainId, tagId)).children).toEqual([]);
+    });
+
+    it("ingest writes no part of a plan that names a tag as a parent, by a thought or by a link", async () => {
+      const tagId = await make("tp-plan-tag", ThoughtKind.Tag);
+      const root = await make("tp-plan-root");
+      const old = await make("tp-plan-old");
+      const top = { tempId: "top", name: `${PREFIX}tp-plan-top`, parent: root };
+
+      await expect(
+        ingest(api, brainId, {
+          thoughts: [top, { tempId: "leaf", name: `${PREFIX}tp-plan-leaf`, parent: tagId }],
+        }),
+      ).rejects.toMatchObject(refusal("parent", "tp-plan-tag"));
+      await expect(
+        ingest(api, brainId, {
+          thoughts: [top],
+          links: [{ from: old, to: tagId, relation: "parent" }],
+        }),
+      ).rejects.toMatchObject(refusal("to", "tp-plan-tag"));
+      await expect(
+        ingest(api, brainId, {
+          thoughts: [top],
+          links: [{ from: tagId, to: "top", relation: "child" }],
+        }),
+      ).rejects.toMatchObject(refusal("from", "tp-plan-tag"));
+
+      await settle();
+      expect((await api.thoughts.getGraph(brainId, root)).children).toEqual([]);
+      expect((await api.thoughts.getGraph(brainId, tagId)).children).toEqual([]);
+      expect((await api.thoughts.getGraph(brainId, old)).tags).toEqual([]);
+
+      // What the refusal points at attaches the tag, and says so.
+      const outcome = await ingest(api, brainId, { thoughts: [{ ...top, tagIds: [tagId] }] });
+      for (const c of outcome.created) created.push(c.thoughtId);
+      expect(outcome.tagsAttached).toBe(1);
+      const made = outcome.created[0]!.thoughtId;
+      const graph = await eventually(
+        () => api.thoughts.getGraph(brainId, made),
+        (g) => g.tags.length === 1,
+      );
+      expect(ids(graph.tags)).toEqual([tagId]);
+      expect(ids(graph.parents)).toEqual([root]);
+    });
+  });
+
+  /**
+   * A link the API answers with a 200 and makes none of. `links.create()`
+   * returned the identifier of zeros as the new link's, `brain_link` answered
+   * "link created" with it for a thought linked to itself, and `brain_ingest`
+   * counted it under "links created": three of three each on TheBrain
+   * 15.0.640.
+   */
+  describe("a link the API does not make", () => {
+    const ZEROS = "00000000-0000-0000-0000-000000000000";
+    const KINDS = [ThoughtKind.Normal, ThoughtKind.Type, ThoughtKind.Tag] as const;
+    const rawLink = (
+      thoughtIdA: string,
+      thoughtIdB: string,
+      relation: number,
+    ): Promise<{ id: string }> =>
+      api.client.post<{ id: string }>(`/api/links/${brainId}`, {
+        json: { thoughtIdA, thoughtIdB, relation },
+      });
+
+    it("a thought linked to itself is a 200 with an identifier of zeros under every relation, whatever its kind", async () => {
+      for (const kind of KINDS) {
+        const id = await make(`nl-self-${kind}`, kind);
+        for (const relation of [Relation.Child, Relation.Parent, Relation.Jump]) {
+          expect((await rawLink(id, id, relation)).id, `kind ${kind}, relation ${relation}`).toBe(
+            ZEROS,
+          );
+          // So `links.create` does not send it.
+          await expect(
+            api.links.create(brainId, { thoughtIdA: id, thoughtIdB: id, relation }),
+          ).rejects.toMatchObject({
+            kind: "bad_request",
+            message: `a thought cannot be linked to itself: both ends of the link are ${id}`,
+          });
+        }
+        await settle(600);
+        expect((await api.thoughts.getGraph(brainId, id)).links, `kind ${kind}`).toEqual([]);
+      }
+    }, 30_000);
+
+    it("of the pairs of kinds, a tag under a type alone is answered with zeros: every other one is linked", async () => {
+      // Three thoughts of each kind, and a pair of its own for each of the 27
+      // ways to write a link between two kinds: two thoughts share one link.
+      const pool = new Map<number, string[]>();
+      for (const kind of KINDS) {
+        pool.set(kind, [
+          await make(`nl-${kind}-0`, kind),
+          await make(`nl-${kind}-1`, kind),
+          await make(`nl-${kind}-2`, kind),
+        ]);
+      }
+      const pair = (kindA: number, kindB: number, relation: number): [string, string] => {
+        const [as, bs] = [pool.get(kindA)!, pool.get(kindB)!];
+        if (kindA === kindB) return [as[relation - 1]!, as[relation % 3]!];
+        return kindA < kindB ? [as[relation - 1]!, bs[0]!] : [as[1]!, bs[relation - 1]!];
+      };
+      /**
+       * What a parent-child link is, by the kind above and the kind below.
+       * A tag above is its attachment (5, and 7 on another tag), a type
+       * above a thought its type (2), and a type above a type has a meaning
+       * of its own, 3, which `LinkMeaning` does not name.
+       */
+      const meaning = (upper: number, lower: number): number | null => {
+        if (upper === ThoughtKind.Normal) return LinkMeaning.Normal;
+        if (upper === ThoughtKind.Tag) {
+          return lower === ThoughtKind.Tag ? LinkMeaning.SubTag : LinkMeaning.Tag;
+        }
+        if (lower === ThoughtKind.Normal) return LinkMeaning.Type;
+        return lower === ThoughtKind.Type ? 3 : null;
+      };
+
+      const zeros: string[] = [];
+      for (const kindA of KINDS) {
+        for (const kindB of KINDS) {
+          for (const relation of [Relation.Child, Relation.Parent, Relation.Jump]) {
+            const cell = `kind ${kindA} to kind ${kindB}, relation ${relation}`;
+            const [a, b] = pair(kindA, kindB, relation);
+            const { id } = await rawLink(a, b, relation);
+            const [upper, upperKind, lowerKind] =
+              relation === Relation.Parent ? [b, kindB, kindA] : [a, kindA, kindB];
+            const expected =
+              relation === Relation.Jump ? LinkMeaning.Normal : meaning(upperKind, lowerKind);
+            if (expected === null) {
+              expect(id, cell).toBe(ZEROS);
+              zeros.push(cell);
+              continue;
+            }
+            expect(id, cell).not.toBe(ZEROS);
+            const link = await eventually(
+              () => api.links.between(brainId, a, b),
+              (found) => found !== null,
+            );
+            // Stored with relation 1 or 3, never 2, the upper end at its head.
+            expect([link?.id, link?.thoughtIdA, link?.relation, link?.meaning], cell).toEqual([
+              id,
+              upper,
+              relation === Relation.Jump ? Relation.Jump : Relation.Child,
+              expected,
+            ]);
+          }
+        }
+      }
+
+      // The tag under the type, written from either end, and nothing else.
+      expect(zeros).toEqual([
+        `kind ${ThoughtKind.Type} to kind ${ThoughtKind.Tag}, relation ${Relation.Child}`,
+        `kind ${ThoughtKind.Tag} to kind ${ThoughtKind.Type}, relation ${Relation.Parent}`,
+      ]);
+      await settle(600);
+      const [types, tags] = [pool.get(ThoughtKind.Type)!, pool.get(ThoughtKind.Tag)!];
+      expect(await api.links.between(brainId, types[0]!, tags[0]!)).toBeNull();
+      expect(await api.links.between(brainId, tags[1]!, types[1]!)).toBeNull();
+    }, 60_000);
+
+    it("a thought is created with an identifier of its own where the link to its source is not made", async () => {
+      // The two creates that ask for a tag under a type. Neither answered
+      // with zeros, nor did any other of 28 creates picked to.
+      const typeId = await make("nl-source-type", ThoughtKind.Type);
+      const tagId = await make("nl-source-tag", ThoughtKind.Tag);
+      for (const [what, extra] of [
+        ["a tag under a type", { kind: ThoughtKind.Tag, sourceThoughtId: typeId, relation: 1 }],
+        ["a type above a tag", { kind: ThoughtKind.Type, sourceThoughtId: tagId, relation: 2 }],
+      ] as const) {
+        const { id } = await api.client.post<{ id: string }>(`/api/thoughts/${brainId}`, {
+          json: { name: `${PREFIX}nl-born`, acType: 0, ...extra },
+        });
+        created.push(id);
+        expect(isUuid(id), what).toBe(true);
+        expect(id, what).not.toBe(ZEROS);
+        await settle(600);
+        const graph = await api.thoughts.getGraph(brainId, id);
+        expect(graph.thought.kind, what).toBe(extra.kind);
+        expect(graph.links, what).toEqual([]);
+      }
+    });
+  });
+
+  /**
+   * A link between two thoughts that something joins already. `brain_link`
+   * answered "Link already existed" whatever it was and wrote its label onto
+   * it, a tag's attachment and a type's link included; `brain_ingest` called
+   * every parent link a mismatch, and a link the other way up, a tag and a
+   * type the child link asked for. Three of three each on TheBrain 15.0.640.
+   */
+  describe("a link already there that is not the one asked for", () => {
+    const shape = (link: LinkDto | null): unknown[] => [
+      link?.thoughtIdA,
+      link?.relation,
+      link?.meaning,
+      link?.name ?? null,
+    ];
+
+    it("ingest names what joins the two, labels an ordinary link alone, and leaves each as it was", async () => {
+      const tagId = await make("la-tag", ThoughtKind.Tag);
+      const typeId = await make("la-type", ThoughtKind.Type);
+      const root = await make("la-root");
+      const upper = await make("la-upper");
+      const beside = await make("la-beside");
+      const id = await api.thoughts.create(brainId, {
+        name: `${PREFIX}la-thought`,
+        sourceThoughtId: upper,
+        typeId,
+      });
+      created.push(id);
+      await api.links.create(brainId, {
+        thoughtIdA: id,
+        thoughtIdB: beside,
+        relation: Relation.Jump,
+      });
+      await api.links.attachTag(brainId, id, tagId);
+      await eventually(
+        () => api.thoughts.getGraph(brainId, id),
+        (g) => g.tags.length === 1 && g.jumps.length === 1,
+      );
+
+      // As the API stores them, which is what the report reads: a parent's
+      // link from the upper end, a tag's and a type's from the tag and the type.
+      const before = {
+        upper: await api.links.between(brainId, id, upper),
+        beside: await api.links.between(brainId, id, beside),
+        tag: await api.links.between(brainId, id, tagId),
+        type: await api.links.between(brainId, id, typeId),
+      };
+      expect(shape(before.upper)).toEqual([upper, Relation.Child, LinkMeaning.Normal, null]);
+      expect(shape(before.beside)).toEqual([id, Relation.Jump, LinkMeaning.Normal, null]);
+      expect(shape(before.tag)).toEqual([tagId, Relation.Child, LinkMeaning.Tag, null]);
+      expect(shape(before.type)).toEqual([typeId, Relation.Child, LinkMeaning.Type, null]);
+      const asked = { from: id, to: upper, fromName: "from", toName: "to" };
+      expect(linkFound(before.upper!, { ...asked, relation: "parent" }, false).asAsked).toBe(true);
+      expect(linkFound(before.upper!, { ...asked, relation: "child" }, false).asAsked).toBe(false);
+
+      const outcome = await ingest(api, brainId, {
+        thoughts: [{ tempId: "new", name: `${PREFIX}la-new`, parent: root, relation: "parent" }],
+        links: [
+          // Exactly what is there, the second of them made by this plan.
+          { from: id, to: upper, relation: "parent", name: "belongs to" },
+          { from: root, to: "new", relation: "parent", name: "sits under" },
+          // Another kind, and the other way up.
+          { from: id, to: beside, relation: "child", name: "holds" },
+          { from: upper, to: id, relation: "parent" },
+          // No link at all between two thoughts.
+          { from: id, to: tagId, name: "about" },
+          { from: id, to: typeId, relation: "jump", name: "an example of" },
+        ],
+      });
+      for (const c of outcome.created) created.push(c.thoughtId);
+
+      expect(outcome.failures).toEqual([]);
+      expect(outcome.linksCreated).toBe(0);
+      const notes = (list: ReadonlyArray<{ from: string; to: string; note: string }>) =>
+        Object.fromEntries(list.map((l) => [`${l.from} -> ${l.to}`, l.note]));
+      expect(notes(outcome.linksReused)).toEqual({
+        [`${id} -> ${upper}`]: "the link already existed, label updated",
+        [`${root} -> new`]: "the link already existed, label updated",
+        [`${id} -> ${beside}`]:
+          `the link already existed as jump, the requested parent-child with ${id} above ` +
+          "was not added — only the label was updated",
+        [`${upper} -> ${id}`]:
+          `the link already existed as parent-child with ${upper} above, the requested ` +
+          `parent-child with ${id} above was not added`,
+      });
+      const over = "and two thoughts share one link: the requested jump was not added in its place";
+      expect(notes(outcome.linksNotAdded)).toEqual({
+        [`${id} -> ${tagId}`]: `${tagId} is a tag on ${id}, ${over}, and no label was written`,
+        [`${id} -> ${typeId}`]: `${typeId} is the type of ${id}, ${over}, and no label was written`,
+      });
+
+      const named = await eventually(
+        () => api.links.between(brainId, id, beside),
+        (link) => link?.name === "holds",
+      );
+      expect(shape(named)).toEqual([id, Relation.Jump, LinkMeaning.Normal, "holds"]);
+      const labelled = await eventually(
+        () => api.links.between(brainId, id, upper),
+        (link) => link?.name === "belongs to",
+      );
+      expect(shape(labelled)).toEqual([upper, Relation.Child, LinkMeaning.Normal, "belongs to"]);
+      await settle(600);
+      // Neither has a label, and the thought has its tag and its type.
+      expect(shape(await api.links.between(brainId, id, tagId))).toEqual(shape(before.tag));
+      expect(shape(await api.links.between(brainId, id, typeId))).toEqual(shape(before.type));
+      const graph = await api.thoughts.getGraph(brainId, id);
+      expect(graph.tags.map((t) => t.id)).toEqual([tagId]);
+      expect(graph.type?.id).toBe(typeId);
+    }, 30_000);
   });
 
   /**
@@ -2672,11 +3022,10 @@ suite("resource layer against the live API", () => {
       expect(bare.tags).toEqual([]);
       expect(bare.parents).toEqual([]);
 
-      // Posted from the upper tag's side it is the same link again.
-      await api.links.create(brainId, {
-        thoughtIdA: upper,
-        thoughtIdB: lower,
-        relation: Relation.Child,
+      // Posted from the upper tag's side it is the same link again. Raw:
+      // `links.create` refuses a tag above.
+      await api.client.post(`/api/links/${brainId}`, {
+        json: { thoughtIdA: upper, thoughtIdB: lower, relation: Relation.Child },
       });
       const again = await eventually(
         () => api.links.between(brainId, lower, upper),

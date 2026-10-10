@@ -41,6 +41,19 @@ export type ApiErrorKind =
    * it had. Raised ahead of the write.
    */
   | "not_a_parent"
+  /**
+   * A tag named as a parent, in the same two places. The API answers 200 here
+   * too, and attaches the tag: the thought below is tagged and has no parent.
+   * Raised ahead of the write. A kind of its own because the way on is
+   * another: a tag is attached by the call that says so.
+   */
+  | "tag_as_parent"
+  /**
+   * HTTP 200 with an identifier of zeros for what was to be created. It is the
+   * API's answer for a link it does not make, and nothing is written then: a
+   * thought with itself, a tag under a type.
+   */
+  | "zero_id"
   /** Connection failed or dropped. */
   | "network"
   /** A response arrived but could not be parsed. */

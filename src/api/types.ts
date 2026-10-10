@@ -27,7 +27,11 @@ export type AccessType = (typeof AccessType)[keyof typeof AccessType];
  * Note: when creating a link towards a thought with `kind = Tag`, the server
  * rewrites `Parent` into a tag attachment (`relation = Child`, `meaning = Tag`).
  * Towards a `kind = Type` it makes the type's link, setting or replacing the
- * thought's type; `links.create` and `thoughts.create` refuse that.
+ * thought's type. `links.create` and `thoughts.create` refuse both: a tag is
+ * attached through `links.attachTag`, and a type set through `typeId`.
+ *
+ * No link reads back as a `Parent`'s: one written so is stored as a `Child`'s
+ * from the other end.
  *
  * The spec lists a fourth, `Sibling = 4`. It is left out because nothing can
  * be written with it: a link is refused with a 400, a thought is created with

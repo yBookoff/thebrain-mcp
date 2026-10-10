@@ -16,6 +16,7 @@ import {
   warnIfFencedCode,
   type AliasOutcome,
 } from "../../api/index.js";
+import { linkFound } from "../../operations/ingest.js";
 import { confirmDestructive, confirmationInstructions } from "../confirm.js";
 import type { ServerContext } from "../context.js";
 import { bullet, fail, guard, join, ok, section } from "../respond.js";
@@ -57,7 +58,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
           .describe(
             "What to attach it to. Without this the thought is left orphaned. " +
               "Not a type: a thought made under one would get that type and no parent, " +
-              "so a type goes in typeId.",
+              "so a type goes in typeId. Not a tag either: that goes in tagIds.",
           ),
         relation: z
           .enum(["child", "parent", "jump"])
@@ -101,7 +102,8 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       // would leave the thought behind for a retry to make again.
       for (const tagId of tagIds ?? []) await ctx.api.links.requireTag(bid, tagId);
       // A type for a parent is no parent: the thought would be one of that
-      // type. `create` refuses it too, under the name the API has for it.
+      // type. Nor is a tag: the thought would be tagged, and have no parent.
+      // `create` refuses both too, under the name the API has for the argument.
       if (parentId !== undefined && (relation ?? "child") === "child") {
         await ctx.api.links.requireParent(bid, parentId, "parentId");
       }
@@ -270,7 +272,9 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       description:
         "Links two thoughts. Call it when you spot a meaningful relationship between " +
         "existing thoughts — links are what make a brain a graph rather than a list. " +
-        'Label the link via name: "motivates", "solved by", "contradicts".',
+        'Label the link via name: "motivates", "solved by", "contradicts". ' +
+        "Two thoughts share one link: where one joins them already nothing is added, " +
+        "and the result says what is there.",
       inputSchema: {
         brainId,
         fromId: z.string().describe("Source thought."),
@@ -283,23 +287,41 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
               "that leaves the hierarchy alone. Siblings are not linked to each other: " +
               "they are thoughts with a parent in common. A type cannot be the parent: " +
               "that link would set the child's type, which is what typeId of " +
-              "brain_update_thought is for.",
+              "brain_update_thought is for. Nor can a tag: that link would tag the child, " +
+              "which is what brain_tag is for.",
           ),
         name: z.string().optional().describe("Link label: how exactly one relates to the other."),
       },
     },
     guard(async ({ brainId: bid, fromId, toId, relation, name }) => {
       // Ahead of everything, the label of a link already there included: under
-      // a type a thought is given that type, and loses the one it had.
+      // a type a thought is given that type, and loses the one it had, and
+      // under a tag it is tagged, which is no link and no parent.
       if (relation === "child") await ctx.api.links.requireParent(bid, fromId, "fromId");
       if (relation === "parent") await ctx.api.links.requireParent(bid, toId, "toId");
       const existing = await ctx.api.links.between(bid, fromId, toId);
       if (existing !== null) {
+        // It used to answer "Link already existed" whatever joined the two,
+        // and to write the label onto a tag's attachment or a type's link.
+        const found = linkFound(
+          existing,
+          {
+            from: fromId,
+            to: toId,
+            relation: relation ?? "jump",
+            fromName: "fromId",
+            toName: "toId",
+          },
+          name !== undefined,
+        );
+        if (!found.ordinary) return ok(section("No link added", found.note)!);
         if (name !== undefined) await ctx.api.links.update(bid, existing.id, { name });
         return ok(
           section(
             "Link already existed",
-            `identifier ${existing.id}` + (name !== undefined ? ", label updated" : ""),
+            found.asAsked
+              ? `identifier ${existing.id}` + (name !== undefined ? ", label updated" : "")
+              : `identifier ${existing.id}: ${found.note}`,
           )!,
         );
       }

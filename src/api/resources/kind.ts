@@ -40,8 +40,9 @@ export async function requireKind(
 }
 
 /**
- * Refuses a type named as a parent: as the upper end of a parent/child link,
- * or as the thought a new one is created under. Throws `not_a_parent`.
+ * Refuses a type or a tag named as a parent: as the upper end of a
+ * parent/child link, or as the thought a new one is created under. Throws
+ * `not_a_parent` for a type and `tag_as_parent` for a tag.
  *
  * The API does not ask here either. A thought linked under a type is given
  * that type, with a 200, in place of the one it had, and a thought created
@@ -49,9 +50,13 @@ export async function requireKind(
  * which says so. So the kind of the upper end is read here, ahead of the
  * write. `field` is what the caller calls the identifier.
  *
- * Only a type is refused. Under a tag the thought is tagged, which takes
- * nothing from it. An identifier nobody has is left to the write, which
- * answers for it as it did before this check.
+ * Under a tag the thought is tagged, again with a 200. That takes nothing
+ * from it, but it is no parent either: the thought created there has the tag
+ * and no parent, and the link is the tag's attachment. `attachTag` is what
+ * asks for one, and it does not come through here.
+ *
+ * An identifier nobody has is left to the write, which answers for it as it
+ * did before this check.
  */
 export async function requireParent(
   client: TheBrainClient,
@@ -60,11 +65,18 @@ export async function requireParent(
   field: string,
 ): Promise<void> {
   const named = await read(client, brainId, id, field);
-  if (named?.kind !== ThoughtKind.Type) return;
-  throw new TheBrainError(
-    "not_a_parent",
-    `${field} ${id} cannot be a parent: it is the type "${named.name ?? "(unnamed)"}"`,
-  );
+  if (named?.kind === ThoughtKind.Type) {
+    throw new TheBrainError(
+      "not_a_parent",
+      `${field} ${id} cannot be a parent: it is the type "${named.name ?? "(unnamed)"}"`,
+    );
+  }
+  if (named?.kind === ThoughtKind.Tag) {
+    throw new TheBrainError(
+      "tag_as_parent",
+      `${field} ${id} cannot be a parent: it is the tag "${named.name ?? "(unnamed)"}"`,
+    );
+  }
 }
 
 /** The thought `id` names, or null when no thought in the brain has it. */

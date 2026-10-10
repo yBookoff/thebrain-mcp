@@ -38,6 +38,29 @@ export function assertUuid(value: string, field: string): void {
   }
 }
 
+/** What the API returns, with a 200, for a link it did not make. */
+const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
+
+/**
+ * The identifier a create answered with. Throws `zero_id`, with `message`,
+ * when it is the one of zeros.
+ *
+ * `POST /api/links` answers 200 with `00000000-…` for a link it does not
+ * make, and writes nothing: a thought with itself, under any relation, and a
+ * tag under a type. The zeros used to be handed on as the new link's
+ * identifier. Both are refused ahead of the request now, which leaves this
+ * for a pair nobody measured and for a thought that changed kind since it
+ * was read.
+ *
+ * `POST /api/thoughts` was not seen to do it, in 28 creates picked to make
+ * it. It is checked all the same: its zeros would go on as the parent of the
+ * next thought, and a `sourceThoughtId` of zeros is a 200 that links nothing.
+ */
+export function createdId(created: { id: string }, path: string, message: string): string {
+  if (created.id !== ZERO_UUID) return created.id;
+  throw new TheBrainError("zero_id", message, { status: 200, method: "POST", path });
+}
+
 /**
  * Where TheBrain listens when no address is configured, newest first.
  *

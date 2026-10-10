@@ -923,10 +923,12 @@ describe("a type named as a parent", () => {
    * A brain with a type, a tag and an ordinary thought in it. As on the live
    * API, a link is posted and a thought created with a 200 whatever they name.
    */
+  const OTHER_TAG = "88888888-0000-4000-8000-000000000008";
   const brain = () => {
     const others: Record<string, ThoughtDto> = {
       [TYPE]: thought(TYPE, "Constraint", { kind: 2 }),
       [TAG]: thought(TAG, "gotcha", { kind: 4 }),
+      [OTHER_TAG]: thought(OTHER_TAG, "gotcha", { kind: 4 }),
       [PLAIN]: thought(PLAIN, "API constraints"),
       [THOUGHT]: thought(THOUGHT, "linked"),
     };
@@ -977,15 +979,63 @@ describe("a type named as a parent", () => {
     }
   });
 
-  it("only a type is refused: a tag above, and an identifier nobody has, go to the API", async () => {
-    // Under a tag the thought is tagged, which takes nothing from it. The API
-    // answers for the identifier, with a 400.
-    for (const upper of [TAG, NOBODY]) {
+  it("an identifier nobody has goes to the API, which answers for it", async () => {
+    // With a 400 for a link and a 404 for a create.
+    const { api, calls } = brain();
+    await api.links.create(BRAIN, { thoughtIdA: THOUGHT, thoughtIdB: NOBODY, relation: 2 });
+    expect(sent(calls)).toEqual([read(NOBODY), postLink]);
+    await api.thoughts.create(BRAIN, { name: "new", sourceThoughtId: NOBODY });
+    expect(sent(calls).slice(2)).toEqual([read(NOBODY), postThought]);
+  });
+
+  it("a parent/child link with a tag above is refused, and nothing is sent", async () => {
+    // Measured: the API answers 200 and attaches the tag. It used to go out,
+    // and come back as a link created.
+    for (const [input, field] of [
+      [{ thoughtIdA: THOUGHT, thoughtIdB: TAG, relation: 2 }, "thoughtIdB"],
+      [{ thoughtIdA: TAG, thoughtIdB: THOUGHT, relation: 1 }, "thoughtIdA"],
+      [{ thoughtIdA: TAG, thoughtIdB: THOUGHT }, "thoughtIdA"],
+      // A type tagged this way, and a tag attached to a tag.
+      [{ thoughtIdA: TYPE, thoughtIdB: TAG, relation: 2 }, "thoughtIdB"],
+      [{ thoughtIdA: TAG, thoughtIdB: OTHER_TAG, relation: 2 }, "thoughtIdB"],
+    ] as const) {
       const { api, calls } = brain();
-      await api.links.create(BRAIN, { thoughtIdA: THOUGHT, thoughtIdB: upper, relation: 2 });
-      expect(sent(calls)).toEqual([read(upper), postLink]);
-      await api.thoughts.create(BRAIN, { name: "new", sourceThoughtId: upper });
-      expect(sent(calls).slice(2)).toEqual([read(upper), postThought]);
+      await expect(api.links.create(BRAIN, input)).rejects.toMatchObject({
+        kind: "tag_as_parent",
+        message: `${field} ${input[field]} cannot be a parent: it is the tag "gotcha"`,
+      });
+      expect(sent(calls), field).toEqual([read(input[field])]);
+    }
+  });
+
+  it("a jump to a tag, and a tag below a thought, are ordinary links and go out", async () => {
+    for (const [what, input, reads] of [
+      ["a jump to a tag", { thoughtIdA: THOUGHT, thoughtIdB: TAG, relation: 3 }, []],
+      ["a tag below", { thoughtIdA: THOUGHT, thoughtIdB: TAG, relation: 1 }, [THOUGHT]],
+      ["a tag below", { thoughtIdA: TAG, thoughtIdB: THOUGHT, relation: 2 }, [THOUGHT]],
+    ] as const) {
+      const { api, calls } = brain();
+      await expect(api.links.create(BRAIN, input), what).resolves.toBe(LINK);
+      expect(sent(calls), what).toEqual([...reads.map(read), postLink]);
+    }
+  });
+
+  it("a thought is not created under a tag; above one or beside it, it is", async () => {
+    // Measured: created under a tag the thought is tagged, and has no parent.
+    for (const extra of [{}, { relation: 1 }, { typeId: TYPE }] as const) {
+      const { api, calls } = brain();
+      await expect(
+        api.thoughts.create(BRAIN, { name: "new", sourceThoughtId: TAG, ...extra }),
+      ).rejects.toMatchObject({
+        kind: "tag_as_parent",
+        message: `sourceThoughtId ${TAG} cannot be a parent: it is the tag "gotcha"`,
+      });
+      expect(sent(calls)).toEqual([read(TAG)]);
+    }
+    for (const relation of [2, 3] as const) {
+      const { api, calls } = brain();
+      await api.thoughts.create(BRAIN, { name: "new", sourceThoughtId: TAG, relation });
+      expect(sent(calls)).toEqual([postThought]);
     }
   });
 
@@ -1041,6 +1091,93 @@ describe("a type named as a parent", () => {
       api.links.create(BRAIN, { thoughtIdA: THOUGHT, thoughtIdB: PLAIN, relation: 2 }),
     ).rejects.toMatchObject({ kind: "auth" });
     expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+  });
+});
+
+describe("a link the API does not make", () => {
+  const PLAIN = "eeeeeeee-0000-4000-8000-000000000005";
+  const ZEROS = "00000000-0000-0000-0000-000000000000";
+  const LINK = "99999999-0000-4000-8000-000000000009";
+
+  /**
+   * A brain that answers a link or a thought it is sent with `id`. The live
+   * API answers a link it does not make with a 200 and an identifier of
+   * zeros: a thought with itself, and a tag under a type.
+   */
+  const answering = (id: string) =>
+    apiWith([
+      [
+        "/api/thoughts/",
+        (url) => {
+          const named = url.pathname.split("/").pop()!;
+          return thought(named, "named", { kind: named === TAG ? 4 : 1 });
+        },
+      ],
+      ["POST /api/links", () => ({ id })],
+      ["POST /api/thoughts/", () => ({ id })],
+    ]);
+
+  it("a thought linked to itself is refused before any request, whatever the relation", async () => {
+    // Measured: a 200 with an identifier of zeros and no link, for each of
+    // the three. It used to be returned as the link's identifier.
+    for (const relation of [Relation.Child, Relation.Parent, Relation.Jump]) {
+      const { api, fetchImpl } = answering(LINK);
+      await expect(
+        // Case aside: the API reads a UUID in capitals too.
+        api.links.create(BRAIN, {
+          thoughtIdA: THOUGHT,
+          thoughtIdB: THOUGHT.toUpperCase(),
+          relation,
+        }),
+      ).rejects.toMatchObject({
+        kind: "bad_request",
+        message: `a thought cannot be linked to itself: both ends of the link are ${THOUGHT}`,
+      });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    }
+  });
+
+  it("an identifier of zeros is an error, and never the identifier of a link", async () => {
+    const { api, calls } = answering(ZEROS);
+    const refusal = {
+      kind: "zero_id",
+      status: 200,
+      method: "POST",
+      path: `/api/links/${BRAIN}`,
+    };
+    await expect(
+      api.links.create(BRAIN, { thoughtIdA: THOUGHT, thoughtIdB: PLAIN, relation: Relation.Jump }),
+    ).rejects.toMatchObject({
+      ...refusal,
+      message: expect.stringMatching(
+        new RegExp(
+          `^no link was made between ${THOUGHT} and ${PLAIN}: ` +
+            ".*identifier of zeros.*Nothing was written$",
+        ),
+      ),
+    });
+    // The request that attaches a tag goes out by the same door.
+    await expect(api.links.attachTag(BRAIN, THOUGHT, TAG)).rejects.toMatchObject(refusal);
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(2);
+  });
+
+  it("nor of a thought", async () => {
+    // Not seen from the live API in 28 creates picked to make it. What the
+    // zeros would do next is: named as a parent, they are taken for none.
+    const { api } = answering(ZEROS);
+    await expect(api.thoughts.create(BRAIN, { name: "RAG" })).rejects.toMatchObject({
+      kind: "zero_id",
+      message: expect.stringMatching(/identifier of zeros for the thought "RAG"/),
+    });
+  });
+
+  it("any other identifier is returned as it came", async () => {
+    const { api } = answering(LINK);
+    await expect(
+      api.links.create(BRAIN, { thoughtIdA: THOUGHT, thoughtIdB: PLAIN, relation: Relation.Jump }),
+    ).resolves.toBe(LINK);
+    await expect(api.links.attachTag(BRAIN, THOUGHT, TAG)).resolves.toBe(LINK);
+    await expect(api.thoughts.create(BRAIN, { name: "RAG" })).resolves.toBe(LINK);
   });
 });
 

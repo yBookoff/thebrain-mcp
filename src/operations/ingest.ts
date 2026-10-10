@@ -30,12 +30,15 @@
 import {
   ALIASES_UNSUPPORTED,
   TheBrainError,
+  isStructuralLink,
+  isTagLink,
+  isTypeLink,
   mayHaveLanded,
   normalizeAliases,
   type CleanGraph,
   type TheBrainApi,
 } from "../api/index.js";
-import { Relation } from "../api/types.js";
+import { Relation, type LinkDto } from "../api/types.js";
 import { mapWithConcurrency } from "../semantic/indexer.js";
 
 export type RelationName = "child" | "parent" | "jump";
@@ -107,11 +110,20 @@ export interface IngestOutcome {
   reused: Array<{ tempId: string; thoughtId: string; name: string }>;
   linksCreated: number;
   /**
-   * Links that already existed. Cases where the requested kind did not match
-   * the actual one are flagged separately: a jump asked for between a thought and
-   * its own parent is not posted, since the API would turn the parent link into it.
+   * Links of the plan between two thoughts that a link joined already.
+   * Nothing is posted for one: two thoughts share one link, and the API would
+   * turn the one that is there into the one asked for, a parent's into a
+   * jump. The note says what was found when it is not what the plan asked
+   * for: see `linkFound`.
    */
   linksReused: Array<{ from: string; to: string; note: string }>;
+  /**
+   * Links of the plan between two thoughts joined by what is no link between
+   * thoughts: a tag on one of them, or its type. Nothing is posted here
+   * either, since it would take the tag or the type away, and no label is
+   * written. The note says which of the two it is.
+   */
+  linksNotAdded: Array<{ from: string; to: string; note: string }>;
   notesWritten: number;
   tagsAttached: number;
   /** Thoughts whose alias list was written, at creation or by adding to it. */
@@ -203,6 +215,14 @@ export function planLevels(plan: IngestPlan): IngestThought[][] {
         );
       }
     }
+    // The API answers such a link with a 200 and an identifier of zeros, and
+    // makes none. It used to be counted under links created.
+    if (link.from === link.to) {
+      throw new IngestValidationError(
+        `the link ${link.from} -> ${link.to} joins a thought to itself, ` +
+          "and no such link can be made",
+      );
+    }
   }
 
   // Topological layout: a parent must be created before its child.
@@ -261,10 +281,11 @@ export async function ingest(
   await mapWithConcurrency([...tagIds], 6, (tagId) => api.links.requireTag(brainId, tagId));
 
   // And whatever a thought or a link of the plan names as a parent: under a
-  // type a thought is given that type, with a 200, and loses the one it had.
-  // Only a UUID can name a type, since a plan makes ordinary thoughts. A
-  // `tempId` is checked at its own turn, by `create` and `links.create`: it
-  // can land on a type its parent holds as an ordinary child.
+  // type a thought is given that type, with a 200, and loses the one it had,
+  // and under a tag it is tagged and has no parent. Only a UUID can name a
+  // type or a tag, since a plan makes ordinary thoughts. A `tempId` is
+  // checked at its own turn, by `create` and `links.create`: it can land on
+  // one its parent holds as an ordinary child.
   await mapWithConcurrency([...parentEnds(plan)], 6, ([id, field]) =>
     api.links.requireParent(brainId, id, field),
   );
@@ -274,6 +295,7 @@ export async function ingest(
     reused: [],
     linksCreated: 0,
     linksReused: [],
+    linksNotAdded: [],
     notesWritten: 0,
     tagsAttached: 0,
     aliasesWritten: 0,
@@ -559,21 +581,24 @@ export async function ingest(
     try {
       const existing = await api.links.between(brainId, from, to);
       if (existing !== null) {
-        const requested = RELATION_BY_NAME[link.relation ?? "jump"];
-        const mismatch = existing.relation !== requested;
-        if (link.name !== undefined) {
+        const found = linkFound(
+          existing,
+          {
+            from,
+            to,
+            relation: link.relation ?? "jump",
+            fromName: link.from,
+            toName: link.to,
+          },
+          link.name !== undefined,
+        );
+        if (link.name !== undefined && found.ordinary) {
           await api.links.update(brainId, existing.id, { name: link.name });
         }
-        outcome.linksReused.push({
+        (found.ordinary ? outcome.linksReused : outcome.linksNotAdded).push({
           from: link.from,
           to: link.to,
-          note: mismatch
-            ? `the link already existed as ${describeRelation(existing.relation)}, ` +
-              `the requested ${describeRelation(requested)} was not added` +
-              (link.name !== undefined ? " — only the label was updated" : "")
-            : link.name !== undefined
-              ? "the link already existed, label updated"
-              : "the link already existed",
+          note: found.note,
         });
         return;
       }
@@ -685,11 +710,97 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function describeRelation(relation: number): string {
-  const names: Record<number, string> = {
-    [Relation.Child]: "parent-child",
-    [Relation.Parent]: "parent-child",
-    [Relation.Jump]: "jump",
+/** A link asked for between two thoughts that exist, by a tool or by a plan. */
+export interface AskedLink {
+  from: string;
+  to: string;
+  /** What `to` is to be to `from`. */
+  relation: RelationName;
+  /** What the caller calls each end: an argument's name, or a plan's reference. */
+  fromName: string;
+  toName: string;
+}
+
+export interface FoundLink {
+  /** It is the link asked for: the same kind, the same way up. */
+  asAsked: boolean;
+  /**
+   * An ordinary link, which takes a label whichever of the three it is. A
+   * tag's attachment and a type's link are not, and are given none.
+   */
+  ordinary: boolean;
+  /** What to tell the caller. `named` says whether a label came with the request. */
+  note: string;
+}
+
+/**
+ * What already joins two thoughts, set against the link asked for.
+ *
+ * Two thoughts share one link, so the one asked for is never added beside
+ * another: posted, it replaces it. A jump posted to a thought's parent takes
+ * the thought out from under it, and one posted to its tag or its type takes
+ * the tag or the type away. So what is there stays, and this says what it is.
+ *
+ * No link reads back with relation 2: a parent's link is stored as a child's
+ * from the other end. `thoughtIdA` is therefore the upper end of a
+ * parent-child link, as it is the tag of an attachment and the type of a
+ * type's link. Comparing the stored relation with the one asked for used to
+ * call every parent link a mismatch, and a link the other way up, a tag and
+ * a type the child link asked for.
+ *
+ * A label goes onto an ordinary link whatever its relation: it says how the
+ * two relate, and that link is the one place it can be kept. It does not go
+ * onto a tag's attachment or a type's link, which are not links between two
+ * thoughts and used to be labelled all the same.
+ */
+export function linkFound(existing: LinkDto, asked: AskedLink, named: boolean): FoundLink {
+  const fromIsHead = existing.thoughtIdA.toLowerCase() === asked.from.toLowerCase();
+  const [head, tail] = fromIsHead ? [asked.fromName, asked.toName] : [asked.toName, asked.fromName];
+  const hierarchy = (upper: string): string => `parent-child with ${upper} above`;
+  const wanted =
+    asked.relation === "jump"
+      ? "jump"
+      : hierarchy(asked.relation === "child" ? asked.fromName : asked.toName);
+
+  if (!isStructuralLink(existing)) {
+    const what = isTagLink(existing)
+      ? `${head} is a tag on ${tail}`
+      : isTypeLink(existing)
+        ? `${head} is the type of ${tail}`
+        : `the two are joined by a link of another kind (meaning ${existing.meaning})`;
+    return {
+      asAsked: false,
+      ordinary: false,
+      note:
+        `${what}, and two thoughts share one link: the requested ${wanted} was not ` +
+        "added in its place" +
+        (named ? ", and no label was written" : ""),
+    };
+  }
+
+  const asAsked =
+    existing.relation === Relation.Jump
+      ? asked.relation === "jump"
+      : existing.relation === Relation.Child &&
+        asked.relation === (fromIsHead ? "child" : "parent");
+  if (asAsked) {
+    return {
+      asAsked,
+      ordinary: true,
+      note: named ? "the link already existed, label updated" : "the link already existed",
+    };
+  }
+  const found =
+    existing.relation === Relation.Jump
+      ? "jump"
+      : existing.relation === Relation.Child
+        ? hierarchy(head)
+        : `kind ${existing.relation}`;
+  return {
+    asAsked,
+    ordinary: true,
+    note:
+      `the link already existed as ${found}, the requested ${wanted} was not added` +
+      (named ? " — only the label was updated" : ""),
   };
-  return names[relation] ?? `kind ${relation}`;
 }

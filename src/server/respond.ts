@@ -46,6 +46,12 @@ export function describeError(error: unknown): string {
           "that type in place of the one it had. To set a type pass it as typeId to " +
           "brain_update_thought or brain_create_thought; for a parent name an ordinary thought."
         );
+      case "tag_as_parent":
+        return (
+          `${error.message}. Nothing was written. A thought linked under a tag is tagged ` +
+          "with it, and gets no parent. To attach a tag pass it to brain_tag, or as tagIds to " +
+          "brain_create_thought or brain_ingest; for a parent name an ordinary thought."
+        );
       case "auth":
         return "TheBrain rejected the key. Check THEBRAIN_API_KEY: find it under Settings > User > Local API Key.";
       case "network":

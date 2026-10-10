@@ -49,7 +49,7 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
                 .describe(
                   "A tempId from this batch or the UUID of an existing thought. " +
                     "Without it the thought is left unlinked, and a second run of the plan " +
-                    "makes it again. Not a type: that goes in typeId.",
+                    "makes it again. Not a type or a tag: those go in typeId and tagIds.",
                 ),
               relation: relation.optional(),
               typeId: z.string().optional().describe("Type from brain_list_types_and_tags."),
@@ -86,8 +86,9 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
           .optional()
           .describe(
             "Extra links on top of the hierarchy. These are what turn a set of thoughts " +
-              "into a graph — use them freely and label them. A type cannot be the parent " +
-              "end of a child or parent link: set a type with typeId.",
+              "into a graph — use them freely and label them. Neither a type nor a tag can " +
+              "be the parent end of a child or parent link: set a type with typeId and a " +
+              "tag with tagIds.",
           ),
         deduplicate: z
           .boolean()
@@ -159,6 +160,10 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
                 "Links that already existed",
                 bullet(outcome.linksReused.map((l) => `${l.from} -> ${l.to}: ${l.note}`)),
               ),
+          section(
+            "Links not added",
+            bullet(outcome.linksNotAdded.map((l) => `${l.from} -> ${l.to}: ${l.note}`)),
+          ),
           section(
             "Failed",
             bullet(

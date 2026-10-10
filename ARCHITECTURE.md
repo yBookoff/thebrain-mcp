@@ -69,7 +69,8 @@ without a protocol harness.
 Its whole job is to turn a hostile HTTP surface into typed calls that either
 return data or throw a `TheBrainError` with a machine-readable `kind`
 (`auth | forbidden | not_found | bad_request | server | route_miss |
-invalid_uuid | not_a_type | not_a_tag | not_a_parent | network | malformed`).
+invalid_uuid | not_a_type | not_a_tag | not_a_parent | tag_as_parent | zero_id |
+network | malformed`).
 
 "Hostile" is not an exaggeration — see §7 for the catalogue. The two defences
 that matter most:
@@ -228,6 +229,9 @@ Five properties, each of which took a bug to get right:
   and its own parent, the API would turn the hierarchy link into that jump, so
   the link is left as it is. The report carries a "Links that already existed"
   section with the mismatch spelled out, rather than counting it as created.
+  A tag on one of the two, or its type, is no link that existed: it is left
+  as it is too, and listed under "Links not added". `brain_link` answers in
+  the same words (§7, item 21).
 - **A failure takes its own branch and nothing else.** A thought that is not
   created leaves the thoughts under it unwritten and the links to them
   untried, and everything that does not hang on it is written to the end. See
@@ -505,6 +509,41 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     once, 60 of 60. The copy outlives a minute. `ingest()` looks for a thought
     in its parent's graph, so it waits for the graphs to list what it made
     (§4).
+21. **A tag is no parent either, an identifier of zeros is no link, and two
+    thoughts share one link.** Three ways the tools reported a link that was
+    not there, or not the one asked for, each measured through the real
+    handlers.
+
+    *A tag above.* A parent or child link with a tag above, and a thought
+    created under one, is a 200 that attaches the tag: the thought is tagged
+    and has no parent for it. `brain_link` answered "link created", and
+    `brain_create_thought` and `brain_ingest` a thought created, with "tags
+    attached: 0" beside it. It is refused as a type is (item 18), by the read
+    that was there for the type, with `tag_as_parent`. Refused, not done and
+    reported as a tag attached: nothing is lost by a tag, but the call asked
+    for a parent and the thought would have none, and `brain_tag` and
+    `tagIds` are what ask for a tag by name. A jump to a tag, and a tag put
+    under a thought, stay ordinary links.
+
+    *Zeros.* `POST /api/links` answers a link it does not make with a 200 and
+    `00000000-…`: a thought linked to itself, under any relation, and a tag
+    under a type. `brain_link` answered "link created" with the zeros after
+    it. `createdId()` throws `zero_id` for such an answer, to a link and to a
+    thought alike, and `links.create()` and `planLevels()` refuse a thought
+    linked to itself before anything is sent.
+
+    *The link that is there.* `GET /api/links/{a}/{b}` returns the one link a
+    pair has, and a link posted over it replaces it. So the tools post
+    nothing there, and used to say "already existed" whatever it was.
+    `linkFound()` reads it by its `meaning` and by which end is its
+    `thoughtIdA`, since the stored `relation` is 1 for a parent's link as for
+    a child's, and both tools use its words: the link asked for; another
+    ordinary link, named, with which end is above; or a tag's attachment or a
+    type's link, which is no link between two thoughts. A label goes onto an
+    ordinary link whatever its relation, as `brain_ingest` always wrote it:
+    it says how the two relate, and that link is the one place to keep it.
+    It does not go onto a tag's attachment or a type's link, where both
+    tools used to write it.
 
 ### Write visibility
 
@@ -559,7 +598,9 @@ request sets the thought's type, and between two tags it makes a link of
 meaning **7**, which puts the upper tag among the lower one's tags and its
 parents. `attachTag()` therefore reads the target and refuses anything but a
 tag, and `detachTag()` deletes a link only when it is the tag's: meaning 5 or
-7, from the tag (§7, item 17).
+7, from the tag (§7, item 17). And `links.create()` refuses a tag above, so
+that a tag is attached by the call that asks for one and by no other (§7,
+item 21).
 
 `statistics.links` does not count tags — links with `meaning=5` are excluded.
 
@@ -970,7 +1011,11 @@ Two testing habits worth stating, because both caught real bugs:
   broke three assertions that were indexing `links[0]` — and those assertions
   were the ones that were wrong. It lied twice more: it kept one `parent`
   whatever the relation, and answered every graph live. Six tests that ran a
-  plan twice passed on it while the live API made the thoughts again.
+  plan twice passed on it while the live API made the thoughts again. And
+  once more: it returned a link in its own shape, with the `relation` it was
+  written with, where the API stores a parent's link as a child's from the
+  other end. The report compared that number with the one asked for, and no
+  test saw that it called every parent link a mismatch.
 - **Measure before documenting.** Two corrections in this document — the
   `nameExact` latency and the q8 ranking claim — came from tests written against
   a claim that had been asserted rather than checked.

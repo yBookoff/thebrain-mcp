@@ -1,5 +1,6 @@
 import {
   assertUuid,
+  createdId,
   emptyOn400,
   type JsonPatchOp,
   type TheBrainClient,
@@ -25,7 +26,8 @@ export interface CreateThoughtInput {
   name: string;
   /**
    * Which thought to attach to. Without it the thought is created orphaned.
-   * Not a type when the new thought is to be its child: see `requireParent`.
+   * Not a type or a tag when the new thought is to be its child: see
+   * `requireParent`.
    */
   sourceThoughtId?: string;
   /** How the new thought relates to the source. Defaults to child. Refused with no source. */
@@ -240,6 +242,7 @@ export class ThoughtsResource {
     }
     // Ahead of the request: a thought made under a type is one of that type,
     // with no parent, and with another `typeId` beside it carries both types.
+    // One made under a tag is tagged, and has no parent either.
     if (
       input.sourceThoughtId !== undefined &&
       (input.relation ?? Relation.Child) === Relation.Child
@@ -267,11 +270,15 @@ export class ThoughtsResource {
       body["relation"] = input.relation ?? 1;
     }
 
-    const created = await this.client.post<{ id: string }>(
-      `/api/thoughts/${brainId}`,
-      { json: body },
+    const path = `/api/thoughts/${brainId}`;
+    const created = await this.client.post<{ id: string }>(path, { json: body });
+    return createdId(
+      created,
+      path,
+      `TheBrain answered 200 with an identifier of zeros for the thought "${input.name}", so ` +
+        "there is nothing to address it by. For a link that answer means none was made; for a " +
+        "thought it has not been seen, so look for the thought before creating it again",
     );
-    return created.id;
   }
 
   /**
