@@ -1153,6 +1153,28 @@ describe("a relation that is none of the three", () => {
       expect(calls.at(-1)!.body).toMatchObject({ sourceThoughtId: SOURCE, relation: sentAs });
     }
   });
+
+  it("create refuses a relation with no source to relate to, before any request", async () => {
+    // It used to leave the relation out of the request and create the
+    // thought with no link.
+    const { api, fetchImpl } = brain();
+    for (const relation of [Relation.Child, Relation.Parent, Relation.Jump]) {
+      await expect(api.thoughts.create(BRAIN, { name: "new", relation })).rejects.toMatchObject({
+        kind: "bad_request",
+        message: expect.stringContaining(
+          "relation says how the new thought is linked to sourceThoughtId, and none was given",
+        ),
+      });
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("create with neither sends neither", async () => {
+    const { api, calls } = brain();
+    await api.thoughts.create(BRAIN, { name: "new" });
+    expect(calls.at(-1)!.body).not.toHaveProperty("relation");
+    expect(calls.at(-1)!.body).not.toHaveProperty("sourceThoughtId");
+  });
 });
 
 describe("search", () => {

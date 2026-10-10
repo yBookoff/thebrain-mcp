@@ -215,14 +215,15 @@ Five properties, each of which took a bug to get right:
 - **Order-independent.** `planLevels()` topologically sorts by parent reference,
   so the input can be in any order.
 - **Validated before the first write.** Cycles, dangling references, empty names,
-  duplicate `tempId`s and a relation that is none of the three are rejected up
-  front. A plan either starts writing or does not — no half-written graph from a
-  mistake that was visible in advance.
+  duplicate `tempId`s, a relation that is none of the three and a relation with
+  no parent are rejected up front. A plan either starts writing or does not —
+  no half-written graph from a mistake that was visible in advance.
 - **Idempotent.** Re-running the same plan reuses existing thoughts instead of
-  duplicating them. Dedup is by `(parentId, trimmed name)`, and an **in-flight
-  promise registry** makes it hold *within* one batch: two identical names in the
-  same level resolve to one thought rather than racing each other into two. (This
-  was a real bug, caught by a unit test.)
+  duplicating them. Dedup is by `(parentId, relation, trimmed name)`: a thought
+  is looked for where its relation puts it, see *What a second run finds*
+  below. An **in-flight promise registry** makes it hold *within* one batch:
+  two identical names in the same level resolve to one thought rather than
+  racing each other into two. (This was a real bug, caught by a unit test.)
 - **Honest about what it did not do.** If a requested jump is between a thought
   and its own parent, the API would turn the hierarchy link into that jump, so
   the link is left as it is. The report carries a "Links that already existed"
@@ -231,6 +232,82 @@ Five properties, each of which took a bug to get right:
   created leaves the thoughts under it unwritten and the links to them
   untried, and everything that does not hang on it is written to the end. See
   below.
+
+#### What a second run finds
+
+Deduplication is what makes a plan safe to send twice, and it rests on one
+read: the graph of the thought a plan item hangs on. That read went wrong in
+four ways, and there is one thought it cannot find. Each was measured on a
+live TheBrain 15.0.640 through the real handler.
+
+**It looked among `children` alone.** A graph lists a thought created as a
+child under `children`, one created as a parent under `parents`, and a jump
+under `jumps`. A plan thought with `relation: "parent"` or `"jump"` was
+therefore never found, and every run made it again: 24 of 24, half of them
+next to an existing thought and half next to a `tempId`. Now a thought is
+looked for in the list its relation puts it in, and **the same thought is the
+same name under the same relation to the same thought**. That is what a first
+run leaves behind, and nothing wider: which thought is close enough to reuse
+is not the server's to decide (§3).
+
+**A thought of that name under another relation is neither reused nor made
+again.** The plan asks for a child and the parent has a jump of that name, or
+the other way round. Before, a namesake among the children was taken for the
+plan's parent or jump and listed as existing, with no word that the link was
+another kind (4 of 4); a namesake among the parents or jumps was not seen, and
+a second thought of the name was made (8 of 8). Neither is the server's call.
+Reused, the thought gets the plan's note in place of its own, and the plan's
+children. Made again, it is a duplicate that only a human can remove (§6). So
+the thought fails, with what hangs on it skipped, and its line gives the
+namesake's identifier and both ways on: name that identifier in place of the
+`tempId`, or send the thought with `deduplicate: false`. Two plan items of one
+name under one thought with different relations are the same case: the first
+in the plan is made and the other fails, on every run. Two thoughts share one
+link, so one thought could not have been both.
+
+**A thought with no parent is not looked for**, and a second run makes it
+again with everything under it, 8 s later as 0.3 s later (2 of 2 each). There is
+no graph to read for it. The only lookup left is by name, which lags a create
+by 5.6 s (§7) and would land on any thought of that name anywhere in the
+brain. So the `parent` argument says what leaving it out costs, and the skill
+says to give the top of a plan a parent. The same name under two different
+thoughts is two thoughts, each found again: one thought in two places is one
+plan item and a link.
+
+**A read that failed passed for "nothing there".** The error was swallowed,
+and the thought was created though it might exist: with a 500, the generic
+403 or a dropped connection put in on the way to the live API, beside the
+one of its name that was there, 9 of 9. Now the thought fails, as one whose
+create failed does: what hangs on it is skipped and the rest is written. One answer is not a failed read. The graph of an identifier nobody
+has is a 403, in the words this API has for much else, a request dropped
+under load included; the thought itself is a 404. When the thought says nobody
+has it, there is nothing to look under, and the create goes out to be refused
+in the API's own words. A thought the batch created is not read at all:
+nothing can be next to it yet, and a read that can find nothing could only
+fail what goes under it.
+
+**The graph is a copy, and the batch waits for it.** A graph that has been
+read is answered from a copy, brought up to date about every 0.1 s (§7, item
+20). Read straight after a create, it lacked the new thought 112 times in
+120, and had it 10–205 ms later. A second run sent in that moment made the
+children again too: 5 of 6. So `ingest()` returns once the graph of every
+thought that was there before the batch lists what the batch made next to it,
+read or not by this batch: the copy may be from an earlier read. It asks last,
+after the notes and links, and gives up after 2 s. Then the outcome counts
+what is still `unlisted`, and the result says to wait before sending the plan
+again. The wait is 60–150 ms on a batch of one thought and nothing measurable
+on one with notes and links: a plan of 20 thoughts and 10 links took 325–456
+ms where it had taken 432–482, in 80 requests where it had been 86, since a
+thought the batch created is no longer read. Two runs at the same moment are
+not guarded: neither sees what the other is about to make.
+
+**A relation with no parent is refused**, by `planLevels()` before a plan's
+first write, by `brain_create_thought` before any request, and by
+`thoughts.create()`. It used to be left out of the request, and the thought
+was created with no link and reported as created. The caller asked for a
+link and named nothing to link to; a thought with no parent is also the one
+a second run cannot find. All three relations are refused alike, `child`
+included.
 
 #### When a thought of the plan is not created
 
@@ -242,8 +319,8 @@ item 18); a parent deleted in between; a request that fails on the way.
 The thoughts under the one that failed used to be created all the same. Their
 parent resolved to nothing, so they were created with no parent, listed as
 created, and followed by "Everything else was written". Nothing in the graph
-leads to a thought with no parent, and deduplication looks among a parent's
-children, so each further run of the plan made the same thoughts again.
+leads to a thought with no parent, and deduplication looks next to a thought's
+parent, so each further run of the plan made the same thoughts again.
 Measured on a live TheBrain 15.0.640 with a parent nobody has: three batches,
 two such thoughts each, and two more from every second run. A `tempId` that
 read as a UUID was worse off: left unresolved it passed for the identifier it
@@ -262,7 +339,7 @@ not stopped at the first failure. Stopping would not make it whole: there is
 no rollback, up to five more creates of the same level are in flight when one
 fails, and the thoughts already made would be left without their notes, tags
 and links. It would only leave more for a second call, and a second call is
-where duplicates come from: a thought is found again only as a child of its
+where duplicates come from: a thought is found again only next to its
 parent, and one made with no parent is made twice. What is skipped is what
 could not have been written where the plan put it. What is finished is what
 the second call would have written.
@@ -281,7 +358,8 @@ create dropped on its way back the thought was there, 3 times of 3, and the
 batch reported it failed. `mayHaveLanded()` tells such a failure from a
 refused connection and from an answer, and the result says on that line that
 the thought may exist and where to look before creating it again. A thought
-under a parent is found by the next run; one with no parent is not.
+with a parent is found by the next run, whatever its relation to it; one with
+no parent is not.
 
 Nothing is deleted to tidy up after a failure. Deletion needs a human (§6).
 
@@ -419,6 +497,14 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     ends on every send, and to 1 under a type it sets one (item 18).
     `links.create()` is what changes a link: it rewrites the one two thoughts
     share.
+20. **`graph` is answered from a copy.** It is made when a thought's graph is
+    first read, so that read is live, and brought up to date about every
+    0.1 s after that. A thought created next to one whose graph had been read
+    was missing from the read that followed 112 times in 120, and listed
+    10–205 ms later; next to one whose graph nothing had read it was there at
+    once, 60 of 60. The copy outlives a minute. `ingest()` looks for a thought
+    in its parent's graph, so it waits for the graphs to list what it made
+    (§4).
 
 ### Write visibility
 
@@ -438,6 +524,7 @@ Measured against a live API by polling until the result appeared:
 | the first `PATCH` after a burst of creates → `get(id)` | 0.6–0.8 s after 150, 2.6 s after 300 with a type |
 | `set note` → `get note` | ~0.2 s |
 | `attachTag` → `graph.tags` | ~0.1–0.5 s |
+| `create` next to a thought → that thought's `graph` lists it | 10–205 ms, about 80 ms at the median: a copy refreshed about every 0.1 s. Live on its first read |
 | `attach URL` → `by-location` | instant |
 | `attach URL` → the thought's attachment list | up to 0.2 s: a copy refreshed about every 0.1 s. Live on its first read |
 | **`create` → `findByName`** | **~5.6 s** |
@@ -881,7 +968,9 @@ Two testing habits worth stating, because both caught real bugs:
 - **Fakes must lie no more than necessary.** The ingest test's fake API did not
   create parent links the way the real one does. Making it faithful immediately
   broke three assertions that were indexing `links[0]` — and those assertions
-  were the ones that were wrong.
+  were the ones that were wrong. It lied twice more: it kept one `parent`
+  whatever the relation, and answered every graph live. Six tests that ran a
+  plan twice passed on it while the live API made the thoughts again.
 - **Measure before documenting.** Two corrections in this document — the
   `nameExact` latency and the q8 ranking claim — came from tests written against
   a claim that had been asserted rather than checked.

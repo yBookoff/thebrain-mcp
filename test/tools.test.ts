@@ -25,9 +25,34 @@ type Route = [needle: string, respond: (url: URL, body: unknown) => unknown];
  * Routes match by method and path substring, first match wins. A route
  * answers 200 with what it returns, a bare status for a number, or with the
  * `Response` it builds itself.
+ *
+ * One thing is added to what a route returns: a graph lists the thoughts
+ * created next to its thought through this connection, in the list their
+ * relation puts them in, as the API's does. `brain_ingest` waits for that.
  */
 async function connect(routes: Route[]) {
   const calls: Array<{ method: string; path: string; body: unknown }> = [];
+  const LISTS = { 1: "children", 2: "parents", 3: "jumps" } as const;
+  const born: Array<{ id: string; name: string; source: string; list: string }> = [];
+  const listing = (method: string, url: URL, body: unknown, value: unknown): unknown => {
+    type Create = { name: string; sourceThoughtId?: string; relation?: 1 | 2 | 3 };
+    const { name, sourceThoughtId: source, relation = 1 } = (body ?? {}) as Create;
+    const id = (value as { id?: string } | null)?.id;
+    const creates = method === "POST" && /^\/api\/thoughts\/[^/]+$/.test(url.pathname);
+    if (creates && id !== undefined && source !== undefined) {
+      born.push({ id, name, source, list: LISTS[relation] });
+    }
+    const [, of] = /\/([^/]+)\/graph$/.exec(url.pathname) ?? [];
+    if (method !== "GET" || of === undefined || typeof value !== "object" || value === null) {
+      return value;
+    }
+    const listed: Record<string, unknown> = { ...value };
+    for (const b of born.filter((b) => b.source === of)) {
+      const there = (listed[b.list] as unknown[] | null) ?? [];
+      listed[b.list] = [...there, { id: b.id, name: b.name }];
+    }
+    return listed;
+  };
   const fetchImpl = vi.fn(
     async (
       input: Parameters<typeof fetch>[0],
@@ -40,8 +65,9 @@ async function connect(routes: Route[]) {
       for (const [needle, respond] of routes) {
         const [wantMethod, path] = needle.split(" ") as [string, string];
         if (method !== wantMethod || !url.pathname.includes(path)) continue;
-        const value = respond(url, body);
-        if (value instanceof Response) return value;
+        const answer = respond(url, body);
+        if (answer instanceof Response) return answer;
+        const value = listing(method, url, body, answer);
         return new Response(typeof value === "number" ? "" : JSON.stringify(value), {
           status: typeof value === "number" ? value : 200,
           headers: { "content-type": "application/json" },
@@ -102,6 +128,16 @@ const graph = (activeThought: unknown) => ({
 });
 
 const noNote = { modificationDateTime: "0001-01-01T00:00:00", markdown: "" };
+
+/** What the API answers for the graph of an identifier nobody has, and for much else. */
+const GENERIC_403 =
+  "To use the TheBrain API, make requests to /api (e.g. /api/brains). " +
+  "An API key is required via the Authorization header.";
+const generic403 = (): Response =>
+  new Response(JSON.stringify(GENERIC_403), {
+    status: 403,
+    headers: { "content-type": "application/json" },
+  });
 
 describe("brain_get_thought", () => {
   const view = async (activeThought: unknown): Promise<string> => {
@@ -387,11 +423,15 @@ describe("brain_ingest when a thought fails in the middle of a batch", () => {
   /**
    * A brain where PARENT is an ordinary thought with no children and nobody
    * has NOBODY. As on the live API, a thought created under an identifier
-   * nobody has is a 404 that says so. `create` answers for the rest.
+   * nobody has is a 404 that says so, and the graph of one is the 403 the
+   * API has for much else. `create` answers for the rest.
    */
   const routes = (create: (body: Create) => unknown, notes: () => unknown = () => 200): Route[] => [
     ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
-    ["GET /graph", () => graph(thought("parent"))],
+    [
+      "GET /graph",
+      (url) => (url.pathname.includes(NOBODY) ? generic403() : graph(thought("parent"))),
+    ],
     [
       "GET /api/thoughts/",
       (url) => (url.pathname.endsWith(NOBODY) ? 404 : thought("Constraints", { aliases: [] })),
@@ -502,8 +542,8 @@ describe("brain_ingest when a thought fails in the middle of a batch", () => {
     expect(result.isError).toBe(true);
     expect(result.text).toContain(
       '- thought "Mid" (mid): request exceeded 30000 ms — no answer came, so TheBrain may ' +
-        "have created it all the same: before creating it again, look for it among its " +
-        "parent's children with brain_get_thought",
+        "have created it all the same: before creating it again, look for it next to its " +
+        "parent with brain_get_thought",
     );
     expect(result.text).toContain('- thought "Leaf" (leaf): depends on "mid", which was not created');
     expect(result.text).toContain(
@@ -526,6 +566,217 @@ describe("brain_ingest when a thought fails in the middle of a batch", () => {
     expect(result.text).toContain('## Failed\n- note for "Top": boom');
     expect(result.text).not.toContain("## Skipped");
     expect(result.text).toContain("nothing is rolled back");
+  });
+});
+
+describe("brain_ingest and a thought that may be there already", () => {
+  const THERE = "eeeeeeee-0000-4000-8000-000000000005";
+  type Lists = Partial<
+    Record<"children" | "parents" | "jumps", Array<{ id: string; name: string }>>
+  >;
+  /** A brain where PARENT has `around` next to it; `graphOf` answers for its graph. */
+  const routes = (around: Lists, graphOf?: () => unknown): Route[] => [
+    ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
+    ["GET /graph", graphOf ?? (() => ({ ...graph(thought("parent")), ...around }))],
+    ["GET /api/thoughts/", () => thought("parent", { aliases: [] })],
+    ["POST /api/thoughts/", () => ({ id: THOUGHT })],
+  ];
+  const plan = (relation: string) => ({
+    brainId: BRAIN,
+    thoughts: [
+      { tempId: "rag", name: "RAG", parent: PARENT, relation },
+      { tempId: "leaf", name: "Chunking", parent: "rag" },
+    ],
+  });
+  const deduplicate = async (): Promise<string> => {
+    const { client } = await connect([]);
+    const { tools } = await client.listTools();
+    const properties = tools.find((t) => t.name === "brain_ingest")!.inputSchema
+      .properties as Record<string, { description?: string }>;
+    return properties["deduplicate"]!.description!;
+  };
+
+  it("a thought made as a parent or a jump is found where a graph lists it, and nothing is created", async () => {
+    // Both used to be looked for among the children, and made again.
+    for (const [relation, list] of [
+      ["child", "children"],
+      ["parent", "parents"],
+      ["jump", "jumps"],
+    ] as const) {
+      const { call, sent } = await connect(routes({ [list]: [{ id: THERE, name: "RAG" }] }));
+      const { brainId, thoughts } = plan(relation);
+      const result = await call("brain_ingest", { brainId, thoughts: [thoughts[0]] });
+
+      expect(result.isError, relation).toBe(false);
+      expect(result.text, relation).toContain(`existed  RAG    ${THERE}`);
+      expect(sent("POST"), relation).toEqual([]);
+    }
+  });
+
+  it("one of that name under another relation is an error that names it, and nothing is created", async () => {
+    // As a child it used to be listed as existing, whatever the plan asked
+    // for; as a parent or a jump it was not seen, and a second was made.
+    const { call, sent } = await connect(routes({ jumps: [{ id: THERE, name: "RAG" }] }));
+    const result = await call("brain_ingest", plan("child"));
+
+    expect(result.isError).toBe(true);
+    expect(result.text).not.toContain("## Thoughts");
+    expect(result.text).toContain(
+      [
+        "## Failed",
+        `- thought "RAG" (rag): ${PARENT} already has a thought of this name as its jump, ` +
+          `${THERE}, and the plan asks for a child. It was not taken for the same thought, ` +
+          `and no second one was made. To use it, name ${THERE} where the plan has "rag"; ` +
+          "to make another of that name, send this thought in a plan with deduplicate set to false",
+        "",
+        "## Skipped",
+        '- thought "Chunking" (leaf): depends on "rag", which was not created',
+      ].join("\n"),
+    );
+    expect(sent("POST")).toEqual([]);
+  });
+
+  it("the way out it names works: with deduplicate false the thought is made", async () => {
+    const { call, sent } = await connect(routes({ jumps: [{ id: THERE, name: "RAG" }] }));
+    const result = await call("brain_ingest", { ...plan("child"), deduplicate: false });
+
+    expect(result.isError).toBe(false);
+    expect(sent("POST")).toHaveLength(2);
+  });
+
+  it("a graph that cannot be read is an error, not a thought taken for new", async () => {
+    // The failure used to pass for "no children", and the thought was made.
+    const { call, sent } = await connect(
+      routes({}, () => new Response(JSON.stringify("boom"), { status: 500 })),
+    );
+    const result = await call("brain_ingest", plan("child"));
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(
+      `## Failed\n- thought "RAG" (rag): ${PARENT} could not be read to look for a thought of ` +
+        "this name next to it, so nothing was created: boom",
+    );
+    expect(result.text).toContain('- thought "Chunking" (leaf): depends on "rag"');
+    expect(sent("POST")).toEqual([]);
+  });
+
+  it("a graph that never lists the new thought is said, after the wait, and the batch is no error", async () => {
+    // A `Response` is answered as it is: this graph stays as it was read.
+    const stale = (): Response =>
+      new Response(JSON.stringify(graph(thought("parent"))), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    vi.useFakeTimers();
+    try {
+      const { call } = await connect(routes({}, stale));
+      const pending = call("brain_ingest", plan("child"));
+      await vi.advanceTimersByTimeAsync(5000);
+      const result = await pending;
+
+      expect(result.isError).toBe(false);
+      // "RAG" alone: "Chunking" hangs on a thought made here.
+      expect(result.text).toContain(
+        "## Not listed yet\nTheBrain does not yet list 1 of the new thoughts next to the " +
+          "thoughts they were attached to. This plan sent again now would not find them and " +
+          "would make them a second time: wait a few seconds first.\n\n## Next\n",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the argument says what counts as the same thought, and what becomes of a namesake", async () => {
+    const description = await deduplicate();
+    expect(description).toMatch(/its parent already has one of that name under the same relation/);
+    expect(description).toMatch(
+      /under another relation is neither reused nor made again: it fails/,
+    );
+  });
+});
+
+describe("a relation with nothing to relate to", () => {
+  const routes: Route[] = [
+    ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
+    ["GET /graph", () => graph(thought("parent"))],
+    ["GET /api/thoughts/", () => thought("parent", { aliases: [] })],
+    ["POST /api/thoughts/", () => ({ id: THOUGHT })],
+    ["POST /api/notes/", () => 200],
+  ];
+
+  it("brain_create_thought creates nothing and says what the relation wants", async () => {
+    // It used to answer "created thought" for a thought linked to nothing.
+    for (const relation of ["child", "parent", "jump"]) {
+      const { call, calls } = await connect(routes);
+      const result = await call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        relation,
+        note: "body",
+      });
+
+      expect(result.isError, relation).toBe(true);
+      expect(result.text, relation).toBe(
+        `relation "${relation}" says how the new thought is linked to parentId, and no ` +
+          "parentId was given. Nothing was created. Pass parentId, or leave relation out " +
+          "to create a thought with no link.",
+      );
+      expect(calls, relation).toEqual([]);
+    }
+  });
+
+  it("brain_ingest rejects the plan with nothing written", async () => {
+    // The thought used to be created with no link and listed as created.
+    const { call, calls } = await connect(routes);
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [
+        { tempId: "top", name: "Retrieval", parent: PARENT, note: "body" },
+        { tempId: "rag", name: "RAG", relation: "jump" },
+      ],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toBe(
+      'Plan rejected, nothing was written: thought "rag" has the relation "jump" and no ' +
+        "parent: a relation says how a thought is linked to its parent, so name the parent " +
+        "or leave the relation out. Fix it and retry.",
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it("without a relation a thought with no parent is created, as before", async () => {
+    const { call, sent } = await connect(routes);
+    const created = await call("brain_create_thought", { brainId: BRAIN, name: "RAG" });
+    const ingested = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [{ tempId: "rag", name: "RAG" }],
+    });
+
+    expect([created.isError, ingested.isError]).toEqual([false, false]);
+    expect(sent("POST")).toHaveLength(2);
+    for (const body of sent("POST")) expect(body).not.toHaveProperty("relation");
+  });
+
+  it("both arguments say so, and a plan's parent what leaving it out costs", async () => {
+    const { client } = await connect([]);
+    const { tools } = await client.listTools();
+    type Argument = { description?: string };
+    const properties = (name: string): Record<string, Argument> =>
+      tools.find((t) => t.name === name)!.inputSchema.properties as Record<string, Argument>;
+    const item = (
+      properties("brain_ingest")["thoughts"] as unknown as {
+        items: { properties: Record<string, Argument> };
+      }
+    ).items.properties;
+
+    expect(properties("brain_create_thought")["relation"]!.description).toContain(
+      "Refused without parentId",
+    );
+    expect(item["relation"]!.description).toContain("Refused without a parent");
+    expect(item["parent"]!.description).toMatch(
+      /left unlinked, and a second run of the plan makes it again/,
+    );
   });
 });
 

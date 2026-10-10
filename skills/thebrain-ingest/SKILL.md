@@ -65,6 +65,10 @@ brain_ingest { thoughts: [...], links: [...] }
 Do not create thoughts one at a time. Fifteen thoughts means fifteen calls plus
 links plus notes — minutes of work, and a failure halfway through.
 
+Give the top thought of the plan a `parent`. Sent a second time, a plan finds
+each thought next to its parent and creates nothing twice; a thought with no
+parent it cannot find, and creates again with everything under it.
+
 **If the call comes back as an error**, read which kind before doing anything.
 
 An error that says nothing was written means the plan had a mistake that
@@ -86,6 +90,12 @@ the plan is in the brain, with its identifiers in the table.
   `brain_set_note` or `brain_tag`.
 - A line saying that no answer came: the thought may exist all the same. Look
   at its parent with `brain_get_thought` before creating it again.
+- A line saying that the parent already has a thought of this name under
+  another relation, with its identifier: the tool did not decide whether that
+  is your thought. Read it with `brain_get_thought`. If it is the same concept,
+  use its identifier in place of the tempId. If it is another concept, send
+  your thought and what hangs on it in a plan with `deduplicate: false`, or
+  give it a name that tells the two apart.
 - Nothing is rolled back, and tidying up by deletion is not yours to decide.
   Tell the person what is in the brain and what is not.
 

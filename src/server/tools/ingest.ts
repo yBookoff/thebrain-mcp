@@ -14,7 +14,7 @@ import { ALIAS_COST } from "./write.js";
 
 const relation = z
   .enum(["child", "parent", "jump"])
-  .describe("How this thought relates to its parent. Usually child.");
+  .describe("How this thought relates to its parent. Usually child. Refused without a parent.");
 
 export function registerIngestTool(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
@@ -48,7 +48,8 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
                 .optional()
                 .describe(
                   "A tempId from this batch or the UUID of an existing thought. " +
-                    "Without it the thought is left unlinked. Not a type: that goes in typeId.",
+                    "Without it the thought is left unlinked, and a second run of the plan " +
+                    "makes it again. Not a type: that goes in typeId.",
                 ),
               relation: relation.optional(),
               typeId: z.string().optional().describe("Type from brain_list_types_and_tags."),
@@ -92,8 +93,10 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
           .boolean()
           .optional()
           .describe(
-            "Skip creating a thought when the same parent already has a child with that " +
-              "name. On by default, which makes re-running a batch safe.",
+            "Skip creating a thought when its parent already has one of that name under " +
+              "the same relation. On by default, which makes re-running a batch safe. A " +
+              "thought of that name under another relation is neither reused nor made " +
+              "again: it fails, with its identifier.",
           ),
       },
     },
@@ -173,6 +176,14 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
                   `will be corrupted: ${fenceWarnings.join(", ")}. ` +
                   "Prefer indenting code by four spaces.",
               ),
+          outcome.unlisted === 0
+            ? null
+            : section(
+                "Not listed yet",
+                `TheBrain does not yet list ${outcome.unlisted} of the new thoughts next to ` +
+                  "the thoughts they were attached to. This plan sent again now would not " +
+                  "find them and would make them a second time: wait a few seconds first.",
+              ),
           section(
             "Next",
             partial
@@ -192,9 +203,10 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
 
 /**
  * What follows a batch written in part. It asks for the rest alone: a whole
- * plan sent again finds a thought only as a child of its parent, and makes
- * the others a second time. With no thought written there is nothing to make
- * twice, and the plan is what to send.
+ * plan sent again finds a thought only next to its parent, and makes one
+ * that has no parent a second time, with everything under it. With no
+ * thought written there is nothing to make twice, and the plan is what to
+ * send.
  */
 function afterAFailure(anyThought: boolean, unanswered: boolean): string {
   if (!anyThought) {
@@ -220,4 +232,4 @@ function afterAFailure(anyThought: boolean, unanswered: boolean): string {
 /** Added to a create that got no answer, which is not a create that failed. */
 const UNANSWERED =
   " — no answer came, so TheBrain may have created it all the same: before creating " +
-  "it again, look for it among its parent's children with brain_get_thought";
+  "it again, look for it next to its parent with brain_get_thought";

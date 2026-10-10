@@ -28,7 +28,7 @@ export interface CreateThoughtInput {
    * Not a type when the new thought is to be its child: see `requireParent`.
    */
   sourceThoughtId?: string;
-  /** How the new thought relates to the source. Defaults to child. */
+  /** How the new thought relates to the source. Defaults to child. Refused with no source. */
   relation?: Relation;
   kind?: number;
   label?: string;
@@ -227,6 +227,15 @@ export class ThoughtsResource {
         `relation must be 1 (child), 2 (parent) or 3 (jump), got ${String(input.relation)}. ` +
           "The API would create the thought all the same: for 4, which the spec calls " +
           "Sibling, with no link to its source",
+      );
+    }
+    // The same for a relation with no source to relate to: it used to be
+    // left out of the request without a word, and the thought made unlinked.
+    if (input.relation !== undefined && input.sourceThoughtId === undefined) {
+      throw new TheBrainError(
+        "bad_request",
+        "relation says how the new thought is linked to sourceThoughtId, and none was given: " +
+          "the thought would be created with no link. Give the source or leave the relation out",
       );
     }
     // Ahead of the request: a thought made under a type is one of that type,

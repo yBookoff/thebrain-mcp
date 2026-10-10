@@ -64,7 +64,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
           .optional()
           .describe(
             "How the new thought relates to that one. Child by default. For a sibling " +
-              "of a thought, give that thought's parent as parentId.",
+              "of a thought, give that thought's parent as parentId. Refused without parentId.",
           ),
         note: z.string().optional().describe("Note body in Markdown."),
         typeId: z
@@ -86,6 +86,16 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
     guard(async (args) => {
       const { brainId: bid, name, parentId, relation, note, typeId, tagIds, label } = args;
       const aliases = normalizeAliases(args.aliases ?? []);
+
+      // Refused, not left out: the thought used to be created with no link
+      // and reported as created. `create` refuses it too, in its own terms.
+      if (relation !== undefined && parentId === undefined) {
+        return fail(
+          `relation "${relation}" says how the new thought is linked to parentId, and no ` +
+            "parentId was given. Nothing was created. Pass parentId, or leave relation " +
+            "out to create a thought with no link.",
+        );
+      }
 
       // Before the thought exists: refused after it, a tag that is no tag
       // would leave the thought behind for a retry to make again.

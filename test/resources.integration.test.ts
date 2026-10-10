@@ -2398,6 +2398,182 @@ suite("resource layer against the live API", () => {
   });
 
   /**
+   * Where a graph lists a thought created with each relation, how soon, and
+   * what a second run of a plan finds of the first. Ingest looked for a
+   * thought among its parent's `children` alone: one made as a parent or as
+   * a jump was made again by every run (24 of 24), and a child by a run sent
+   * straight after the first (5 of 6). Measured on TheBrain 15.0.640.
+   */
+  describe("a second run of a plan", () => {
+    const RELATIONS = ["child", "parent", "jump"] as const;
+    const NUMBER = { child: Relation.Child, parent: Relation.Parent, jump: Relation.Jump };
+    const LIST = { child: "children", parent: "parents", jump: "jumps" } as const;
+    /** Where the source is in the graph of the thought created next to it. */
+    const BACK = { child: "parents", parent: "children", jump: "jumps" } as const;
+    const lists = (g: CleanGraph, id: string): string[] =>
+      (["children", "parents", "jumps"] as const).filter((l) => g[l].some((t) => t.id === id));
+
+    it("a graph lists a thought created as a child, a parent or a jump in the list of that name, and one link joins the two", async () => {
+      for (const relation of RELATIONS) {
+        const source = await make(`sr-source-${relation}`);
+        const id = await api.thoughts.create(brainId, {
+          name: `${PREFIX}sr-${relation}`,
+          sourceThoughtId: source,
+          relation: NUMBER[relation],
+        });
+        created.push(id);
+
+        // Neither graph was read before, so both reads are live.
+        expect(lists(await api.thoughts.getGraph(brainId, source), id), relation).toEqual([
+          LIST[relation],
+        ]);
+        expect(lists(await api.thoughts.getGraph(brainId, id), source), relation).toEqual([
+          BACK[relation],
+        ]);
+        // A parent's link is a parent link from the new thought; a jump's is
+        // from the source, as a child's is.
+        const link = await api.links.between(brainId, source, id);
+        const upper = relation === "parent" ? id : source;
+        expect(
+          [link?.thoughtIdA === upper, link?.relation, link?.meaning],
+          relation,
+        ).toEqual([true, relation === "jump" ? Relation.Jump : Relation.Child, LinkMeaning.Normal]);
+      }
+    });
+
+    it("a graph that has been read lacks a thought created next to it for a moment; one never read has it at once", async () => {
+      // A graph is answered from a copy, made when it is first read and
+      // brought up to date about every 0.1 s. Over 120 creates, 40 of each
+      // relation, each next to a thought whose graph had been read: the read
+      // straight after the answer lacked the new thought 112 times, and had
+      // it 10 to 205 ms later, about 80 ms at the median. The copy was still
+      // the one answered a minute after it was made (19 of 20). Next to a
+      // thought whose graph nothing had read, the same read had it 60 times
+      // of 60.
+      let lacked = 0;
+      for (const relation of [...RELATIONS, ...RELATIONS]) {
+        const source = await make(`sr-read-${relation}`);
+        await api.thoughts.getGraph(brainId, source);
+        const id = await api.thoughts.create(brainId, {
+          name: `${PREFIX}sr-read-new`,
+          sourceThoughtId: source,
+          relation: NUMBER[relation],
+        });
+        created.push(id);
+        const listed = (g: CleanGraph): boolean => g[LIST[relation]].some((t) => t.id === id);
+
+        if (!listed(await api.thoughts.getGraph(brainId, source))) lacked += 1;
+        const later = await eventually(() => api.thoughts.getGraph(brainId, source), listed, {
+          timeoutMs: 2000,
+          stepMs: 10,
+        });
+        expect(listed(later), relation).toBe(true);
+      }
+      expect(lacked).toBeGreaterThan(0);
+
+      for (const relation of RELATIONS) {
+        const source = await make(`sr-unread-${relation}`);
+        const id = await api.thoughts.create(brainId, {
+          name: `${PREFIX}sr-unread-new`,
+          sourceThoughtId: source,
+          relation: NUMBER[relation],
+        });
+        created.push(id);
+        expect(lists(await api.thoughts.getGraph(brainId, source), id), relation).toEqual([
+          LIST[relation],
+        ]);
+      }
+    });
+
+    it("ingest finds what a run made under every relation, next to an existing thought and next to a tempId, sent straight after it", async () => {
+      const root = await make("sr-root");
+      const name = (what: string): string => `${PREFIX}sr-${what}`;
+      const plan = {
+        thoughts: [
+          { tempId: "top", name: name("top"), parent: root },
+          ...RELATIONS.map((relation) => ({
+            tempId: `first-${relation}`,
+            name: name(`first-${relation}`),
+            parent: root,
+            relation,
+          })),
+          ...RELATIONS.map((relation) => ({
+            tempId: `deep-${relation}`,
+            name: name(`deep-${relation}`),
+            parent: "top",
+            relation,
+          })),
+        ],
+      };
+
+      const first = await ingest(api, brainId, plan);
+      for (const c of first.created) created.push(c.thoughtId);
+      expect(first.created).toHaveLength(7);
+      expect([first.failures, first.skipped]).toEqual([[], []]);
+      const made = new Map(first.created.map((c) => [c.tempId, c.thoughtId]));
+
+      // No pause: the first run returned once the graphs listed what it made.
+      const second = await ingest(api, brainId, plan);
+      for (const c of second.created) created.push(c.thoughtId);
+      expect(second.created).toEqual([]);
+      expect(second.reused.map((r) => r.thoughtId).sort()).toEqual([...made.values()].sort());
+      expect([second.failures, second.skipped]).toEqual([[], []]);
+      expect(first.unlisted).toBe(0);
+
+      const ids = (list: ThoughtDto[]): string[] => list.map((t) => t.id).sort();
+      const around = await api.thoughts.getGraph(brainId, root);
+      expect(ids(around.children)).toEqual([made.get("top")!, made.get("first-child")!].sort());
+      expect(ids(around.parents)).toEqual([made.get("first-parent")]);
+      expect(ids(around.jumps)).toEqual([made.get("first-jump")]);
+      const under = await api.thoughts.getGraph(brainId, made.get("top")!);
+      expect(ids(under.children)).toEqual([made.get("deep-child")]);
+      expect(ids(under.parents)).toEqual([root, made.get("deep-parent")!].sort());
+      expect(ids(under.jumps)).toEqual([made.get("deep-jump")]);
+    }, 30_000);
+
+    it("ingest neither reuses nor makes again a thought of the same name under another relation", async () => {
+      // There as a child it used to be listed as existing, for a plan that
+      // asked for a jump; there as a jump it was not seen, and a second
+      // thought of the name was made as the child (2 of 2 each).
+      const root = await make("sr-namesake-root");
+      const there = await api.thoughts.create(brainId, {
+        name: `${PREFIX}sr-namesake`,
+        sourceThoughtId: root,
+        relation: Relation.Jump,
+      });
+      created.push(there);
+      const plan = {
+        thoughts: [
+          { tempId: "x", name: `${PREFIX}sr-namesake`, parent: root, relation: "child" as const },
+          { tempId: "leaf", name: `${PREFIX}sr-namesake-leaf`, parent: "x" },
+        ],
+      };
+
+      const outcome = await ingest(api, brainId, plan);
+      for (const c of outcome.created) created.push(c.thoughtId);
+      expect([outcome.created, outcome.reused]).toEqual([[], []]);
+      expect(outcome.failures).toHaveLength(1);
+      expect(outcome.failures[0]!.reason).toContain(
+        `${root} already has a thought of this name as its jump, ${there}, ` +
+          "and the plan asks for a child",
+      );
+      expect(outcome.skipped.map((s) => s.what)).toEqual([
+        `thought "${PREFIX}sr-namesake-leaf" (leaf)`,
+      ]);
+      await settle(300);
+      const around = await api.thoughts.getGraph(brainId, root);
+      expect([around.children, around.jumps.map((t) => t.id)]).toEqual([[], [there]]);
+
+      // Named by its identifier, as the failure says, it is what the leaf goes under.
+      const named = await ingest(api, brainId, {
+        thoughts: [{ ...plan.thoughts[1]!, parent: there }],
+      });
+      for (const c of named.created) created.push(c.thoughtId);
+      expect(named.created.map((c) => c.tempId)).toEqual(["leaf"]);
+    }, 30_000);
+  });
+
+  /**
    * What the request that attaches a tag does when it names no tag, which
    * links a thought and a tag can share, and what `attachTag`, `detachTag` and
    * ingest do about it. Measured on TheBrain 15.0.640; the spec has none of it.

@@ -18,12 +18,21 @@
  *     and listed as created, and each further run made them again. The
  *     branches beside it are written to the end, since a second call would
  *     only write them then.
+ *  4. A thought is looked for where its relation puts it. A graph lists a
+ *     thought made as a child under `children`, one made as a parent under
+ *     `parents` and a jump under `jumps`. Looked for among `children` alone,
+ *     the last two were made again by every run of the plan.
+ *  5. A graph that has been read is answered from a copy, which is up to 0.2 s
+ *     behind a create. So the batch returns once the graphs list what it made:
+ *     a second run sent straight after it used to make the children again too.
  */
 
 import {
   ALIASES_UNSUPPORTED,
+  TheBrainError,
   mayHaveLanded,
   normalizeAliases,
+  type CleanGraph,
   type TheBrainApi,
 } from "../api/index.js";
 import { Relation } from "../api/types.js";
@@ -36,6 +45,23 @@ export const RELATION_BY_NAME: Readonly<Record<RelationName, number>> = {
   parent: Relation.Parent,
   jump: Relation.Jump,
 };
+
+/** The list of a thought's graph that holds what was made with each relation to it. */
+const LIST_OF = {
+  child: "children",
+  parent: "parents",
+  jump: "jumps",
+} as const satisfies Record<RelationName, keyof CleanGraph>;
+const RELATION_NAMES = Object.keys(LIST_OF) as RelationName[];
+
+/** What a thought has next to it: for each relation, identifiers by trimmed name. */
+type Neighbours = Record<RelationName, Map<string, string>>;
+
+/**
+ * How long a batch waits for the graphs to list what it made. Measured on a
+ * quiet brain: about 80 ms at the median, 205 ms at the most.
+ */
+const LISTED = { stepMs: 25, timeoutMs: 2000 };
 
 export interface IngestThought {
   /** Local label within the batch, for referencing before creation. */
@@ -67,8 +93,11 @@ export interface IngestPlan {
   thoughts: readonly IngestThought[];
   links?: readonly IngestLink[] | undefined;
   /**
-   * Skip creating a thought when the same parent already has a child with that
-   * name, reusing the existing one. Makes a repeat run safe.
+   * Skip creating a thought when the thought it hangs on already has one of
+   * that name under the same relation, reusing the existing one. Makes a
+   * repeat run safe. One of that name under another relation is neither
+   * reused nor made again: it fails, with the identifier. A thought with no
+   * parent is not looked for.
    */
   deduplicate?: boolean | undefined;
 }
@@ -98,6 +127,12 @@ export interface IngestOutcome {
    * the links to any of them. The reason names the thought that failed.
    */
   skipped: Array<{ what: string; reason: string }>;
+  /**
+   * Thoughts created here that the graph of the thought they hang on did not
+   * list by the time the batch gave up waiting. A run sent now would not find
+   * them, and would make them again.
+   */
+  unlisted: number;
 }
 
 export class IngestValidationError extends Error {
@@ -133,6 +168,15 @@ export function planLevels(plan: IngestPlan): IngestThought[][] {
       throw new IngestValidationError(`thought "${t.tempId}" has an empty name`);
     }
     requireRelation(t.relation, `thought "${t.tempId}"`);
+    // It used to be dropped without a word, and the thought created with no
+    // link and listed as created.
+    if (t.relation !== undefined && t.parent === undefined) {
+      throw new IngestValidationError(
+        `thought "${t.tempId}" has the relation "${t.relation}" and no parent: a relation ` +
+          "says how a thought is linked to its parent, so name the parent or leave the " +
+          "relation out",
+      );
+    }
     byTempId.set(t.tempId, t);
   }
 
@@ -235,6 +279,7 @@ export async function ingest(
     aliasesWritten: 0,
     failures: [],
     skipped: [],
+    unlisted: 0,
   };
 
   /** Thoughts given aliases. A set: one thought can be reached by two plan items. */
@@ -264,30 +309,87 @@ export async function ingest(
     );
   };
 
-  /** Children of existing parents — read once per parent. */
-  const childrenCache = new Map<string, Map<string, string>>();
-  const childrenOf = async (parentId: string): Promise<Map<string, string>> => {
-    let cached = childrenCache.get(parentId);
-    if (cached === undefined) {
-      const graph = await api.thoughts.getGraph(brainId, parentId).catch(() => null);
-      cached = new Map(
-        (graph?.children ?? []).map((c) => [(c.name ?? "").trim(), c.id] as const),
-      );
-      childrenCache.set(parentId, cached);
+  /** Thoughts this batch created: nothing was next to one before it. */
+  const madeHere = new Set<string>();
+  /**
+   * What each thought a plan item hangs on has next to it, read once per
+   * thought and kept up as the batch writes. One created here is not read:
+   * it has nothing yet, and a read that can find nothing could only fail.
+   */
+  const neighbours = new Map<string, Promise<Neighbours>>();
+  const neighboursOf = (anchorId: string): Promise<Neighbours> => {
+    let known = neighbours.get(anchorId);
+    if (known === undefined) {
+      known = madeHere.has(anchorId)
+        ? Promise.resolve({ child: new Map(), parent: new Map(), jump: new Map() })
+        : readNeighbours(api, brainId, anchorId);
+      neighbours.set(anchorId, known);
+      // A read that failed is not kept: the next thought there asks again.
+      const asked = known;
+      asked.catch(() => {
+        if (neighbours.get(anchorId) === asked) neighbours.delete(anchorId);
+      });
     }
-    return cached;
+    return known;
   };
+  /**
+   * `neighboursOf` for a thought about to be created there, or null when
+   * nobody has the identifier.
+   *
+   * A read that fails says nothing of what is there. It used to pass for
+   * "nothing", and the thought was created, though it might exist. Now the
+   * thought fails, with what hangs on it skipped. One answer is not a failed
+   * read: the graph of an identifier nobody has is a 403, which this API
+   * gives for much else, while the thought itself is a 404. Then there is
+   * nothing to look under, and the create goes out to be refused in the
+   * API's own words.
+   */
+  const lookAround = async (anchorId: string): Promise<Neighbours | null> => {
+    try {
+      return await neighboursOf(anchorId);
+    } catch (error) {
+      const nobodyHasIt = await api.thoughts.get(brainId, anchorId).then(
+        () => false,
+        (e: unknown) => e instanceof TheBrainError && e.kind === "not_found",
+      );
+      if (nobodyHasIt) return null;
+      throw new Error(
+        `${anchorId} could not be read to look for a thought of this name next to it, ` +
+          `so nothing was created: ${describe(error)}`,
+      );
+    }
+  };
+  /** Why a thought of the same name under another relation stops this one. */
+  const namesake = (
+    t: IngestThought,
+    anchorId: string,
+    asked: RelationName,
+    found: RelationName,
+    thoughtId: string,
+  ): Error =>
+    new Error(
+      `${anchorId} already has a thought of this name as its ${found}, ${thoughtId}, and the ` +
+        `plan asks for a ${asked}. It was not taken for the same thought, and no second one ` +
+        `was made. To use it, name ${thoughtId} where the plan has "${t.tempId}"; to make ` +
+        "another of that name, send this thought in a plan with deduplicate set to false",
+    );
 
   /**
-   * Currently being created, keyed by "parent + name".
+   * Currently being created, keyed by "parent + name", each with the relation
+   * it is created under.
    *
    * Thoughts at one level are written concurrently, so an existence check is
    * not enough: two identical names in a batch both read the cache before the
    * first one lands. The second awaits the first one's promise.
    */
-  const inFlight = new Map<string, Promise<string>>();
+  const inFlight = new Map<string, { relation: RelationName; creation: Promise<string> }>();
   const slot = (parentId: string | null, name: string): string =>
     `${parentId ?? ""}\0${name.trim()}`;
+  /**
+   * What the batch made next to a thought that was there before it, by that
+   * thought: what its graph has to list before a second run can find it.
+   */
+  const toBeListed = new Map<string, Array<{ thoughtId: string; relation: RelationName }>>();
 
   for (const level of levels) {
     await mapWithConcurrency(level, 6, async (t) => {
@@ -302,20 +404,35 @@ export async function ingest(
       }
       try {
         const parentId = t.parent === undefined ? null : resolve(t.parent);
+        const relation = t.relation ?? "child";
         const key = slot(parentId, t.name);
+        let near: Neighbours | null = null;
 
         if (dedupe) {
           if (parentId !== null) {
-            const existing = (await childrenOf(parentId)).get(t.name.trim());
+            near = await lookAround(parentId);
+            const existing = near?.[relation].get(t.name.trim());
             if (existing !== undefined) {
               resolved.set(t.tempId, existing);
               outcome.reused.push({ tempId: t.tempId, thoughtId: existing, name: t.name });
               return;
             }
+            // The same name under another relation. Whether it is the plan's
+            // thought is not for the server to say: reused, it would take the
+            // plan's note and children; made again, it would be a duplicate.
+            for (const other of RELATION_NAMES) {
+              const namedSo = near?.[other].get(t.name.trim());
+              if (namedSo !== undefined) throw namesake(t, parentId, relation, other, namedSo);
+            }
           }
           const pending = inFlight.get(key);
           if (pending !== undefined) {
-            const thoughtId = await pending;
+            // Fails with it when it fails, whatever its relation: the two
+            // were sent for one place at one moment.
+            const thoughtId = await pending.creation;
+            if (pending.relation !== relation && parentId !== null) {
+              throw namesake(t, parentId, relation, pending.relation, thoughtId);
+            }
             resolved.set(t.tempId, thoughtId);
             outcome.reused.push({ tempId: t.tempId, thoughtId, name: t.name });
             return;
@@ -333,9 +450,10 @@ export async function ingest(
           ...(t.label !== undefined ? { label: t.label } : {}),
           ...(aliases.length > 0 ? { aliases } : {}),
         });
-        if (dedupe) inFlight.set(key, creation);
+        if (dedupe) inFlight.set(key, { relation, creation });
 
         const thoughtId = await creation;
+        madeHere.add(thoughtId);
         resolved.set(t.tempId, thoughtId);
         outcome.created.push({ tempId: t.tempId, thoughtId, name: t.name });
         if (aliases.length > 0) {
@@ -344,7 +462,11 @@ export async function ingest(
         }
 
         if (parentId !== null) {
-          (await childrenOf(parentId)).set(t.name.trim(), thoughtId);
+          near?.[relation].set(t.name.trim(), thoughtId);
+          if (!madeHere.has(parentId)) {
+            const made = toBeListed.get(parentId) ?? [];
+            toBeListed.set(parentId, [...made, { thoughtId, relation }]);
+          }
         }
       } catch (error) {
         blocked.set(t.tempId, t.tempId);
@@ -470,7 +592,53 @@ export async function ingest(
     }
   });
 
+  // Last, so that the notes and links have taken most of the wait already.
+  outcome.unlisted = await unlistedAfterWaiting(api, brainId, toBeListed);
+
   return outcome;
+}
+
+/** A thought's graph as `Neighbours`. The type is not among the parents: `getGraph` drops it. */
+async function readNeighbours(
+  api: TheBrainApi,
+  brainId: string,
+  thoughtId: string,
+): Promise<Neighbours> {
+  const graph = await api.thoughts.getGraph(brainId, thoughtId);
+  const byName = (relation: RelationName): Map<string, string> =>
+    new Map(graph[LIST_OF[relation]].map((t) => [(t.name ?? "").trim(), t.id] as const));
+  return { child: byName("child"), parent: byName("parent"), jump: byName("jump") };
+}
+
+/**
+ * Waits until each graph lists what the batch made next to its thought, and
+ * returns how many thoughts are still missing when the wait runs out.
+ *
+ * A graph that has been read, by this batch or by anything before it, is
+ * answered from a copy brought up to date about every 0.1 s. Read straight
+ * after a create it lacked the new thought 112 times in 120, and a run of the
+ * same plan sent then made that thought again. A thought the batch created
+ * has no such copy, so only the thoughts that were there before are read.
+ */
+async function unlistedAfterWaiting(
+  api: TheBrainApi,
+  brainId: string,
+  made: ReadonlyMap<string, ReadonlyArray<{ thoughtId: string; relation: RelationName }>>,
+): Promise<number> {
+  const missing = await mapWithConcurrency([...made], 6, async ([anchorId, expected]) => {
+    const deadline = Date.now() + LISTED.timeoutMs;
+    for (;;) {
+      // A read that fails has listed nothing.
+      const graph = await api.thoughts.getGraph(brainId, anchorId).catch(() => null);
+      const lacking = expected.filter(
+        ({ thoughtId, relation }) =>
+          graph === null || !graph[LIST_OF[relation]].some((t) => t.id === thoughtId),
+      ).length;
+      if (lacking === 0 || Date.now() >= deadline) return lacking;
+      await new Promise((resolve) => setTimeout(resolve, LISTED.stepMs));
+    }
+  });
+  return missing.reduce((sum, n) => sum + n, 0);
 }
 
 /**
