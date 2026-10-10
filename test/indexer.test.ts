@@ -1,15 +1,20 @@
 import { describe, expect, it } from "vitest";
 
-import type { TheBrainApi } from "../src/api/index.js";
+import { TheBrainError, type ApiErrorKind, type TheBrainApi } from "../src/api/index.js";
 import type { ModificationLogDto } from "../src/api/types.js";
-import type { Embedder } from "../src/semantic/embedder.js";
+import { EmbedderUnavailableError, type Embedder } from "../src/semantic/embedder.js";
 import {
   SemanticIndexer,
   linkEndIds,
   logThoughtId,
   mapWithConcurrency,
 } from "../src/semantic/indexer.js";
-import { SemanticSearch, dedupeVariants } from "../src/semantic/search.js";
+import {
+  EmptyQueryError,
+  SearchFailedError,
+  SemanticSearch,
+  dedupeVariants,
+} from "../src/semantic/search.js";
 import { VectorStore, normalize } from "../src/semantic/store.js";
 
 const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
@@ -1003,5 +1008,215 @@ describe("search", () => {
     );
     expect(outcome.matches).toHaveLength(1);
     store.close();
+  });
+});
+
+describe("search: a phrasing TheBrain's search does not answer", () => {
+  const thoughts = new Map<string, FakeThought>([
+    ["a", { id: "a", name: "Unity" }],
+    ["b", { id: "b", name: "borscht" }],
+  ]);
+  const found = new Map([
+    ["engine", ["a"]],
+    ["Unity", ["a"]],
+    ["soup", ["b"]],
+  ]);
+
+  /**
+   * A search with no index, so every phrasing goes to the fake API. A phrasing
+   * in `failures` is refused with what it names; the rest answer from `found`.
+   */
+  function fallback(failures: Record<string, unknown>, embedder: Embedder = new FakeEmbedder()) {
+    const { api, calls } = fakeApi(thoughts, [], found);
+    const answer = api.search.inBrain.bind(api.search);
+    const asked: string[] = [];
+    api.search.inBrain = async (brainId, query, options) => {
+      asked.push(query);
+      if (query in failures) throw failures[query];
+      return answer(brainId, query, options);
+    };
+    const store = new VectorStore(":memory:");
+    return { search: new SemanticSearch(api, store, embedder), store, asked, calls };
+  }
+
+  const refused = (kind: ApiErrorKind, status?: number): TheBrainError =>
+    new TheBrainError(kind, `refused as ${kind}`, {
+      ...(status !== undefined ? { status } : {}),
+      method: "GET",
+      path: `/api/search/${BRAIN}`,
+    });
+
+  it("is left out and named, and the others still rank", async () => {
+    // It used to count as a phrasing that found nothing.
+    const failure = refused("server", 500);
+    const { search, store } = fallback({ soup: failure });
+    const outcome = await search.find(BRAIN, "engine", { variants: ["soup", "Unity"] });
+
+    expect(outcome.mode).toBe("keyword");
+    expect(outcome.matches.map((m) => m.thoughtId)).toEqual(["a"]);
+    expect(outcome.phrasings).toBe(3);
+    expect(outcome.notSearched).toEqual([{ phrasing: "soup", error: failure }]);
+    store.close();
+  });
+
+  it("with every phrasing answered nothing is reported as left out", async () => {
+    const { search, store } = fallback({});
+    const outcome = await search.find(BRAIN, "engine", { variants: ["nothing has this"] });
+    expect(outcome.phrasings).toBe(2);
+    expect(outcome.notSearched).toEqual([]);
+    store.close();
+  });
+
+  it("when no phrasing is answered there is no outcome, empty or otherwise", async () => {
+    // TheBrain not running fails them all, and read as nothing found.
+    const down = new TheBrainError("network", "could not reach http://localhost:11522");
+    const { search, store, asked } = fallback({ engine: down, soup: down, Unity: down });
+    const failed = await search
+      .find(BRAIN, "engine", { variants: ["soup", "Unity"] })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    expect(failed).toBeInstanceOf(SearchFailedError);
+    expect((failed as SearchFailedError).failures).toEqual([
+      { phrasing: "engine", error: down },
+      { phrasing: "soup", error: down },
+      { phrasing: "Unity", error: down },
+    ]);
+    expect(asked.sort()).toEqual(["Unity", "engine", "soup"]);
+    store.close();
+  });
+
+  it("a query alone that fails is not an empty result either", async () => {
+    const failure = refused("query_too_long", 414);
+    const { search, store } = fallback({ engine: failure });
+    await expect(search.find(BRAIN, "engine")).rejects.toMatchObject({
+      name: "SearchFailedError",
+      failures: [{ phrasing: "engine", error: failure }],
+    });
+    store.close();
+  });
+
+  it.each<[ApiErrorKind]>([["auth"], ["unknown_brain"], ["invalid_uuid"]])(
+    "%s is about the call and stops the search, though another phrasing would answer",
+    async (kind) => {
+      const failure = refused(kind, 401);
+      const { search, store } = fallback({ soup: failure });
+      const failed = await search.find(BRAIN, "engine", { variants: ["soup"] }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      // The failure itself, for the tool to explain as it does anywhere else.
+      expect(failed).toBe(failure);
+      store.close();
+    },
+  );
+
+  it.each<[string, unknown]>([
+    ["network", new TheBrainError("network", "request exceeded 30000 ms")],
+    ["server", refused("server", 503)],
+    ["bad_request", refused("bad_request", 400)],
+    ["forbidden", refused("forbidden", 403)],
+    ["not_found", refused("not_found", 404)],
+    ["query_too_long", refused("query_too_long", 414)],
+    ["route_miss", refused("route_miss", 200)],
+    ["malformed", refused("malformed", 200)],
+    ["an error that is not the API's", new TypeError("cannot read properties of undefined")],
+  ])("%s may be one phrasing's own, and only that phrasing is left out", async (_kind, failure) => {
+    const { search, store } = fallback({ soup: failure });
+    const outcome = await search.find(BRAIN, "engine", { variants: ["soup"] });
+    expect(outcome.matches.map((m) => m.thoughtId)).toEqual(["a"]);
+    expect(outcome.notSearched).toEqual([{ phrasing: "soup", error: failure }]);
+    store.close();
+  });
+
+  it("an empty query with no variant to stand for it is refused, and nothing is asked", async () => {
+    // The fan-out sent no request and answered an empty result.
+    const { search, store, asked } = fallback({});
+    await expect(search.find(BRAIN, "   ")).rejects.toBeInstanceOf(EmptyQueryError);
+    await expect(search.find(BRAIN, "", { variants: ["", " \t"] })).rejects.toThrow(
+      /query is empty, and so is every variant/,
+    );
+    expect(asked).toEqual([]);
+    store.close();
+  });
+
+  it("an empty query is carried by its variants, and empty variants are not phrasings", async () => {
+    const { search, store, asked } = fallback({});
+    const outcome = await search.find(BRAIN, " ", { variants: ["", "Unity", "unity"] });
+    expect(asked).toEqual(["Unity"]);
+    expect(outcome.phrasings).toBe(1);
+    expect(outcome.matches.map((m) => m.thoughtId)).toEqual(["a"]);
+    store.close();
+  });
+
+  describe("with a ready index", () => {
+    async function indexed(embedder: Embedder) {
+      const { api } = fakeApi(thoughts, [
+        log("a", 101, "2026-08-11T09:00:00"),
+        log("b", 101, "2026-08-11T09:00:01"),
+      ]);
+      const asked: string[] = [];
+      api.search.inBrain = async (_brainId, query) => {
+        asked.push(query);
+        throw new TheBrainError("network", "could not reach http://localhost:11522");
+      };
+      const store = new VectorStore(":memory:");
+      await new SemanticIndexer(api, store, new FakeEmbedder()).rebuild(BRAIN);
+      return { search: new SemanticSearch(api, store, embedder), store, asked };
+    }
+
+    /** The package that is not installed: its id and size are known, and nothing embeds. */
+    class AbsentEmbedder extends FakeEmbedder {
+      override async embedQuery(): Promise<Float32Array> {
+        throw new EmbedderUnavailableError();
+      }
+    }
+
+    it("ranking by vectors asks TheBrain nothing, so its failures do not reach it", async () => {
+      const { search, store, asked } = await indexed(new FakeEmbedder());
+      const outcome = await search.find(BRAIN, "Unity", { variants: ["soup"] });
+      expect(outcome.mode).toBe("vector");
+      expect(outcome.matches.length).toBeGreaterThan(0);
+      expect(outcome).toMatchObject({ phrasings: 2, notSearched: [] });
+      expect(asked).toEqual([]);
+      store.close();
+    });
+
+    it("an empty query is refused there too, with nothing embedded", async () => {
+      // It was embedded as it came, and the brain ranked against an empty string.
+      const embedder = new FakeEmbedder();
+      const { search, store } = await indexed(embedder);
+      const before = embedder.calls;
+      await expect(search.find(BRAIN, "  ")).rejects.toBeInstanceOf(EmptyQueryError);
+      expect(embedder.calls).toBe(before);
+      store.close();
+    });
+
+    it("without the embeddings package it falls back, says why, and does not throw", async () => {
+      const { api } = fakeApi(thoughts, [log("a", 101, "2026-08-11T09:00:00")], found);
+      const store = new VectorStore(":memory:");
+      await new SemanticIndexer(api, store, new FakeEmbedder()).rebuild(BRAIN);
+      const outcome = await new SemanticSearch(api, store, new AbsentEmbedder()).find(
+        BRAIN,
+        "engine",
+        { variants: ["nothing has this"] },
+      );
+      expect(outcome.mode).toBe("keyword");
+      expect(outcome.degradedReason).toMatch(/@huggingface\/transformers package is not installed/);
+      expect(outcome.matches.map((m) => m.thoughtId)).toEqual(["a"]);
+      expect(outcome.notSearched).toEqual([]);
+      store.close();
+    });
+
+    it("without the package a search TheBrain does not answer is still not an empty result", async () => {
+      const { search, store, asked } = await indexed(new AbsentEmbedder());
+      await expect(search.find(BRAIN, "Unity", { variants: ["soup"] })).rejects.toBeInstanceOf(
+        SearchFailedError,
+      );
+      expect(asked.sort()).toEqual(["Unity", "soup"]);
+      store.close();
+    });
   });
 });

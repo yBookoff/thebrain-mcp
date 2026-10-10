@@ -67,6 +67,14 @@ export type ApiErrorKind =
    * thought with itself, a tag under a type.
    */
   | "zero_id"
+  /**
+   * The search endpoint's answer to a query for its size, which says nothing
+   * of size: a 414 with no body once the request line passes 8,192 bytes, and
+   * the catch-all 403 for 513 to 1,024 words. Made of those two by the search
+   * resource; a shorter query to the same brain is answered (docs/api-map.md,
+   * L30).
+   */
+  | "query_too_long"
   /** Connection failed or dropped. */
   | "network"
   /** A response arrived but could not be parsed. */

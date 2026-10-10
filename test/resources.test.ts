@@ -1421,6 +1421,70 @@ describe("search", () => {
   });
 });
 
+describe("search: a query the endpoint refuses for its size", () => {
+  // Measured (docs/api-map.md, L30): neither answer says a word about size.
+  const refusing = (status: number) => apiWith([["/api/search/", () => status]]).api;
+  const words = (count: number, word = "ab"): string => Array(count).fill(word).join(" ");
+
+  it("a 414 with no body is told as a query too long, with its size", async () => {
+    // It read "(empty response)", as a bad request.
+    const query = "я".repeat(1400);
+    await expect(refusing(414).search.inBrain(BRAIN, query)).rejects.toMatchObject({
+      kind: "query_too_long",
+      status: 414,
+      method: "GET",
+      path: `/api/search/${BRAIN}`,
+      message:
+        "the search text is too long for one request: 1400 characters, 8400 bytes as the " +
+        "URL carries them, where TheBrain takes about 8,000 (a Cyrillic letter is 6 of " +
+        "them, a CJK character 9). Shorten it",
+      cause: { kind: "bad_request", message: "(empty response)" },
+    });
+  });
+
+  it("the bytes are counted as the request carries them: a space is one", async () => {
+    await expect(refusing(414).search.inBrain(BRAIN, "ab cd")).rejects.toMatchObject({
+      message: expect.stringContaining("5 characters, 5 bytes as the URL carries them"),
+    });
+  });
+
+  it.each([513, 600, 1024])("the 403 for %i words is told as a query too long", async (count) => {
+    // It read as an identifier nobody has, and a search carries none.
+    await expect(refusing(403).search.inBrain(BRAIN, words(count))).rejects.toMatchObject({
+      kind: "query_too_long",
+      status: 403,
+      message:
+        `the search text is ${count} words, and TheBrain's search answers a 403 that ` +
+        "names no cause to one of 513 to 1,024 words. Shorten it",
+      cause: { kind: "forbidden" },
+    });
+  });
+
+  it.each([
+    ["a few words", "retrieval augmented generation"],
+    ["512 words", words(512)],
+    ["1,025 words", words(1025)],
+    ["600 words of one letter, which the search does not count", words(600, "a")],
+    ["513 words, 300 of them of one letter", `${words(213)} ${words(300, "a")}`],
+  ])("a 403 for %s is left as the API's catch-all", async (_what, query) => {
+    await expect(refusing(403).search.inBrain(BRAIN, query)).rejects.toMatchObject({
+      kind: "forbidden",
+      status: 403,
+    });
+  });
+
+  it.each([
+    [400, "bad_request"],
+    [401, "auth"],
+    [500, "server"],
+  ])("a %i is passed on as it came, however long the query", async (status, kind) => {
+    await expect(refusing(status).search.inBrain(BRAIN, words(600))).rejects.toMatchObject({
+      kind,
+      status,
+    });
+  });
+});
+
 const log = (
   sourceId: string,
   modType: number,

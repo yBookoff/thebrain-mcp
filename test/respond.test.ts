@@ -259,6 +259,64 @@ describe("error explanations point at the next step", () => {
   });
 });
 
+describe("a failure that is TheBrain's own, and a query it will not take", () => {
+  const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
+  const at = { method: "GET", path: `/api/search/${BRAIN}` };
+
+  it("a 5xx is told with its status, as a fault of the app and not of the call", () => {
+    // It was the body and the request: "Internal Server Error (GET …)".
+    const text = describeError(
+      new TheBrainError("server", "Internal Server Error", { status: 500, ...at }),
+    );
+    expect(text).toBe(
+      `TheBrain failed with a 500 (GET /api/search/${BRAIN}): Internal Server Error. ` +
+        "The fault is inside the app, not in the arguments of this call. A read is safe to " +
+        "repeat; before repeating a write, check what it left.",
+    );
+  });
+
+  it("a 5xx with no body still says which status it was", () => {
+    // It was "(empty response) (GET …)", with nothing to tell it from a 400.
+    const text = describeError(
+      new TheBrainError("server", "(empty response)", { status: 503, ...at }),
+    );
+    expect(text).toContain(
+      `TheBrain failed with a 503 (GET /api/search/${BRAIN}): (empty response). The fault `,
+    );
+  });
+
+  it("a sentence of this server's own under that kind is left whole", () => {
+    // thoughts.update() raises one with no status when a type does not read back.
+    const own = "the type was accepted, but the thought does not read back with it yet";
+    expect(describeError(new TheBrainError("server", own))).toBe(own);
+  });
+
+  it("a query too long is told in the resource's words, and as a sentence", () => {
+    const text = describeError(
+      new TheBrainError("query_too_long", "the search text is 600 words. Shorten it", {
+        status: 403,
+        ...at,
+      }),
+    );
+    expect(text).toBe("the search text is 600 words. Shorten it.");
+    // The 403 it was made from is explained as an identifier nobody has.
+    expect(text).not.toMatch(/identifier|brain_get_thought/);
+  });
+
+  it("a request that timed out reads as two sentences", () => {
+    // "request exceeded 30000 ms Check that…"
+    expect(describeError(new TheBrainError("network", "request exceeded 30000 ms"))).toBe(
+      "request exceeded 30000 ms. Check that the TheBrain desktop app is running and its " +
+        "local API is enabled.",
+    );
+    const refused = "could not reach http://localhost:11522 — is TheBrain running?";
+    expect(describeError(new TheBrainError("network", refused))).toBe(
+      "could not reach http://localhost:11522 — is TheBrain running? Check that the " +
+        "TheBrain desktop app is running and its local API is enabled.",
+    );
+  });
+});
+
 describe("formatting", () => {
   it("the table aligns columns", () => {
     const out = table(["Name", "Id"], [["short", "1"], ["considerably longer", "2"]]);

@@ -10,7 +10,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { TheBrainApi } from "../src/api/index.js";
 import { indexModelId } from "../src/semantic/document.js";
-import type { Embedder } from "../src/semantic/embedder.js";
+import { EmbedderUnavailableError, type Embedder } from "../src/semantic/embedder.js";
+import { SemanticIndexer } from "../src/semantic/indexer.js";
 import { SemanticSearch } from "../src/semantic/search.js";
 import { VectorStore } from "../src/semantic/store.js";
 import type { ServerContext } from "../src/server/context.js";
@@ -1617,6 +1618,616 @@ describe("an identifier nobody has, and a brainId that is no brain", () => {
         expect(result.text, tool).not.toMatch(/is not a t|no thought in this brain/);
         expect(calls.filter((c) => c.method !== "GET"), tool).toEqual([]);
       }
+    });
+  });
+});
+
+describe("brain_search when TheBrain's search does not answer", () => {
+  const OTHER = "abababab-0000-4000-8000-000000000007";
+  const SEARCH = `GET /api/search/${BRAIN}`;
+
+  const hit = (id: string, name: string) => ({
+    sourceThought: thought(name, { id }),
+    name,
+    isFromOtherBrain: false,
+  });
+  /** What the search finds for each phrasing; one it has no entry for finds nothing. */
+  const finds: Record<string, unknown[]> = {
+    RAG: [hit(THOUGHT, "RAG")],
+    retrieval: [hit(THOUGHT, "RAG"), hit(OTHER, "Retrieval")],
+  };
+  const answers = (url: URL): unknown => finds[url.searchParams.get("queryText") ?? ""] ?? [];
+
+  const embedder: Embedder = {
+    id: "fake@v1",
+    dimensions: 2,
+    embedDocuments: async (texts) => texts.map(() => new Float32Array([1, 0])),
+    embedQuery: async () => new Float32Array([1, 0]),
+  };
+  /** The package that is not installed: its id and size are known, and nothing embeds. */
+  const absent: Embedder = {
+    ...embedder,
+    embedQuery: async () => {
+      throw new EmbedderUnavailableError();
+    },
+  };
+  const indexed = (): VectorStore => {
+    const store = new VectorStore(":memory:");
+    store.setMeta({
+      brainId: BRAIN,
+      model: indexModelId(embedder.id),
+      dimensions: embedder.dimensions,
+      syncedThrough: "2026-10-10T00:00:00.000Z",
+    });
+    store.upsert([
+      {
+        thoughtId: OTHER,
+        name: "Embeddings",
+        kind: 1,
+        contentHash: "h",
+        vector: new Float32Array([1, 0]),
+      },
+    ]);
+    return store;
+  };
+  const searching =
+    (store: VectorStore = new VectorStore(":memory:"), with_: Embedder = embedder) =>
+    (api: TheBrainApi) => ({ search: () => new SemanticSearch(api, store, with_) });
+
+  /** The API's answers, and fetch's own failures, as the client meets them. */
+  const text = (status: number, body: string): Response =>
+    new Response(body, { status, headers: { "content-type": "text/plain" } });
+  const refusedConnection = (): never => {
+    throw new TypeError("fetch failed", {
+      cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:11522"), {
+        code: "ECONNREFUSED",
+      }),
+    });
+  };
+  const droppedConnection = (): never => {
+    throw new TypeError("fetch failed", {
+      cause: Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" }),
+    });
+  };
+  const timedOut = (): never => {
+    throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  };
+
+  const NOT_INDEXED =
+    "## Warning\n" +
+    "Semantic search unavailable: the semantic index has not been built yet — run a rebuild. " +
+    "Fell back to substring name search, so recall is lower. " +
+    "Build the index with the brain_index tool.";
+  const NOTHING_SEARCHED =
+    "Nothing was searched, and this is no answer about what the brain holds";
+  const RUNNING = " Check that the TheBrain desktop app is running and its local API is enabled.";
+  const FAULT =
+    " The fault is inside the app, not in the arguments of this call. A read is safe to " +
+    "repeat; before repeating a write, check what it left.";
+
+  describe("with no index, and no phrasing answered", () => {
+    // Each of these read as an empty result: the warning about the index and
+    // nothing else, from a search that never ran.
+    it.each<[string, () => unknown, string]>([
+      [
+        "a key TheBrain rejects",
+        () => text(401, "Invalid API Key"),
+        "TheBrain rejected the key. Check THEBRAIN_API_KEY: find it under " +
+          "Settings > User > Local API Key.",
+      ],
+      [
+        "nothing listening",
+        refusedConnection,
+        `${NOTHING_SEARCHED}: could not reach http://localhost:11522 or http://localhost:8001 ` +
+          `— is TheBrain running?${RUNNING} Each of the 2 phrasings failed this way.`,
+      ],
+      [
+        "a connection that drops",
+        droppedConnection,
+        `${NOTHING_SEARCHED}: could not reach http://localhost:11522 — is TheBrain running?` +
+          `${RUNNING} Each of the 2 phrasings failed this way.`,
+      ],
+      [
+        "no answer in time",
+        timedOut,
+        `${NOTHING_SEARCHED}: request exceeded 30000 ms.${RUNNING} ` +
+          "Each of the 2 phrasings failed this way.",
+      ],
+      [
+        "a 500",
+        () => text(500, "Internal Server Error"),
+        `${NOTHING_SEARCHED}: TheBrain failed with a 500 (${SEARCH}): Internal Server Error.` +
+          `${FAULT} Each of the 2 phrasings failed this way.`,
+      ],
+      [
+        "a 503 with no body",
+        () => text(503, ""),
+        `${NOTHING_SEARCHED}: TheBrain failed with a 503 (${SEARCH}): (empty response).` +
+          `${FAULT} Each of the 2 phrasings failed this way.`,
+      ],
+    ])("%s is an error that says so, not an empty result", async (_what, answer, told) => {
+      const { call } = await connect([["GET /api/search", answer]], searching());
+      const result = await call("brain_search", {
+        brainId: BRAIN,
+        query: "RAG",
+        variants: ["retrieval"],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(told);
+    });
+
+    it("a query alone that fails is told once, with no count of phrasings", async () => {
+      const { call } = await connect([["GET /api/search", () => text(500, "boom")]], searching());
+      const result = await call("brain_search", { brainId: BRAIN, query: "RAG" });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        `${NOTHING_SEARCHED}: TheBrain failed with a 500 (${SEARCH}): boom.${FAULT}`,
+      );
+    });
+
+    it("phrasings that fail each in its own way are listed, each with its reason", async () => {
+      const passage = `${"retrieval ".repeat(599)}retrieval`;
+      const { call } = await connect(
+        [
+          [
+            "GET /api/search",
+            (url) => (url.searchParams.get("queryText") === "RAG" ? text(500, "boom") : 403),
+          ],
+        ],
+        searching(),
+      );
+      const result = await call("brain_search", {
+        brainId: BRAIN,
+        query: "RAG",
+        variants: [passage],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        `${NOTHING_SEARCHED}. Each of the 2 phrasings failed:\n` +
+          `- "RAG": TheBrain failed with a 500 (${SEARCH}): boom.${FAULT}\n` +
+          // A passage given for a phrasing is not sent back whole.
+          `- "${passage.slice(0, 60)}…" (5999 characters): the search text is 600 words, ` +
+          "and TheBrain's search answers a 403 that names no cause to one of 513 to " +
+          "1,024 words. Shorten it.",
+      );
+    });
+
+    it("a query and variants that are all empty are refused, and nothing is asked", async () => {
+      // No request went out, and the result was the same empty one.
+      const { call, calls } = await connect([["GET /api/search", answers]], searching());
+      const result = await call("brain_search", {
+        brainId: BRAIN,
+        query: "  ",
+        variants: ["", " "],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        "query is empty, and so is every variant: there is nothing to search for. " +
+          "Say what you are looking for in query.",
+      );
+      expect(calls).toEqual([]);
+    });
+  });
+
+  describe("with no index, and some phrasings answered", () => {
+    /** The search answers every phrasing but those `failing` names. */
+    const partly = (failing: Record<string, () => unknown>): Route[] => [
+      [
+        "GET /api/search",
+        (url) => (failing[url.searchParams.get("queryText") ?? ""] ?? (() => answers(url)))(),
+      ],
+    ];
+
+    it("the hits are given, and the phrasing that was not searched is named", async () => {
+      // It was skipped in silence, and "not found" read as certain.
+      const { call } = await connect(
+        partly({ embeddings: () => text(500, "Internal Server Error") }),
+        searching(),
+      );
+      const result = await call("brain_search", {
+        brainId: BRAIN,
+        query: "RAG",
+        variants: ["retrieval", "embeddings"],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(
+        "## Found by substring\n" +
+          "Score  Thought    Identifier                            Matched\n" +
+          "─────  ─────────  ────────────────────────────────────  ─────────\n" +
+          `2.000  RAG        ${THOUGHT}  RAG\n` +
+          `0.500  Retrieval  ${OTHER}  retrieval\n\n` +
+          "## Not searched\n" +
+          "1 of 3 phrasings got no answer from TheBrain's search, so this result is from " +
+          "the other 2 only:\n" +
+          `- "embeddings": TheBrain failed with a 500 (${SEARCH}): Internal Server Error.` +
+          `${FAULT}\n\n${NOT_INDEXED}`,
+      );
+    });
+
+    it("nothing found by the phrasings that were answered is said of those only", async () => {
+      const { call } = await connect(
+        partly({ RAG: timedOut, retrieval: () => 414 }),
+        searching(),
+      );
+      const result = await call("brain_search", {
+        brainId: BRAIN,
+        query: "RAG",
+        variants: ["retrieval", "nothing has this"],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(
+        "## Found by substring\n" +
+          "Nothing: TheBrain's search matched no thought for the one phrasing it answered.\n\n" +
+          "## Not searched\n" +
+          "2 of 3 phrasings got no answer from TheBrain's search, so this result is from " +
+          "the other one only:\n" +
+          `- "RAG": request exceeded 30000 ms.${RUNNING}\n` +
+          '- "retrieval": the search text is too long for one request: 9 characters, ' +
+          "9 bytes as the URL carries them, where TheBrain takes about 8,000 (a Cyrillic " +
+          `letter is 6 of them, a CJK character 9). Shorten it.\n\n${NOT_INDEXED}`,
+      );
+    });
+
+    it("of four phrasings two answered and found nothing: it says of how many", async () => {
+      const { call } = await connect(
+        partly({ RAG: () => text(500, "boom"), retrieval: () => text(500, "boom") }),
+        searching(),
+      );
+      const result = await call("brain_search", {
+        brainId: BRAIN,
+        query: "RAG",
+        variants: ["retrieval", "nothing has this", "nor this"],
+      });
+      expect(result.text).toContain(
+        "## Found by substring\n" +
+          "Nothing: TheBrain's search matched no thought for any of the 2 phrasings it answered.",
+      );
+      expect(result.text).toContain("2 of 4 phrasings got no answer");
+      expect(result.text).toContain("so this result is from the other 2 only");
+    });
+
+    it("a key TheBrain rejects stops the search whatever else answered", async () => {
+      const { call } = await connect(
+        partly({ retrieval: () => text(401, "Invalid API Key") }),
+        searching(),
+      );
+      const result = await call("brain_search", {
+        brainId: BRAIN,
+        query: "RAG",
+        variants: ["retrieval"],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/^TheBrain rejected the key\./);
+    });
+  });
+
+  describe("with no index, and every phrasing answered", () => {
+    it("a result with hits reads as it did, to the character", async () => {
+      const { call } = await connect([["GET /api/search", answers]], searching());
+      const result = await call("brain_search", {
+        brainId: BRAIN,
+        query: "RAG",
+        variants: ["retrieval"],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(
+        "## Found by substring\n" +
+          "Score  Thought    Identifier                            Matched\n" +
+          "─────  ─────────  ────────────────────────────────────  ─────────\n" +
+          `2.000  RAG        ${THOUGHT}  RAG\n` +
+          `0.500  Retrieval  ${OTHER}  retrieval\n\n${NOT_INDEXED}`,
+      );
+    });
+
+    it.each<[string[], string]>([
+      [[], "Nothing: TheBrain's search matched no thought."],
+      [
+        ["nor this", "NOR THIS", ""],
+        "Nothing: TheBrain's search matched no thought for any of the 2 phrasings.",
+      ],
+    ])("nothing found is said in words, variants %j", async (variants, said) => {
+      // It was the warning alone, which is also all a search that failed printed.
+      const { call, calls } = await connect([["GET /api/search", answers]], searching());
+      const result = await call("brain_search", {
+        brainId: BRAIN,
+        query: "nothing has this",
+        variants,
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(`## Found by substring\n${said}\n\n${NOT_INDEXED}`);
+      // A duplicate and an empty variant are not phrasings: neither is asked, or counted.
+      expect(calls).toHaveLength(variants.length === 0 ? 1 : 2);
+    });
+  });
+
+  describe("with an index", () => {
+    it("ranking by vectors makes no request, so nothing TheBrain answers reaches it", async () => {
+      const { call, calls } = await connect(
+        [["GET /api/", () => text(500, "Internal Server Error")]],
+        searching(indexed()),
+      );
+      const result = await call("brain_search", {
+        brainId: BRAIN,
+        query: "RAG",
+        variants: ["retrieval"],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(
+        "## Found by meaning\n" +
+          "Score  Thought     Identifier                            Matched\n" +
+          "─────  ──────────  ────────────────────────────────────  ───────\n" +
+          `1.000  Embeddings  ${OTHER}`,
+      );
+      expect(calls).toEqual([]);
+    });
+
+    it("an empty query is refused there as well", async () => {
+      const { call } = await connect([], searching(indexed()));
+      const result = await call("brain_search", { brainId: BRAIN, query: "" });
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/^query is empty, and so is every variant/);
+    });
+
+    it("without the embeddings package it still falls back, and says why", async () => {
+      const { call } = await connect([["GET /api/search", answers]], searching(indexed(), absent));
+      const result = await call("brain_search", { brainId: BRAIN, query: "RAG" });
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain(`1.000  RAG      ${THOUGHT}  RAG`);
+      expect(result.text).toContain("## Found by substring");
+      expect(result.text).toContain(
+        "Semantic search unavailable: semantic search is off: the @huggingface/transformers " +
+          "package is not installed.",
+      );
+      expect(result.text).not.toContain("## Not searched");
+    });
+
+    it("without the package, TheBrain not answering is the error and not the package", async () => {
+      const { call } = await connect(
+        [["GET /api/search", refusedConnection]],
+        searching(indexed(), absent),
+      );
+      const result = await call("brain_search", { brainId: BRAIN, query: "RAG" });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        `${NOTHING_SEARCHED}: could not reach http://localhost:11522 or ` +
+          `http://localhost:8001 — is TheBrain running?${RUNNING}`,
+      );
+    });
+  });
+});
+
+describe("brain_index and a brain it has not been shown", () => {
+  const BRAINS = `GET /api/brains/${BRAIN}`;
+
+  class FakeEmbedder implements Embedder {
+    readonly id = "fake@v1";
+    readonly dimensions = 2;
+    async embedDocuments(texts: readonly string[]): Promise<Float32Array[]> {
+      return texts.map(() => new Float32Array([1, 0]));
+    }
+    async embedQuery(): Promise<Float32Array> {
+      return new Float32Array([1, 0]);
+    }
+  }
+  /** The package that is not installed: nothing embeds. */
+  class AbsentEmbedder extends FakeEmbedder {
+    override async embedDocuments(): Promise<Float32Array[]> {
+      throw new EmbedderUnavailableError();
+    }
+  }
+
+  /** The index is opened through this, and `opened` counts how often. */
+  const indexing = (store: VectorStore, embedder: Embedder = new FakeEmbedder()) => {
+    const opened = { count: 0 };
+    const context = (api: TheBrainApi) => ({
+      indexer: () => {
+        opened.count += 1;
+        return new SemanticIndexer(api, store, embedder);
+      },
+    });
+    return { context, opened };
+  };
+
+  /** A brain of one thought, as a rebuild reads it. */
+  const brain: Route[] = [
+    ["GET /modifications", () => []],
+    ["GET /api/brains/", () => ({ id: BRAIN, name: "Test brain", homeThoughtId: THOUGHT })],
+    ["GET /graph", () => graph(thought("RAG"))],
+  ];
+  const noBrain = (): Response =>
+    new Response(JSON.stringify(`Access to brain ${BRAIN} is unauthorized.`), {
+      status: 401,
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
+  const text = (status: number, body: string): Response =>
+    new Response(body, { status, headers: { "content-type": "text/plain" } });
+
+  const ACTIONS = ["status", "rebuild", "sync"] as const;
+  const REBUILD = "## What to do\nCall this tool with action=rebuild.";
+  const status = (lines: string[]): string =>
+    `## Index status\n- brain: Test brain\n${lines.map((l) => `- ${l}`).join("\n")}`;
+
+  describe("a brainId that is no brain", () => {
+    it.each(ACTIONS)("%s says so, with one request and the index not opened", async (action) => {
+      // status made no request, and answered "built: no" and to call rebuild.
+      const { context, opened } = indexing(new VectorStore(":memory:"));
+      const { call, calls } = await connect([["GET /api/", noBrain]], context);
+      const result = await call("brain_index", { brainId: BRAIN, action });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        `Access to brain ${BRAIN} is unauthorized. The key was accepted: it is brainId that ` +
+          "names no brain open to it. Take brainId from brain_list. The other identifiers " +
+          "in the call were not looked at.",
+      );
+      expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([BRAINS]);
+      expect(opened.count).toBe(0);
+    });
+
+    it.each(ACTIONS)("%s refuses one that is no UUID with no request at all", async (action) => {
+      const { context, opened } = indexing(new VectorStore(":memory:"));
+      const { call, calls } = await connect(brain, context);
+      const result = await call("brain_index", { brainId: "my-brain", action });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain('brainId must be a UUID, got "my-brain"');
+      expect(calls).toEqual([]);
+      expect(opened.count).toBe(0);
+    });
+  });
+
+  describe("status when TheBrain does not answer for the brain", () => {
+    // It answered all of these "built: no", and to call rebuild.
+    it.each<[string, () => unknown, string]>([
+      [
+        "a key TheBrain rejects",
+        () => text(401, "Invalid API Key"),
+        "TheBrain rejected the key. Check THEBRAIN_API_KEY: find it under " +
+          "Settings > User > Local API Key.",
+      ],
+      [
+        "nothing listening",
+        () => {
+          throw new TypeError("fetch failed", {
+            cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+          });
+        },
+        "could not reach http://localhost:11522 or http://localhost:8001 — is TheBrain " +
+          "running? Check that the TheBrain desktop app is running and its local API is enabled.",
+      ],
+      [
+        "a 500",
+        () => text(500, "Internal Server Error"),
+        `TheBrain failed with a 500 (${BRAINS}): Internal Server Error. The fault is inside ` +
+          "the app, not in the arguments of this call. A read is safe to repeat; before " +
+          "repeating a write, check what it left.",
+      ],
+    ])("%s is the answer, and nothing is said of an index", async (_what, answer, told) => {
+      const { context, opened } = indexing(new VectorStore(":memory:"));
+      const { call } = await connect([["GET /api/", answer]], context);
+      const result = await call("brain_index", { brainId: BRAIN, action: "status" });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(told);
+      expect(result.text).not.toMatch(/built|rebuild/);
+      expect(opened.count).toBe(0);
+    });
+  });
+
+  describe("status of a brain that is there", () => {
+    const fake = new FakeEmbedder();
+    const meta = {
+      brainId: BRAIN,
+      model: indexModelId(fake.id),
+      dimensions: fake.dimensions,
+      syncedThrough: null,
+    };
+    const vector = {
+      thoughtId: THOUGHT,
+      name: "RAG",
+      kind: 1,
+      contentHash: "h",
+      vector: new Float32Array([1, 0]),
+    };
+    const ask = async (store: VectorStore): Promise<string> => {
+      const { call, calls } = await connect(brain, indexing(store).context);
+      const result = await call("brain_index", { brainId: BRAIN, action: "status" });
+      expect(result.isError).toBe(false);
+      // The brain is asked for, and nothing else.
+      expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([BRAINS]);
+      return result.text;
+    };
+
+    it("names the brain, and with no index says to build one", async () => {
+      expect(await ask(new VectorStore(":memory:"))).toBe(
+        `${status([
+          "built: no",
+          "usable: no",
+          "thoughts indexed: 0",
+          "model: —",
+          "synced through: —",
+        ])}\n\n${REBUILD}`,
+      );
+    });
+
+    it("an index that was built and holds thoughts needs nothing done", async () => {
+      const store = new VectorStore(":memory:");
+      store.setMeta({ ...meta, syncedThrough: "2026-10-10T20:00:00.000Z" });
+      store.upsert([vector]);
+      expect(await ask(store)).toBe(
+        status([
+          "built: yes",
+          "usable: yes",
+          "thoughts indexed: 1",
+          "model: fake@v1#doc3",
+          "synced through: 2026-10-10T20:00:00.000Z",
+        ]),
+      );
+    });
+
+    it("a build that never finished is not called built, or usable", async () => {
+      // A rebuild writes its metadata first. One that failed after that read
+      // "built: yes, usable: yes" with no thought indexed, and nothing to do.
+      const store = new VectorStore(":memory:");
+      store.setMeta(meta);
+      expect(await ask(store)).toBe(
+        `${status([
+          "built: no — a build was started and did not finish",
+          "usable: no",
+          "thoughts indexed: 0",
+          "model: fake@v1#doc3",
+          "synced through: —",
+        ])}\n\n${REBUILD}`,
+      );
+    });
+
+    it("an unfinished build that got some thoughts in is what search ranks by, and is to be rebuilt", async () => {
+      const store = new VectorStore(":memory:");
+      store.setMeta(meta);
+      store.upsert([vector]);
+      const said = await ask(store);
+      expect(said).toContain(
+        "- built: no — a build was started and did not finish\n- usable: yes\n",
+      );
+      expect(said).toContain(REBUILD);
+    });
+
+    it("an index built with another model is built, and not usable", async () => {
+      const store = new VectorStore(":memory:");
+      store.setMeta({ ...meta, model: "other@v2#doc3", syncedThrough: "2026-10-10T20:00:00.000Z" });
+      store.upsert([vector]);
+      const said = await ask(store);
+      expect(said).toContain("- built: yes\n- usable: no\n- thoughts indexed: 1\n");
+      expect(said).toContain(REBUILD);
+    });
+  });
+
+  describe("a rebuild", () => {
+    it("asks for the brain first, then builds", async () => {
+      const store = new VectorStore(":memory:");
+      const { call, calls } = await connect(brain, indexing(store).context);
+      const result = await call("brain_index", { brainId: BRAIN, action: "rebuild" });
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("## Index built\n- thoughts encoded: 1\n");
+      expect(`${calls[0]!.method} ${calls[0]!.path}`).toBe(BRAINS);
+      expect(store.size()).toBe(1);
+    });
+
+    it("without the embeddings package it fails with the reason, and status does not call it built", async () => {
+      const store = new VectorStore(":memory:");
+      const { call } = await connect(brain, indexing(store, new AbsentEmbedder()).context);
+      const rebuilt = await call("brain_index", { brainId: BRAIN, action: "rebuild" });
+      expect(rebuilt.isError).toBe(true);
+      expect(rebuilt.text).toMatch(/@huggingface\/transformers package is not installed/);
+
+      const after = await call("brain_index", { brainId: BRAIN, action: "status" });
+      expect(after.isError).toBe(false);
+      expect(after.text).toBe(
+        `${status([
+          "built: no — a build was started and did not finish",
+          "usable: no",
+          "thoughts indexed: 0",
+          "model: fake@v1#doc3",
+          "synced through: —",
+        ])}\n\n${REBUILD}`,
+      );
     });
   });
 });

@@ -11,9 +11,20 @@
  *
  * This covers a fair share of cases, because vector search is not perfect
  * either and its misses are substantive.
+ *
+ * The fan-out asks TheBrain, and a request that fails is not an empty answer.
+ * A failure that is about the key or the brain stops the search. Any other
+ * is one phrasing's own: it is left out and named in the outcome, and when no
+ * phrasing was answered there is no outcome at all (`SearchFailedError`).
+ * Ranking by vectors asks TheBrain nothing, so none of this reaches it.
  */
 
-import { TheBrainError, type ApiErrorKind, type TheBrainApi } from "../api/index.js";
+import {
+  TheBrainError,
+  type ApiErrorKind,
+  type SearchHit,
+  type TheBrainApi,
+} from "../api/index.js";
 import { ThoughtKind } from "../api/types.js";
 import { indexModelId } from "./document.js";
 import { EmbedderUnavailableError, type Embedder } from "./embedder.js";
@@ -41,18 +52,68 @@ export interface SearchOptions {
   includeAuxiliary?: boolean;
 }
 
+/** A phrasing TheBrain's search gave no answer to, and what came instead. */
+export interface PhrasingFailure {
+  phrasing: string;
+  error: unknown;
+}
+
 export interface SearchOutcome {
   matches: Match[];
   /** Whether vector search ran or the fallback kicked in. */
   mode: "vector" | "keyword";
   /** Why it degraded — surfaced to the user. */
   degradedReason: string | null;
+  /** How many phrasings there were: the concept and its variants, less duplicates and blanks. */
+  phrasings: number;
+  /**
+   * The ones the fallback asked TheBrain's search for and got no answer to,
+   * fewer than all of them. `matches` come from the rest, so a thought only
+   * one of these would find is missing. Always empty in vector mode.
+   */
+  notSearched: PhrasingFailure[];
+}
+
+/**
+ * No phrasing was answered, so there is no result: not an empty one either.
+ * Each failure is kept for the tool to explain.
+ */
+export class SearchFailedError extends Error {
+  readonly failures: readonly PhrasingFailure[];
+
+  constructor(failures: readonly PhrasingFailure[]) {
+    super(
+      `TheBrain's search answered none of the ${failures.length} phrasings`,
+      failures[0] !== undefined ? { cause: failures[0].error } : undefined,
+    );
+    this.name = "SearchFailedError";
+    this.failures = failures;
+  }
+}
+
+/** The concept and every variant are empty: there is nothing to look for. */
+export class EmptyQueryError extends Error {
+  constructor() {
+    super(
+      "query is empty, and so is every variant: there is nothing to search for. " +
+        "Say what you are looking for in query.",
+    );
+    this.name = "EmptyQueryError";
+  }
 }
 
 const AUXILIARY_KINDS = [ThoughtKind.Type, ThoughtKind.Tag, ThoughtKind.System];
 
-/** What a search is refused with when its `brainId` is malformed, or is no brain. */
-const NO_BRAIN: readonly ApiErrorKind[] = ["invalid_uuid", "unknown_brain"];
+/**
+ * Failures that are about the call and not about a phrasing: a `brainId` that
+ * is malformed or is no brain, and a key TheBrain rejects. Every phrasing
+ * would get the same, so the first one is the search's answer.
+ *
+ * Nothing else is taken for that ahead of time. A connection that fails or a
+ * 5xx may be one request's, and the search does fail one phrasing among
+ * several: `query_too_long` for one of them, measured.
+ */
+const FAILS_EVERY_PHRASING: readonly ApiErrorKind[] = ["invalid_uuid", "unknown_brain", "auth"];
 
 export class SemanticSearch {
   constructor(
@@ -66,6 +127,10 @@ export class SemanticSearch {
    *
    * Order: try vectors; if the package is missing or the index is empty, fall
    * back to the lexical fan-out and say so plainly.
+   *
+   * Throws `EmptyQueryError` when there is no phrasing to look for, in either
+   * mode: the fan-out would send nothing and report nothing found, and the
+   * vectors would rank the brain against an empty string.
    */
   async find(
     brainId: string,
@@ -74,6 +139,8 @@ export class SemanticSearch {
   ): Promise<SearchOutcome> {
     const limit = options.limit ?? 15;
     const excludeKinds = options.includeAuxiliary ? [] : AUXILIARY_KINDS;
+    const phrasings = dedupeVariants([concept, ...(options.variants ?? [])]);
+    if (phrasings.length === 0) throw new EmptyQueryError();
 
     const indexReady =
       this.store.isCompatible(
@@ -86,13 +153,15 @@ export class SemanticSearch {
     if (indexReady) {
       try {
         return {
-          matches: await this.#vector(concept, options, limit, excludeKinds),
+          matches: await this.#vector(concept, phrasings, limit, excludeKinds),
           mode: "vector",
           degradedReason: null,
+          phrasings: phrasings.length,
+          notSearched: [],
         };
       } catch (error) {
         if (!(error instanceof EmbedderUnavailableError)) throw error;
-        return this.#keyword(brainId, concept, options, limit, error.message);
+        return this.#keyword(brainId, phrasings, options, limit, error.message);
       }
     }
 
@@ -100,7 +169,7 @@ export class SemanticSearch {
       this.store.size() === 0
         ? "the semantic index has not been built yet — run a rebuild"
         : "the index was built with a different model or document format and is unusable — rebuild it";
-    return this.#keyword(brainId, concept, options, limit, reason);
+    return this.#keyword(brainId, phrasings, options, limit, reason);
   }
 
   /**
@@ -120,13 +189,11 @@ export class SemanticSearch {
    */
   async #vector(
     concept: string,
-    options: SearchOptions,
+    phrasings: readonly string[],
     limit: number,
     excludeKinds: readonly number[],
   ): Promise<Match[]> {
     const primary = concept.trim();
-    const deduped = dedupeVariants([concept, ...(options.variants ?? [])]);
-    const phrasings = deduped.length > 0 ? deduped : [concept];
     const best = new Map<string, Match>();
     for (const phrasing of phrasings) {
       const vector = await this.embedder.embedQuery(phrasing);
@@ -146,26 +213,42 @@ export class SemanticSearch {
     return [...best.values()].sort((a, b) => b.score - a.score).slice(0, limit);
   }
 
+  /**
+   * The fan-out. A request that failed used to count as one that found
+   * nothing: a rejected key, TheBrain not running and a 5xx all read as an
+   * empty result, from a search that never ran.
+   */
   async #keyword(
     brainId: string,
-    concept: string,
+    phrasings: readonly string[],
     options: SearchOptions,
     limit: number,
     reason: string,
   ): Promise<SearchOutcome> {
-    const variants = dedupeVariants([concept, ...(options.variants ?? [])]);
-    const perVariant = await mapWithConcurrency(variants, 6, async (variant) => {
-      const hits = await this.api.search
-        .inBrain(brainId, variant, { maxResults: limit })
-        .catch((error: unknown) => {
-          // A phrasing the search fails on is skipped. A brainId that names no
-          // brain fails every phrasing alike, and "nothing found" would be an
-          // answer no search gave.
-          if (error instanceof TheBrainError && NO_BRAIN.includes(error.kind)) throw error;
-          return [];
-        });
-      return { variant, hits };
-    });
+    type Answered = { variant: string; hits: SearchHit[] };
+    const asked = await mapWithConcurrency<string, Answered | PhrasingFailure>(
+      phrasings,
+      6,
+      async (variant) => {
+        try {
+          const hits = await this.api.search.inBrain(brainId, variant, { maxResults: limit });
+          return { variant, hits };
+        } catch (error) {
+          if (error instanceof TheBrainError && FAILS_EVERY_PHRASING.includes(error.kind)) {
+            throw error;
+          }
+          return { phrasing: variant, error };
+        }
+      },
+    );
+
+    const perVariant: Answered[] = [];
+    const notSearched: PhrasingFailure[] = [];
+    for (const answer of asked) {
+      if ("hits" in answer) perVariant.push(answer);
+      else notSearched.push(answer);
+    }
+    if (perVariant.length === 0) throw new SearchFailedError(notSearched);
 
     // A thought found by several phrasings is more relevant than one found by a single phrasing.
     const byThought = new Map<string, Match & { hitCount: number }>();
@@ -198,7 +281,13 @@ export class SemanticSearch {
       .slice(0, limit)
       .map(({ hitCount: _hitCount, ...m }) => m);
 
-    return { matches, mode: "keyword", degradedReason: reason };
+    return {
+      matches,
+      mode: "keyword",
+      degradedReason: reason,
+      phrasings: phrasings.length,
+      notSearched,
+    };
   }
 }
 

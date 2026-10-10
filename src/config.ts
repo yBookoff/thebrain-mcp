@@ -8,7 +8,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { normalizeBaseUrl } from "./api/client.js";
+import { assertUuid, normalizeBaseUrl } from "./api/client.js";
 
 export interface Config {
   apiKey: string;
@@ -63,8 +63,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   };
 }
 
-/** Path to a specific brain's index. */
+/**
+ * Path to a specific brain's index. Throws `invalid_uuid` for a `brainId`
+ * that is not a UUID.
+ *
+ * The identifier is a tool argument, and it goes into a file name: the index
+ * is opened, and so created, before any request has had the chance to refuse
+ * it. `brain_index` with `action: "status"` made `index-my-brain.sqlite` for
+ * `my-brain`, and for `x/../../name` a file outside the data directory.
+ */
 export function indexPath(config: Config, brainId: string): string {
+  assertUuid(brainId, "brainId");
   return join(config.dataDir, `index-${brainId}.sqlite`);
 }
 

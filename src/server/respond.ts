@@ -74,7 +74,19 @@ export function describeError(error: unknown, alone = true): string {
           "call were not looked at."
         );
       case "network":
-        return `${error.message} Check that the TheBrain desktop app is running and its local API is enabled.`;
+        return `${sentence(error.message)} Check that the TheBrain desktop app is running and its local API is enabled.`;
+      case "server":
+        // Without a status it is a sentence of this server's own, whole as it is.
+        if (error.status === undefined) return error.toToolMessage();
+        // A 5xx was its body and the request, and neither says it is one.
+        return (
+          `TheBrain failed with a ${error.status}${requestOf(error)}: ` +
+          `${sentence(error.message)} The fault is inside the app, not in the arguments of ` +
+          "this call. A read is safe to repeat; before repeating a write, check what it left."
+        );
+      case "query_too_long":
+        // The resource's own sentence: the API's answer has no words about size.
+        return sentence(error.message);
       case "route_miss":
         // Never an identifier nobody has: that one gets an answer from the API.
         return (
@@ -137,7 +149,7 @@ function requestOf(error: TheBrainError): string {
 }
 
 /** The API ends some of its messages with a period and some without. */
-function sentence(message: string): string {
+export function sentence(message: string): string {
   const text = message.trim();
   return /[.!?]$/.test(text) ? text : `${text}.`;
 }

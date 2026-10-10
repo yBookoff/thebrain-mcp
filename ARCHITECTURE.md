@@ -635,6 +635,11 @@ It names both because the API names neither, and still not `brainId`.
 lexical fan-out, the outcome carries `degradedReason` and the tool prints it. An
 agent that does not know recall dropped will trust an empty result.
 
+**A failure is not an empty result.** A search that could not ask is an
+error, and one that asked with some of its phrasings names the ones it left
+out. An index is not described before TheBrain has answered for the brain.
+The rule and what it was measured on are in §8.
+
 ---
 
 ## 6. Deletion: two independent safeties
@@ -679,6 +684,10 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     `isNotes: true`, and its log events are keyed by that attachment rather than
     by the thought.
 11. **Search is prefix-based, not semantic.** This is the entire reason for §8.
+    It also refuses a long query in two ways that say nothing of length: a 414
+    with no body past 8,192 bytes of request line, and the 403 that names no
+    cause for 513 to 1,024 words. The search resource makes `query_too_long`
+    of both (§8, *A request that fails is not an empty answer*).
 12. **The log keeps only the newest `maxLogs` entries**, with or without
     `startTime`. Reading all of it means paging back on `endTime` — see
     *Reading the whole log* below.
@@ -1019,6 +1028,78 @@ phrasings ranks above one found by a single phrasing.
 This works better than it sounds, because vector search is not perfect either
 (see the ceiling below) and the skills already train agents to supply variants.
 The reason for degradation is returned in the result so the tool can show it.
+
+### A request that fails is not an empty answer
+
+> **Correction.** The fan-out dropped every failure of a request and counted
+> the phrasing as one that found nothing. Through the real tool, with no
+> index: a rejected key, nothing listening on the port, a dropped connection,
+> a timeout, a 500 and a 503 each came back as the note about the index and
+> nothing else, not an error, from a search that never ran. (The key was
+> rejected by the live API; the other five were a local socket or a faked
+> fetch.) `brain_index` with `action: "status"` had the same fault from the
+> other side: it described a local file and made no request, so with the same
+> failures, and with a `brainId` that names no brain, it answered "built: no"
+> and "Call this tool with action=rebuild".
+
+The fan-out sends one request per phrasing, and what a failure means depends
+on whether another phrasing could have got past it.
+
+- **A failure about the call stops the search**: a `brainId` that is
+  malformed or names no brain, and a key TheBrain rejects. Every phrasing
+  would get the same answer, so the first is the search's, and it is explained
+  as any tool explains it (§5).
+- **Any other failure is taken for one phrasing's own, because some are.**
+  Measured on 15.0.640 (`docs/api-map.md`, L30): the search answers a 414 with
+  no body to a query that takes the request line past 8,192 bytes, which is
+  8,076 Latin letters or 1,346 Cyrillic ones, and the 403 that names no cause
+  to a query of 513 to 1,024 words, while a shorter phrasing to the same brain
+  is answered. A model that gives a pasted passage for a phrasing gets either.
+  Neither answer says a word about size, so the search resource makes
+  `query_too_long` of both, with the size in it. A connection that fails, a
+  timeout and a 5xx are not sorted ahead of time into "this request" and
+  "every request": one failure does not say what the next request would get.
+- **So the outcome decides.** With no phrasing answered there is no result,
+  empty or otherwise: `find()` throws `SearchFailedError`, and the tool
+  answers `isError` with "Nothing was searched, and this is no answer about
+  what the brain holds", then the reason, once when every phrasing failed
+  alike and per phrasing when they did not. With some answered, their hits
+  are the result, and a `Not searched` section names each phrasing left out
+  and why, so that "not found" is not read as certain. A fan-out that found
+  nothing now says so in words, and of how many phrasings: it used to print no
+  section at all, which is also all a search that had failed printed.
+- **Nothing to search for is refused**, in both modes: a query that is empty
+  with every variant empty sent no request and answered the same empty
+  result, and with an index was embedded as it came.
+
+**Vector mode asks TheBrain nothing**, so none of this reaches it. Measured
+with an index built: with a rejected key, with nothing listening and with a
+5xx, `brain_search` made no request and returned its hits. That is left as it
+is. The answer comes from the index, which is as old as its last sync
+whether the app runs or not; `brain_index` with `action: "status"` gives that
+time.
+
+**`brain_index` asks for the brain first**: one `GET /api/brains/{id}`, 0.3 ms
+at the median here, for every action and ahead of the index file. The other
+way was to keep status a look at the file and have it say that no brain was
+looked at. It was not taken: all that status can recommend is a rebuild, a
+rebuild needs TheBrain and the brain, and "not checked" would leave the model
+to find that out by calling it. What fails there fails the call, with the
+failure's own message. Status also reported a build that never finished as
+"built: yes, usable: yes" with no thought in it, because a rebuild writes its
+metadata before its first request: after a rebuild that failed on the missing
+embeddings package, for one. Built is now a build that finished, and usable
+is what `brain_search` asks of an index before it ranks by it.
+
+The index file is named by `brainId`, and it used to be opened, and so
+created, before any request could refuse the identifier: `status` for
+`my-brain` made `index-my-brain.sqlite`, and for `x/../../name` a file outside
+the data directory. `indexPath()` refuses what is not a UUID.
+
+**Not guarded.** A rebuild and a sync still skip a thought whose graph they
+cannot read, whatever the reason. With the log answered and every graph a 500
+they reported "Index built" and "Index refreshed" with nothing encoded, and
+the sync moved its watermark past the changes it had not read.
 
 ### Variants in vector mode
 

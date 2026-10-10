@@ -16,8 +16,25 @@ import { ThoughtKind, aliasesOf, type ModificationLogDto } from "../../api/types
 import { describeChange, isSettingNoise, subjectIds } from "../../operations/changes.js";
 import { traverse } from "../../operations/traverse.js";
 import { mapWithConcurrency } from "../../semantic/indexer.js";
+import {
+  SearchFailedError,
+  type PhrasingFailure,
+  type SearchOutcome,
+} from "../../semantic/search.js";
 import type { ServerContext } from "../context.js";
-import { bullet, guard, join, kindLabel, kindMark, ok, section, table } from "../respond.js";
+import {
+  bullet,
+  describeError,
+  fail,
+  guard,
+  join,
+  kindLabel,
+  kindMark,
+  ok,
+  section,
+  sentence,
+  table,
+} from "../respond.js";
 
 const brainId = z
   .string()
@@ -62,6 +79,77 @@ function childrenTitle(kind: number): string {
  * fallback.
  */
 const MAX_VARIANTS = 10;
+
+/** How much of a phrasing a result quotes: a passage given for one is not sent back whole. */
+const QUOTED_CHARS = 60;
+
+function quoted(phrasing: string): string {
+  if (phrasing.length <= QUOTED_CHARS) return JSON.stringify(phrasing);
+  const start = JSON.stringify(`${phrasing.slice(0, QUOTED_CHARS)}…`);
+  return `${start} (${phrasing.length} characters)`;
+}
+
+/** Why a phrasing got no answer, as any tool would explain that failure. */
+function reason(failure: PhrasingFailure): string {
+  return sentence(describeError(failure.error));
+}
+
+/** One line for each phrasing that got no answer: the phrasing, and why. */
+function failureLines(failures: readonly PhrasingFailure[]): string {
+  return bullet(failures.map((f) => `${quoted(f.phrasing)}: ${reason(f)}`));
+}
+
+/**
+ * What `brain_search` answers when no phrasing was answered. It is an error,
+ * and it says that nothing was searched: read as an empty result, a search
+ * that never ran tells the model the brain holds no such thought.
+ *
+ * One reason for all of them is given once. That is TheBrain not running, or
+ * failing: the failures that are not one phrasing's own.
+ */
+function nothingSearched(error: SearchFailedError): string {
+  const lead = "Nothing was searched, and this is no answer about what the brain holds";
+  const count = error.failures.length;
+  const reasons = new Set(error.failures.map(reason));
+  if (reasons.size > 1) {
+    return `${lead}. Each of the ${count} phrasings failed:\n${failureLines(error.failures)}`;
+  }
+  const [shared] = reasons;
+  const all = count > 1 ? ` Each of the ${count} phrasings failed this way.` : "";
+  return `${lead}: ${shared}${all}`;
+}
+
+/**
+ * The phrasings that were left out of a result, or null when none was.
+ * Without it "not found" reads as certain, and one phrasing more might have
+ * found the thought.
+ */
+function notSearchedSection(outcome: SearchOutcome): string | null {
+  const skipped = outcome.notSearched.length;
+  if (skipped === 0) return null;
+  const rest = outcome.phrasings - skipped;
+  return section(
+    "Not searched",
+    `${skipped} of ${outcome.phrasings} phrasings got no answer from TheBrain's search, ` +
+      `so this result is from the other ${rest === 1 ? "one" : rest} only:\n` +
+      failureLines(outcome.notSearched),
+  );
+}
+
+/**
+ * The body of the result's first section. With no hit the fallback says so
+ * in words, and of how many phrasings: it used to print no section at all,
+ * which is also all it printed when every request had failed.
+ */
+function foundBody(outcome: SearchOutcome, hits: string): string {
+  if (outcome.mode === "vector" || outcome.matches.length > 0) return hits;
+  const answered = outcome.phrasings - outcome.notSearched.length;
+  if (outcome.phrasings === 1) return "Nothing: TheBrain's search matched no thought.";
+  const which = answered === outcome.phrasings ? "" : " it answered";
+  return answered === 1
+    ? `Nothing: TheBrain's search matched no thought for the one phrasing${which}.`
+    : `Nothing: TheBrain's search matched no thought for any of the ${answered} phrasings${which}.`;
+}
 
 export function registerReadTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
@@ -193,11 +281,17 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       },
     },
     guard(async ({ brainId: bid, query, variants, limit, includeAuxiliary }) => {
-      const outcome = await ctx.search(bid).find(bid, query, {
-        ...(variants !== undefined ? { variants } : {}),
-        ...(limit !== undefined ? { limit } : {}),
-        ...(includeAuxiliary !== undefined ? { includeAuxiliary } : {}),
-      });
+      let outcome: SearchOutcome;
+      try {
+        outcome = await ctx.search(bid).find(bid, query, {
+          ...(variants !== undefined ? { variants } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+          ...(includeAuxiliary !== undefined ? { includeAuxiliary } : {}),
+        });
+      } catch (error) {
+        if (error instanceof SearchFailedError) return fail(nothingSearched(error));
+        throw error;
+      }
 
       // The column is there only when a hit is not an ordinary thought, and a
       // type or a tag is one only with includeAuxiliary: a result of ordinary
@@ -216,11 +310,15 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
         join([
           section(
             outcome.mode === "vector" ? "Found by meaning" : "Found by substring",
-            table(
-              ["Score", "Thought", "Identifier", ...(kindColumn ? ["Kind"] : []), "Matched"],
-              rows,
+            foundBody(
+              outcome,
+              table(
+                ["Score", "Thought", "Identifier", ...(kindColumn ? ["Kind"] : []), "Matched"],
+                rows,
+              ),
             ),
           ),
+          notSearchedSection(outcome),
           outcome.degradedReason === null
             ? null
             : section(
@@ -438,23 +536,39 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       },
     },
     guard(async ({ brainId: bid, action }) => {
+      // The brain first, whatever the action: one request, ahead of the index
+      // file. An index is a local file and can be described with no request
+      // at all, which is how a brainId that names no brain was told its index
+      // was not built and to rebuild it. What fails here fails the call: a
+      // rebuild or a sync needs TheBrain as much, and status says nothing of
+      // an index before the brain it would be the index of has answered.
+      const brain = await ctx.api.brains.get(bid);
       const indexer = ctx.indexer(bid);
 
       if (action === "status") {
         const s = indexer.status(bid);
+        // Built is a build that finished: one that failed leaves its metadata
+        // and no watermark, and read as built and usable with no thought in it.
+        const built = s.exists && s.syncedThrough !== null;
+        // What brain_search asks of an index before it ranks by it.
+        const usable = s.compatible && s.size > 0;
+        const unfinished = s.exists ? "no — a build was started and did not finish" : "no";
         return ok(
           join([
             section(
               "Index status",
               bullet([
-                `built: ${s.exists ? "yes" : "no"}`,
-                `usable: ${s.compatible ? "yes" : "no"}`,
+                `brain: ${brain.name ?? "(unnamed)"}`,
+                `built: ${built ? "yes" : unfinished}`,
+                `usable: ${usable ? "yes" : "no"}`,
                 `thoughts indexed: ${s.size}`,
                 `model: ${s.model ?? "—"}`,
                 `synced through: ${s.syncedThrough ?? "—"}`,
               ]),
             ),
-            s.compatible ? null : section("What to do", "Call this tool with action=rebuild."),
+            built && usable
+              ? null
+              : section("What to do", "Call this tool with action=rebuild."),
           ]),
         );
       }

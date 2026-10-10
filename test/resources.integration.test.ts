@@ -2247,6 +2247,132 @@ suite("resource layer against the live API", () => {
   });
 
   /**
+   * What the search answers for a query it will not take. Measured on TheBrain
+   * 15.0.640 (docs/api-map.md, L30); the spec has none of it. Neither of the
+   * two refusals for size says a word about size, and `brain_search` with no
+   * index took each for a phrasing that found nothing. Reads only.
+   */
+  describe("a query the search will not take", () => {
+    const CATCH_ALL =
+      "To use the TheBrain API, make requests to /api (e.g. /api/brains). " +
+      "An API key is required via the Authorization header.";
+    const answer = (request: Promise<unknown>): Promise<string> =>
+      request.then(
+        (value) => (Array.isArray(value) ? "answered" : "accepted"),
+        (e: unknown) =>
+          e instanceof TheBrainError ? `${e.status} ${e.kind}: ${e.message}` : String(e),
+      );
+    /** The request as the resource sends it, and its failure as the client reads it. */
+    const search = (queryText: string, from: TheBrainApi = api, brain = brainId): Promise<string> =>
+      answer(
+        from.client.get(`/api/search/${brain}`, {
+          query: { queryText, maxResults: 15, onlySearchThoughtNames: false },
+        }),
+      );
+    /** Bytes of the request line that are not the query: the same for any brain. */
+    const REST_OF_LINE =
+      `GET /api/search/${"0".repeat(36)}?queryText=` +
+      "&maxResults=15&onlySearchThoughtNames=false HTTP/1.1";
+    const words = (count: number, word = "ab"): string => Array(count).fill(word).join(" ");
+
+    it("a queryText that is absent, empty or white space is a 400 that calls the field required", async () => {
+      for (const queryText of [undefined, "", " ", "\t\n"]) {
+        const refused = await api.client
+          .get(`/api/search/${brainId}`, {
+            query: { queryText, maxResults: 15, onlySearchThoughtNames: false },
+          })
+          .then(
+            () => null,
+            (e: unknown) => e as TheBrainError,
+          );
+        expect(refused, JSON.stringify(queryText)).toMatchObject({
+          status: 400,
+          kind: "bad_request",
+          message: "One or more validation errors occurred.",
+        });
+        expect(refused!.body).toContain("The queryText field is required.");
+      }
+    });
+
+    it("odd characters are not refused: a query of them is answered like any other", async () => {
+      // So a phrasing does not fail for what it is written with, only for its size.
+      const odd = [
+        '"', '"unclosed', "'", "*", "?", "\\", "/", "%", "%%", "#", "&", "+", "-", "!", "~", "^",
+        "(", ")", "((", "[", "]", "{", "}", "<", ">", "<script>", ":", "a:b", "AND", "OR", "NOT",
+        "a AND", "AND a", "a OR (", "a~2", "a^2", "*a", "?a", "a*", "[a TO b]", "{a TO b}",
+        "a && b", "a || b", "\u0000", "a\u0000b", "\u200b", "\ud83d\ude00", "日本語", "привет",
+        "a\nb", "a\tb", "a\\", "%00", "../..", "SELECT * FROM x; --", "' OR 1=1 --", "\ufffd",
+      ];
+      for (const queryText of odd) {
+        expect(await search(queryText), JSON.stringify(queryText)).toBe("answered");
+      }
+    });
+
+    it("a request line past 8,192 bytes, its line ending counted, is a 414 with no body", async () => {
+      // 8,190 bytes of line and two of ending are taken; one more is not.
+      const room = 8190 - REST_OF_LINE.length;
+      expect(room).toBe(8075);
+      expect(await search("a".repeat(room))).toBe("answered");
+      expect(await search("a".repeat(room + 1))).toBe("414 bad_request: (empty response)");
+      // A letter outside ASCII is as many bytes as its UTF-8 has, each as %XX.
+      expect(await search("я".repeat(1345))).toBe("answered");
+      expect(await search("я".repeat(1346))).toBe("414 bad_request: (empty response)");
+      expect(await search("日".repeat(897))).toBe("answered");
+      expect(await search("日".repeat(898))).toBe("414 bad_request: (empty response)");
+    });
+
+    it("the 414 comes before the key and the brain are looked at, and the 403 after", async () => {
+      const long = "a".repeat(9000);
+      const wrongKey = new TheBrainApi({ apiKey: "not-the-key" });
+      expect(await search("zz", wrongKey)).toBe("401 auth: Invalid API Key");
+      expect(await search(long, wrongKey)).toBe("414 bad_request: (empty response)");
+      const noBrain = crypto.randomUUID();
+      expect(await search("zz", api, noBrain)).toBe(
+        `401 unknown_brain: Access to brain ${noBrain} is unauthorized.`,
+      );
+      expect(await search(long, api, noBrain)).toBe("414 bad_request: (empty response)");
+      // The 403 for a count of words does not: there the key and the brain come first.
+      expect(await search(words(513), wrongKey)).toBe("401 auth: Invalid API Key");
+      expect(await search(words(513), api, noBrain)).toBe(
+        `401 unknown_brain: Access to brain ${noBrain} is unauthorized.`,
+      );
+    });
+
+    it("513 to 1,024 words are the catch-all 403, and 512 and 1,025 are answered", async () => {
+      expect(await search(words(512))).toBe("answered");
+      expect(await search(words(513))).toBe(`403 forbidden: ${CATCH_ALL}`);
+      expect(await search(words(1024))).toBe(`403 forbidden: ${CATCH_ALL}`);
+      expect(await search(words(1025))).toBe("answered");
+      // Whatever the words are, and however they are parted.
+      const distinct = Array.from({ length: 513 }, (_, i) => `lorem${i}ipsum`);
+      expect(await search(distinct.join(" "))).toBe(`403 forbidden: ${CATCH_ALL}`);
+      expect(await search(distinct.join("  "))).toBe(`403 forbidden: ${CATCH_ALL}`);
+      expect(await search(Array(513).fill("ab").join("\n"))).toBe(`403 forbidden: ${CATCH_ALL}`);
+    }, 30_000);
+
+    it("a word of one character is not among the 512, and is among the 1,024", async () => {
+      expect(await search(words(600, "a"))).toBe("answered");
+      expect(await search(`${words(600)} ${words(300, "a")}`)).toBe(`403 forbidden: ${CATCH_ALL}`);
+      expect(await search(`${words(600)} ${words(500, "a")}`)).toBe("answered");
+      expect(await search(`${words(512)} ${words(600, "a")}`)).toBe("answered");
+    }, 30_000);
+
+    it("the resource tells both as a query too long, and answers a shorter one", async () => {
+      await expect(api.search.inBrain(brainId, "я".repeat(1346))).rejects.toMatchObject({
+        kind: "query_too_long",
+        status: 414,
+        message: expect.stringContaining("1346 characters, 8076 bytes as the URL carries them"),
+      });
+      await expect(api.search.inBrain(brainId, words(513))).rejects.toMatchObject({
+        kind: "query_too_long",
+        status: 403,
+        message: expect.stringContaining("the search text is 513 words"),
+      });
+      expect(Array.isArray(await api.search.inBrain(brainId, "zz"))).toBe(true);
+    });
+  });
+
+  /**
    * A type is a link, and one pair of thoughts has one link. Measured on
    * TheBrain 15.0.640; the spec has none of it. `brain_link` and ingest ask
    * `links.between()` first and leave a link they find as it is.
