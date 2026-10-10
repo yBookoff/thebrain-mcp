@@ -3346,6 +3346,14 @@ describe("a call that fails after it has written", () => {
       headers: { "content-type": "application/json; charset=utf-8" },
     });
   const boom = said(500, "boom");
+  /** What that 500 reads as, for the request that got it. */
+  const failed500 = (request: string): string =>
+    `TheBrain failed with a 500 (${request}): boom. The fault is inside the app, not in the ` +
+    "arguments of this call. A read is safe to repeat; before repeating a write, check what it left.";
+  /** What a request that got no answer reads as. */
+  const NO_ANSWER =
+    "request exceeded 30000 ms. Check that the TheBrain desktop app is running and its " +
+    "local API is enabled.";
   /** What the API answers for the read of a thought nobody has. */
   const bareNotFound = (): Response =>
     new Response(JSON.stringify({ title: "Not Found", status: 404 }), {
@@ -3412,7 +3420,7 @@ describe("a call that fails after it has written", () => {
       `Fix the cause and write only the rest to ${THOUGHT}: `;
 
     it("a note that fails leaves the identifier of the thought it made, and what to finish with", async () => {
-      // The result used to be the error alone, "boom (POST …)": the thought
+      // The result used to be the 500's error alone: the thought
       // was there, and the call sent again made a second.
       const { call, calls } = await connect(routes([["POST /api/notes/", boom]]));
       const result = await call("brain_create_thought", {
@@ -3430,7 +3438,7 @@ describe("a call that fails after it has written", () => {
           `- created thought "RAG" — ${THOUGHT}`,
           "",
           "## Failed",
-          `- note: boom (POST /api/notes/${BRAIN}/${THOUGHT}/update)`,
+          `- note: ${failed500(`POST /api/notes/${BRAIN}/${THOUGHT}/update`)}`,
           "",
           "## Skipped",
           `- tag ${TAG}`,
@@ -3508,7 +3516,7 @@ describe("a call that fails after it has written", () => {
           "- note written",
           "",
           "## Failed",
-          `- tag ${TAG}: boom (POST /api/links/${BRAIN})`,
+          `- tag ${TAG}: ${failed500(`POST /api/links/${BRAIN}`)}`,
           "",
           "## Warning",
           "- this note contains a fenced code block — TheBrain drops the closing ``` on save " +
@@ -3527,9 +3535,8 @@ describe("a call that fails after it has written", () => {
 
       expect(result.isError).toBe(true);
       expect(result.text).toContain(
-        "## Failed\n- note: request exceeded 30000 ms Check that the TheBrain desktop app is " +
-          "running and its local API is enabled. — no answer came, so TheBrain may have carried " +
-          "it out all the same\n",
+        `## Failed\n- note: ${NO_ANSWER} — no answer came, so TheBrain may have carried it out ` +
+          "all the same\n",
       );
       expect(result.text).toContain(
         `## Next\n${IN_PART}. ${EXISTS}the note with brain_set_note.`,
@@ -3537,9 +3544,7 @@ describe("a call that fails after it has written", () => {
     });
 
     it("a read that got no answer is not a write that may have gone through", async () => {
-      const lost =
-        "request exceeded 30000 ms Check that the TheBrain desktop app is running and its " +
-        "local API is enabled.";
+      const lost = NO_ANSWER;
       // Ahead of the create, the read of the parent: nothing was sent to make a thought.
       const before = await connect(routes([[`GET /api/thoughts/${BRAIN}/${PARENT}`, noAnswer]]));
       const refused = await before.call("brain_create_thought", {
@@ -3576,8 +3581,7 @@ describe("a call that fails after it has written", () => {
       // It used to be the network's message alone, and the thought was there
       // with no word that it might be.
       const lost =
-        "request exceeded 30000 ms Check that the TheBrain desktop app is running and its " +
-        'local API is enabled.\n\n## Next\nNo answer came to the create, so TheBrain may have made "RAG" ' +
+        `${NO_ANSWER}\n\n## Next\nNo answer came to the create, so TheBrain may have made "RAG" ` +
         "all the same, and there is no identifier to give for it. Before creating it again, look for it ";
 
       const under = await connect(routes([["POST /api/thoughts/", noAnswer]]));
@@ -3762,9 +3766,8 @@ describe("a call that fails after it has written", () => {
       expect(result.isError).toBe(true);
       expect(result.text).toContain('## Done\n- name = "renamed"\n');
       expect(result.text).toContain(
-        '- label = "caption": request exceeded 30000 ms Check that the TheBrain desktop app is ' +
-          "running and its local API is enabled. — no answer came, so TheBrain may have carried " +
-          "it out all the same\n",
+        `- label = "caption": ${NO_ANSWER} — no answer came, so TheBrain may have carried it ` +
+          "out all the same\n",
       );
       expect(result.text).toContain(`## Next\n${IN_PART}. ${REST}`);
     });
@@ -3783,7 +3786,7 @@ describe("a call that fails after it has written", () => {
       expect(result.text).toBe(
         [
           "## Failed",
-          `- name = "renamed": boom (PATCH /api/thoughts/${BRAIN}/${THOUGHT})`,
+          `- name = "renamed": ${failed500(`PATCH /api/thoughts/${BRAIN}/${THOUGHT}`)}`,
           "",
           "## Skipped",
           '- label = "caption"',
@@ -3804,7 +3807,7 @@ describe("a call that fails after it has written", () => {
         name: "renamed",
       });
       expect(result.isError).toBe(true);
-      expect(result.text).toBe(`boom (PATCH /api/thoughts/${BRAIN}/${THOUGHT})`);
+      expect(result.text).toBe(failed500(`PATCH /api/thoughts/${BRAIN}/${THOUGHT}`));
     });
 
     it("a refusal ahead of the first write still says that nothing was written, and lists the rest", async () => {
@@ -4039,7 +4042,7 @@ describe("a call that fails after it has written", () => {
           `- attached ${TAG}`,
           "",
           "## Failed",
-          `- attach ${TAG_B}: boom (POST /api/links/${BRAIN})`,
+          `- attach ${TAG_B}: ${failed500(`POST /api/links/${BRAIN}`)}`,
           "",
           "## Skipped",
           `- attach ${TAG_C}`,
@@ -4089,7 +4092,7 @@ describe("a call that fails after it has written", () => {
       expect(result.text).toBe(
         [
           "## Failed",
-          `- attach ${TAG}: boom (POST /api/links/${BRAIN})`,
+          `- attach ${TAG}: ${failed500(`POST /api/links/${BRAIN}`)}`,
           "",
           "## Skipped",
           `- attach ${TAG_B}`,
@@ -4104,7 +4107,7 @@ describe("a call that fails after it has written", () => {
       const alone = await connect(routes([["POST /api/links/", boom]]));
       const one = await alone.call("brain_tag", { brainId: BRAIN, thoughtId: THOUGHT, add: [TAG] });
       expect(one.isError).toBe(true);
-      expect(one.text).toBe(`boom (POST /api/links/${BRAIN})`);
+      expect(one.text).toBe(failed500(`POST /api/links/${BRAIN}`));
     });
 
     it("a tag taken off a thought nobody has is an error, not a tag that was not on it", async () => {

@@ -251,6 +251,9 @@ describe("error explanations point at the next step", () => {
       }),
       new TheBrainError("forbidden", ROUTER_403, { method: "GET", path: "/api/t" }),
       new TheBrainError("server", "boom", { method: "POST", path: "/api/t" }),
+      // A 5xx, whose line says to check what a write left: as true of a step.
+      new TheBrainError("server", "boom", { status: 500, method: "POST", path: "/api/t" }),
+      new TheBrainError("query_too_long", "the query is too long"),
       new Error("something went wrong"),
     ]) {
       expect(describeError(error, false)).toBe(describeError(error));

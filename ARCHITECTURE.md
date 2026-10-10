@@ -466,10 +466,11 @@ between the check and its turn, a colour that is not `#rrggbb`, aliases past
 the limit of a hundred. Elsewhere it was put in on the way to the live API: a
 500, and an answer dropped on its way back.
 
-- `brain_create_thought` answered `boom (POST …/update)` for a thought that
-  existed, and the same call sent again made a second one. With a tag deleted
-  in between it answered "tagId … is not a tag … Nothing was written", over a
-  thought with its note and one tag.
+- `brain_create_thought` answered the note's 500 alone, `boom (POST
+  …/update)` as a 5xx read then, for a thought that existed, and the same
+  call sent again made a second one. With a tag deleted in between it
+  answered "tagId … is not a tag … Nothing was written", over a thought with
+  its note and one tag.
 - With the answer to its create dropped it answered that the request had
   exceeded 30000 ms and to check that the desktop app is running, and the
   thought was there.
@@ -494,8 +495,10 @@ read of the call.
 **"Failed" is hedged, and a step is listed there only when its write was.**
 A step can fail after its write went through. A write that got no answer may
 have been carried out, and its line says so. A type can be accepted and not
-read back in time, and its error says that. So "Next" says that what is under
-"Failed" was not done *unless its line says otherwise*. And the read that
+read back in time, and its error says that. A 5xx says nothing of what it
+wrote, and its line, in `describeError()`'s words, says to check what the
+write left. So "Next" says that what is under "Failed" was not done *unless
+its line says otherwise*. And the read that
 waits for a write no longer fails the write: a read-back that threw used to
 pass its error on as the step's, and aliases that were in the brain stood
 under "Failed". A failed read has not shown the write, and no more: the wait
