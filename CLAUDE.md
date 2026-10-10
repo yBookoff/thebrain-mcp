@@ -59,7 +59,10 @@ silent wrong behaviour rather than a loud failure:
   requests that fail for reasons of their own, so only the read's 404 is taken
   for "no such thought" (`requireType`, `requireTag`, `requireParent`).
   `describeError()` keeps the API's words where they carry the identifier, and
-  a message about one identifier never names another.
+  a message about one identifier never names another. The lookup of a link is
+  the same 404 for a thought nobody has as for two thoughts with no link, so
+  `brain_tag` reads the thought before it answers that a tag "was not on the
+  thought".
 - **`/types` and `/tags` return 400 when empty.** Wrap in `emptyOn400()`.
 - **`notes/append` on a thought with no note is a silent no-op.** Read first.
 - **A note is an attachment.** `graph.attachments` flags it with `isNotes`; its
@@ -86,7 +89,11 @@ silent wrong behaviour rather than a loud failure:
 - **Aliases only replace as a whole list, and a read straight after the write
   usually returns the old one.** Add and remove through
   `thoughts.changeAliases()`, which waits for the write to read back: two
-  read-modify-writes in a row left only the second alias. Saving a brain's first
+  read-modify-writes in a row left only the second alias. A read straight after
+  a rename returns the old name too, and an alias equal to the name is dropped:
+  a rename that kept the old name as an alias lost it. `changeAliases()` takes
+  the name its caller has just written (`known.name`); pass it whenever a rename
+  goes before an alias edit. Saving a brain's first
   alias raises the TheBrain version that brain requires, so `ALIAS_COST` stays
   on every tool argument that can write one.
 - **`null` clears nothing through `replace`.** On a label it is a 403, on a
@@ -96,6 +103,11 @@ silent wrong behaviour rather than a loud failure:
   link's name it is a 200 that leaves the name, on its colour a 400;
   `links.update()` sends `remove` for both. A link's thickness reads back a
   hundred times what was written, and nothing clears it.
+- **A refused patch does not say how far it got.** The API applies a patch an
+  operation at a time and keeps what it wrote before the one it refuses. So
+  `brain_update_thought` sends a field to a request, the type first, and lists
+  each as written, failed or not tried. `thoughts.update()` given several
+  fields is still one patch.
 - **`typeId` takes any thought, with a 200.** A tag gets attached, an ordinary
   thought becomes a parent, and the type stays as it was. `thoughts.update()`
   and `create()` read the kind first and throw `not_a_type`; keep new writes
@@ -157,6 +169,20 @@ silent wrong behaviour rather than a loud failure:
   `isError` result that asks for the rest alone. A `tempId` is resolved as a
   `tempId` only: one that reads as a UUID is not an identifier. A create that
   timed out may have landed (`mayHaveLanded()`): say so, never call it failed.
+  Two plan items for one thought are one create: when it fails the other
+  stands under `skipped`. A plan that names nothing in the brain reads the
+  brain before its first write, so a `brainId` that is no brain fails it once.
+- **A tool that writes more than once says what it wrote when a later write
+  fails.** A write after the first is a step of `inOrder()` in
+  `src/server/tools/write.ts`, never a bare `await`: thrown to `guard()`, its
+  error was the whole result, and `brain_create_thought` lost the identifier
+  of the thought it had made. The call stops at its first failure, and
+  `writtenInPart()` makes an `isError` result with `brain_ingest`'s sections:
+  "Done" by identifier, "Failed", "Skipped", "Next". Once something is under
+  "Done" a step's reason is `describeError(error, false)`, so a refusal's
+  "Nothing was written" is not read of the whole call. A write that got no
+  answer may have landed (`mayHaveLanded()`, false for a `GET`), and its line
+  says so.
 - **A plan thought is looked for where its relation puts it, in a graph that
   lags.** A graph lists a thought created as a child under `children`, as a
   parent under `parents`, as a jump under `jumps`; `ingest()` looked among
@@ -175,7 +201,14 @@ silent wrong behaviour rather than a loud failure:
   for an ordinary thought. A new read tool that names a thought prints its
   mark. It costs no request: every thought the API returns carries `kind`, in
   a graph's lists and in a search hit. In vector mode the kind is the index's
-  own, and the index does not follow a thought that changes kind.
+  own, and the index does not follow a thought that changes kind. A write
+  result marks a thought where the kind is already in what the tool read; the
+  ends of a link are not marked.
+- **The search refuses a long query without a word about length.** Past 8,192
+  bytes of request line it is a 414 with no body, which 1,346 Cyrillic letters
+  reach, and for 513 to 1,024 words it is the catch-all 403.
+  `search.inBrain()` makes `query_too_long` of both; a shorter query to the
+  same brain is answered.
 - **Search is prefix-based.** This is why `src/semantic/` exists.
 
 ## Semantic layer
@@ -185,7 +218,7 @@ plus a 113 MB model. Without it, search degrades to a lexical fan-out over
 agent-supplied variants and reports why. Do not make it required, and do not let
 its absence throw.
 
-Two constraints to respect in any new code:
+Constraints to respect in any new code:
 
 - **Top-k only, never absolute similarity thresholds.** e5 scores sit in
   0.74–0.92, and correct-versus-wrong can differ by 0.001.
@@ -195,6 +228,15 @@ Two constraints to respect in any new code:
   folded into the stored model id, so old indexes rebuild instead of ranking
   against vectors built to different rules. The content hash cannot catch this:
   it only sees the document you already know how to build.
+- **A request that fails is not an empty answer.** The fan-out passes on
+  `invalid_uuid`, `unknown_brain` and `auth`, throws `SearchFailedError` when
+  no phrasing was answered, and returns the phrasings it left out in
+  `notSearched`, which `brain_search` prints. Never end a request with
+  `.catch(() => [])` where the model will read the emptiness as "nothing there".
+- **An index is a local file, and `ctx.store(brainId)` creates it before any
+  request.** `brain_index` asks `brains.get()` first, for every action;
+  `indexPath()` refuses a `brainId` that is no UUID. Vector search makes no
+  request at all, so it answers with TheBrain closed.
 
 ## Tests
 
