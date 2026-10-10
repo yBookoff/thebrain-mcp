@@ -88,6 +88,12 @@ silent wrong behaviour rather than a loud failure:
   thought becomes a parent, and the type stays as it was. `thoughts.update()`
   and `create()` read the kind first and throw `not_a_type`; keep new writes
   behind `requireType()`. A parent link towards a type sets the type as well.
+- **A type is never a parent.** A parent/child link with a type above, and a
+  thought created under one, is a 200 that sets the lower thought's type and
+  replaces the one it had. `links.create()` and `thoughts.create()` read the
+  upper end first and throw `not_a_parent`; a tool calls
+  `links.requireParent()` before its first write. A jump to a type is an
+  ordinary link. A tag above is still let through, and tags the thought.
 - **Markdown round-trip eats the closing ` ``` `.** Warn; suggest indented code.
 - **`by-location` compares the host by case, and a URL is stored as given.**
   `Example.com/p` does not find `example.com/p`. Attach through
