@@ -82,7 +82,9 @@ export class BrainsResource {
    *   move the boundary, so the page grows until it can.
    *
    * Paging backwards is also safe against writes made meanwhile: they land
-   * above the boundary.
+   * above the boundary. A changed note can move an entry, its `803` filed
+   * again under the new time, but only while nothing has been logged after
+   * it, so never one from a page still to be read.
    */
   async *modificationPages(
     brainId: string,

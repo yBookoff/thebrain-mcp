@@ -63,6 +63,13 @@ silent wrong behaviour rather than a loud failure:
   microsecond apart, or milliseconds for a changed note. A bound taken from
   `creationDateTime` leaves its own entry out. Take an entry's time from
   `logTime()`.
+- **The log is not append-only: a run of note changes is one `803`.** While
+  that entry is the newest TheBrain has logged, the next change to the note
+  files it again under the new time. Any other entry in between ends the run,
+  one in another brain included: a parallel session or the user at work in
+  TheBrain changes what a measurement here sees. Only the newest entry moves,
+  so paging back and reading from a watermark both hold. Never count edits by
+  entries, or expect an entry to stay where it was read.
 - **A thought's type also appears in `parents`.** Filter it in traversal.
 - **Aliases only replace as a whole list, and a read straight after the write
   usually returns the old one.** Add and remove through

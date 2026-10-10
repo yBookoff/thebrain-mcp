@@ -322,6 +322,10 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     becomes one more parent, and the last two leave the type as it was. So
     `update()` and `create()` read the kind before they write, and `update()`
     waits for the type to read back. A parent link towards a type sets it too.
+16. **The log is not append-only.** A run of changes to a note is one `803`:
+    while that entry is the newest TheBrain has logged, in any brain, the next
+    change files it again under the new time. Only the newest entry ever moves
+    — see *Reading the whole log* below.
 
 ### Write visibility
 
@@ -472,6 +476,7 @@ measured on a live TheBrain 15, each point with a contract test:
 | What zone are the timestamps in? | UTC, with no offset, microsecond precision and trailing zeros trimmed: `2026-09-30T13:48:59.61898` |
 | Does the API read an offsetless bound the same way? | Yes, as UTC. An explicit offset is honoured |
 | Can two entries share a timestamp? | Yes, under concurrent writes: 100 creates at once shared 2–5. A single request that logs several entries stamps each one apart |
+| Does an entry stay where it was filed? | Not a note's `803` while it is the newest entry TheBrain has logged, in any brain: the next change to that note files it again under the new time, both timestamps, and leaves nothing at the old one. An entry with another above it never moves, nor one that an entry in another brain has followed |
 
 Each page asks for everything up to the oldest `modificationDateTime` of the
 one before; `logTime()` is the one place that names the field. The entries at
@@ -481,6 +486,21 @@ microseconds and fall just before the boundary entry, and the entry with it. A
 page filled by one timestamp cannot move the boundary, so the page doubles
 until it can. Writes made meanwhile land above the boundary and do not disturb
 it.
+
+One kind of write also takes an entry away. A changed note does not always add
+an `803`: while the note's `803` is the newest entry TheBrain has logged, the
+change files that entry again under the new time, so sixty appends in a row
+leave one entry, stamped at the last. Any other entry ends such a run, about
+that thought or any other, and in any brain: the app keeps one "newest entry"
+for all of them, so a write to another brain ends a run in this one. The `803`
+a run leaves behind stays where it is for good. That is what keeps both readers
+right. Only the newest entry ever moves, and a
+reader paging back has it from its first page: the pages still to come do not
+change under it. It holds the entry under the old time, and the entry in the
+log carries the time of the latest change, which is after any watermark set
+before that change, so the next sync reads it again. What the log cannot tell
+is how many times a note was changed: `brain_recent_changes` shows one "note
+changed" row for a run, dated by its last change.
 
 The first version paged on `creationDateTime`, the same string 49 times in 50.
 The fiftieth time the boundary fell short: a range that ends at an entry's

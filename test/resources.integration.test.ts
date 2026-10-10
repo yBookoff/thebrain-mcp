@@ -314,6 +314,249 @@ suite("resource layer against the live API", () => {
     expect(subjectIds(event!)).toEqual([id]);
   }, 30_000);
 
+  describe("a run of note changes in the log", () => {
+    // Measured on TheBrain 15.0.640: the log is not append-only. While a
+    // note's 803 is the newest entry TheBrain has logged, the next change to
+    // the note takes that entry out and files it again under the new time.
+    // "Newest" counts every brain the app holds: an entry logged in another
+    // brain ends the run as surely as one in this brain. So a run here can be
+    // cut short by someone working in TheBrain meanwhile, and each test that
+    // needs a whole run tries again when another brain got in the way.
+    const ATTEMPTS = 8;
+
+    const changesIn = (entries: ModificationLogDto[]): ModificationLogDto[] =>
+      entries.filter((l) => l.modType === ModType.NoteChanged);
+
+    /** The note entries about one thought since `since`, oldest first. */
+    const noteLog = async (id: string, since: string): Promise<ModificationLogDto[]> =>
+      (await api.brains.modifications(brainId, { maxLogs: 1000, since }))
+        .filter((l) => isNoteMod(l.modType) && l.extraAId === id)
+        .reverse();
+
+    /** Writes, then returns the note entries once the newest 803 is later than `than`. */
+    const afterChange = async (
+      id: string,
+      since: string,
+      write: () => Promise<void>,
+      than?: ModificationLogDto,
+    ): Promise<ModificationLogDto[]> => {
+      await write();
+      return eventually(
+        () => noteLog(id, since),
+        (entries) => {
+          const last = changesIn(entries).at(-1);
+          if (last === undefined) return false;
+          return than === undefined || compareLogTime(logTime(last), logTime(than)) > 0;
+        },
+      );
+    };
+
+    /** A thought whose note has been written once: an 801 and no 803 yet. */
+    const withNote = async (name: string, since: string): Promise<string> => {
+      const id = await make(name);
+      await api.notes.set(brainId, id, "one");
+      const first = await eventually(
+        () => noteLog(id, since),
+        (entries) => entries.length > 0,
+      );
+      expect(first.map((l) => l.modType)).toEqual([ModType.NoteCreated]);
+      return id;
+    };
+
+    /** Whether any other brain logged an entry between two entries of this one. */
+    const loggedElsewhere = async (
+      after: ModificationLogDto,
+      before: ModificationLogDto,
+    ): Promise<boolean> => {
+      for (const brain of await api.brains.list()) {
+        if (brain.id === brainId) continue;
+        const range = await api.brains.modifications(brain.id, {
+          maxLogs: 10,
+          since: logTime(after),
+          until: logTime(before),
+        });
+        const inside = (l: ModificationLogDto): boolean =>
+          compareLogTime(logTime(l), logTime(after)) > 0 &&
+          compareLogTime(logTime(l), logTime(before)) < 0;
+        if (range.some(inside)) return true;
+      }
+      return false;
+    };
+
+    it("changes with nothing logged between them share one 803, filed again under the time of the last", async () => {
+      // Measured: 8 appends 150 ms, 1 s and 3 s apart, 60 appends, 60 whole
+      // replacements, and changes 5 s, 15 s and 61 s apart each left a single
+      // 803. Reads in between do not end a run, of this note or of anything
+      // else: 48 of 48. `append` here reads the note before each write.
+      const since = new Date().toISOString();
+      const id = await withNote("note-run", since);
+      const [created] = await noteLog(id, since);
+
+      let text = "two";
+      const second = await afterChange(id, since, () => api.notes.set(brainId, id, text));
+      expect(second.map((l) => l.modType)).toEqual([ModType.NoteCreated, ModType.NoteChanged]);
+      let changes = changesIn(second);
+
+      const append = async (more: string): Promise<void> => {
+        await api.notes.append(brainId, id, more);
+        text += `\n\n${more}`;
+      };
+      const writes: Array<[string, (attempt: number) => Promise<void>]> = [
+        ["an append", (n) => append(`more ${n}`)],
+        [
+          // A write that logs nothing does not end the run.
+          "an append after a rename to the name the thought already has",
+          async (n) => {
+            await api.thoughts.update(brainId, id, { name: `${PREFIX}note-run` });
+            await append(`again ${n}`);
+          },
+        ],
+        // The entry moves even when the note does not change.
+        ["the note written again with the text it has", () => api.notes.set(brainId, id, text)],
+      ];
+      for (const [what, write] of writes) {
+        let gathered = false;
+        for (let attempt = 0; attempt < ATTEMPTS && !gathered; attempt++) {
+          const previous = changes.at(-1)!;
+          const entries = await afterChange(id, since, () => write(attempt), previous);
+          expect(entries[0], what).toEqual(created); // the 801 stays where it was
+          const now = changesIn(entries);
+          const moved = now.at(-1)!;
+          if (now.length > changes.length) {
+            // A new entry: then something was logged in between, and nothing
+            // in this brain was. The entry left behind stays as it was.
+            expect(await loggedElsewhere(previous, moved), what).toBe(true);
+            expect(now.slice(0, -1), what).toEqual(changes);
+          } else {
+            gathered = true;
+            expect(now.slice(0, -1), what).toEqual(changes.slice(0, -1));
+            // Both timestamps moved: the entry was filed again, not given a
+            // later modification time on top of its old creation time.
+            expect(compareLogTime(moved.creationDateTime, logTime(previous)), what).toBeGreaterThan(0);
+            // And nothing is left in its old place.
+            const oldPlace = await api.brains.modifications(brainId, {
+              maxLogs: 100,
+              since: logTime(previous),
+              until: logTime(previous),
+            });
+            expect(oldPlace.filter((l) => l.extraAId === id), what).toEqual([]);
+          }
+          changes = now;
+        }
+        expect(gathered, `${what}: another brain logged between every two changes`).toBe(true);
+      }
+
+      const stored = await eventually(
+        () => api.notes.get(brainId, id),
+        (t) => t === text,
+      );
+      expect(stored).toBe(text); // no write was lost on the way
+    }, 60_000);
+
+    it("any entry logged in between ends the run, and an 803 with an entry above it never moves", async () => {
+      // The log reader pages backwards and relies on the second half: the
+      // pages it has yet to read do not change under it. The rule is not per
+      // note: two notes changed in turn log every change.
+      const since = new Date().toISOString();
+      const id = await withNote("note-run-ended", since);
+      const otherNote = await withNote("note-run-other-note", since);
+      const bare = await make("note-run-bare");
+      const run = await afterChange(id, since, () => api.notes.set(brainId, id, "two"));
+      const stays: ModificationLogDto[] = [changesIn(run)[0]!];
+
+      const interruptions: Array<[string, () => Promise<unknown>]> = [
+        [
+          "the same thought renamed",
+          () => api.thoughts.update(brainId, id, { name: `${PREFIX}note-run-ended-2` }),
+        ],
+        ["a label on the same thought", () => api.thoughts.update(brainId, id, { label: "x" })],
+        ["another thought created", () => make("note-run-other")],
+        [
+          "another thought renamed",
+          () => api.thoughts.update(brainId, bare, { name: `${PREFIX}note-run-bare-2` }),
+        ],
+        ["another note written for the first time", () => api.notes.set(brainId, bare, "one")],
+        ["another note changed", () => api.notes.set(brainId, otherNote, "two")],
+        ["another thought pinned", () => api.thoughts.pin(brainId, bare)],
+      ];
+      for (const [what, interrupt] of interruptions) {
+        await interrupt();
+        // The premise: the interruption is in the log, above the note's 803.
+        const [top] = await api.brains.modifications(brainId, { maxLogs: 1 });
+        expect(logEntryKey(top!), what).not.toBe(logEntryKey(stays.at(-1)!));
+        const entries = changesIn(
+          await afterChange(id, since, () => api.notes.append(brainId, id, what), stays.at(-1)),
+        );
+        // The earlier entries are where they were, as they were, plus one.
+        expect(entries.slice(0, -1), what).toEqual(stays);
+        expect(entries, what).toHaveLength(stays.length + 1);
+        stays.push(entries.at(-1)!);
+      }
+      await api.thoughts.unpin(brainId, bare);
+    }, 30_000);
+
+    it("sync reads a note changed again after the entry it had already passed", async () => {
+      // What keeps the index right: the entry a sync read is gone from its
+      // place, but it comes back under the time of the latest change, which is
+      // after any watermark set before that change.
+      const since = new Date().toISOString();
+      const id = await withNote("note-run-sync", since);
+
+      const documents: string[] = [];
+      const embedder: Embedder = {
+        id: "contract@v1",
+        dimensions: 1,
+        embedDocuments: async (texts) => {
+          documents.push(...texts);
+          return texts.map(() => new Float32Array([1]));
+        },
+        embedQuery: async () => new Float32Array([1]),
+      };
+      const store = new VectorStore(":memory:");
+      const indexer = new SemanticIndexer(api, store, embedder);
+      await indexer.rebuild(brainId);
+
+      let changes = changesIn(
+        await afterChange(id, since, () => api.notes.set(brainId, id, "two")),
+      );
+      let moved = false;
+      for (let attempt = 0; attempt < ATTEMPTS && !moved; attempt++) {
+        const passed = changes.at(-1)!;
+        // As a sync leaves it that has read the log up to and including the entry.
+        const watermark = shiftMicros(logTime(passed), 1);
+        store.setSyncedThrough(watermark);
+        const sinceWatermark = async (): Promise<ModificationLogDto[]> =>
+          (await api.brains.modifications(brainId, { maxLogs: 1000, since: watermark })).filter(
+            (l) => logThoughtId(l) === id,
+          );
+        expect(await sinceWatermark()).toEqual([]);
+
+        const word = `word${attempt}`;
+        await api.notes.append(brainId, id, word);
+        const after = await eventually(sinceWatermark, (entries) => entries.length > 0);
+        expect(after.map((l) => l.modType)).toEqual([ModType.NoteChanged]);
+        const now = changesIn(await noteLog(id, since));
+        // The case this test is for: the same entry, moved past the watermark.
+        // A new one means another brain logged in between; then try again.
+        moved = now.length === changes.length;
+        if (!moved) expect(await loggedElsewhere(passed, now.at(-1)!)).toBe(true);
+        changes = now;
+        await eventually(
+          () => api.notes.get(brainId, id),
+          (t) => t.includes(word),
+        );
+
+        const from = documents.length;
+        await indexer.sync(brainId);
+        const embedded = documents.slice(from);
+        expect(embedded).toHaveLength(1);
+        expect(embedded[0]).toContain(word);
+      }
+      expect(moved, "another brain logged between every two changes").toBe(true);
+      store.close();
+    }, 60_000);
+  });
+
   it("a link event names both ends in extraA and extraB, and the link in sourceId", async () => {
     // brain_recent_changes names both thoughts of a link event from here.
     const a = await make("log-link-A");
