@@ -292,11 +292,16 @@ function isConnectionRefused(error: unknown): boolean {
  * It matters for a create: the thought can be there with no identifier to
  * name it by. Measured by dropping the answer to a create on its way back:
  * the thought was there 3 times of 3.
+ *
+ * A read that got no answer is not one: carried out or not, it wrote
+ * nothing. A write is preceded by reads, of a type, a tag or a parent, and
+ * one of those timing out used to pass for a thought that may be there.
  */
 export function mayHaveLanded(error: unknown): boolean {
   return (
     error instanceof TheBrainError &&
     error.kind === "network" &&
+    error.method !== "GET" &&
     !isConnectionRefused(error.cause)
   );
 }

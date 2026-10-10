@@ -344,6 +344,12 @@ describe("finding TheBrain", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     // And the caller can tell: the thought may be there with no identifier.
     expect(mayHaveLanded(await create.catch((e: unknown) => e))).toBe(true);
+    // Not so a read: with no answer or with one, it wrote nothing. A create
+    // reads its parent and its type first, and one of those reads timing out
+    // used to be told as a thought that may have been made.
+    const read = await client.get(`/api/thoughts/${BRAIN}/${BRAIN}`).catch((e: unknown) => e);
+    expect(read).toMatchObject({ kind: "network" });
+    expect(mayHaveLanded(read)).toBe(false);
   });
 
   it("a request that went nowhere, or was answered, is not one that may have landed", async () => {

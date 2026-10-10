@@ -25,6 +25,12 @@
  *  5. A graph that has been read is answered from a copy, which is up to 0.2 s
  *     behind a create. So the batch returns once the graphs list what it made:
  *     a second run sent straight after it used to make the children again too.
+ *  6. Two plan items for one thought are one create. When it fails the other
+ *     item is not sent on its own, and is listed as skipped, not as failed:
+ *     it would be the same request again, under another label.
+ *  7. A brain that is not there fails the plan once, ahead of its writes. A
+ *     plan that names nothing in the brain used to read nothing first, and
+ *     each of its creates was refused in turn.
  */
 
 import {
@@ -38,7 +44,7 @@ import {
   type CleanGraph,
   type TheBrainApi,
 } from "../api/index.js";
-import { Relation, type LinkDto } from "../api/types.js";
+import { Relation, ThoughtKind, type LinkDto } from "../api/types.js";
 import { mapWithConcurrency } from "../semantic/indexer.js";
 
 export type RelationName = "child" | "parent" | "jump";
@@ -57,8 +63,12 @@ const LIST_OF = {
 } as const satisfies Record<RelationName, keyof CleanGraph>;
 const RELATION_NAMES = Object.keys(LIST_OF) as RelationName[];
 
-/** What a thought has next to it: for each relation, identifiers by trimmed name. */
-type Neighbours = Record<RelationName, Map<string, string>>;
+/**
+ * What a thought has next to it: for each relation, the thought of each
+ * trimmed name, with its kind as the graph gave it. A plan makes ordinary
+ * thoughts, and the one it finds there may be a type or a tag.
+ */
+type Neighbours = Record<RelationName, Map<string, { id: string; kind?: number }>>;
 
 /**
  * How long a batch waits for the graphs to list what it made. Measured on a
@@ -107,7 +117,12 @@ export interface IngestPlan {
 
 export interface IngestOutcome {
   created: Array<{ tempId: string; thoughtId: string; name: string }>;
-  reused: Array<{ tempId: string; thoughtId: string; name: string }>;
+  /**
+   * `kind` is what the thought that was there is, as its neighbour's graph
+   * gave it: it can be a type or a tag that the parent holds as an ordinary
+   * child. Absent for one this batch made a moment before.
+   */
+  reused: Array<{ tempId: string; thoughtId: string; name: string; kind?: number }>;
   linksCreated: number;
   /**
    * Links of the plan between two thoughts that a link joined already.
@@ -125,6 +140,8 @@ export interface IngestOutcome {
    */
   linksNotAdded: Array<{ from: string; to: string; note: string }>;
   notesWritten: number;
+  /** The `tempId` of each plan thought whose note was written: what `notesWritten` counts. */
+  notesWrittenFor: string[];
   tagsAttached: number;
   /** Thoughts whose alias list was written, at creation or by adding to it. */
   aliasesWritten: number;
@@ -136,7 +153,8 @@ export interface IngestOutcome {
   /**
    * What was not tried, because a thought it needs was not created: the
    * thoughts under one that failed, with their notes, tags and aliases, and
-   * the links to any of them. The reason names the thought that failed.
+   * the links to any of them. And a plan item that stands for the same
+   * thought as one that failed. The reason names the thought that failed.
    */
   skipped: Array<{ what: string; reason: string }>;
   /**
@@ -286,9 +304,16 @@ export async function ingest(
   // type or a tag, since a plan makes ordinary thoughts. A `tempId` is
   // checked at its own turn, by `create` and `links.create`: it can land on
   // one its parent holds as an ordinary child.
-  await mapWithConcurrency([...parentEnds(plan)], 6, ([id, field]) =>
+  const ends = parentEnds(plan);
+  await mapWithConcurrency([...ends], 6, ([id, field]) =>
     api.links.requireParent(brainId, id, field),
   );
+
+  // Each of those reads is refused for a `brainId` that is no brain, and the
+  // plan with it. A plan that names nothing in the brain has sent none of
+  // them, and every one of its creates used to be refused in turn, each with
+  // the 401 on a line of its own. So that plan reads the brain itself.
+  if (typeIds.size + tagIds.size + ends.size === 0) await api.brains.get(brainId);
 
   const outcome: IngestOutcome = {
     created: [],
@@ -297,6 +322,7 @@ export async function ingest(
     linksReused: [],
     linksNotAdded: [],
     notesWritten: 0,
+    notesWrittenFor: [],
     tagsAttached: 0,
     aliasesWritten: 0,
     failures: [],
@@ -404,7 +430,10 @@ export async function ingest(
    * not enough: two identical names in a batch both read the cache before the
    * first one lands. The second awaits the first one's promise.
    */
-  const inFlight = new Map<string, { relation: RelationName; creation: Promise<string> }>();
+  const inFlight = new Map<
+    string,
+    { tempId: string; relation: RelationName; creation: Promise<string> }
+  >();
   const slot = (parentId: string | null, name: string): string =>
     `${parentId ?? ""}\0${name.trim()}`;
   /**
@@ -435,8 +464,13 @@ export async function ingest(
             near = await lookAround(parentId);
             const existing = near?.[relation].get(t.name.trim());
             if (existing !== undefined) {
-              resolved.set(t.tempId, existing);
-              outcome.reused.push({ tempId: t.tempId, thoughtId: existing, name: t.name });
+              resolved.set(t.tempId, existing.id);
+              outcome.reused.push({
+                tempId: t.tempId,
+                thoughtId: existing.id,
+                name: t.name,
+                ...(existing.kind !== undefined ? { kind: existing.kind } : {}),
+              });
               return;
             }
             // The same name under another relation. Whether it is the plan's
@@ -444,14 +478,30 @@ export async function ingest(
             // plan's note and children; made again, it would be a duplicate.
             for (const other of RELATION_NAMES) {
               const namedSo = near?.[other].get(t.name.trim());
-              if (namedSo !== undefined) throw namesake(t, parentId, relation, other, namedSo);
+              if (namedSo !== undefined) throw namesake(t, parentId, relation, other, namedSo.id);
             }
           }
           const pending = inFlight.get(key);
           if (pending !== undefined) {
-            // Fails with it when it fails, whatever its relation: the two
-            // were sent for one place at one moment.
-            const thoughtId = await pending.creation;
+            const thoughtId = await pending.creation.catch(() => null);
+            if (thoughtId === null) {
+              // Not tried on its own, and so not failed: it used to be listed
+              // under the failures with the other's reason. The two are one
+              // thought, and a create of its own would be the same request
+              // again: refused again while the cause lasts, and a second
+              // thought when the first got no answer and was made all the
+              // same. Whether to try again is the caller's to say, with the
+              // reason in front of it. A namesake under another relation
+              // waits on the same create, to be told whether it is one.
+              blocked.set(t.tempId, pending.tempId);
+              outcome.skipped.push({
+                what: `thought "${t.name}" (${t.tempId})`,
+                reason:
+                  `${pending.relation === relation ? "is the same thought as" : "is a namesake of"} ` +
+                  `"${pending.tempId}", which was not created`,
+              });
+              return;
+            }
             if (pending.relation !== relation && parentId !== null) {
               throw namesake(t, parentId, relation, pending.relation, thoughtId);
             }
@@ -472,7 +522,7 @@ export async function ingest(
           ...(t.label !== undefined ? { label: t.label } : {}),
           ...(aliases.length > 0 ? { aliases } : {}),
         });
-        if (dedupe) inFlight.set(key, { relation, creation });
+        if (dedupe) inFlight.set(key, { tempId: t.tempId, relation, creation });
 
         const thoughtId = await creation;
         madeHere.add(thoughtId);
@@ -484,7 +534,7 @@ export async function ingest(
         }
 
         if (parentId !== null) {
-          near?.[relation].set(t.name.trim(), thoughtId);
+          near?.[relation].set(t.name.trim(), { id: thoughtId, kind: ThoughtKind.Normal });
           if (!madeHere.has(parentId)) {
             const made = toBeListed.get(parentId) ?? [];
             toBeListed.set(parentId, [...made, { thoughtId, relation }]);
@@ -511,9 +561,12 @@ export async function ingest(
       try {
         await api.notes.set(brainId, id, t.note!);
         outcome.notesWritten += 1;
+        outcome.notesWrittenFor.push(t.tempId);
       } catch (error) {
+        // By identifier: two plan thoughts can share a title, and the note
+        // is written afterwards with a tool that takes the identifier.
         outcome.failures.push({
-          what: `note for "${t.name}"`,
+          what: `note for "${t.name}" (${id})`,
           reason: describe(error),
         });
       }
@@ -531,7 +584,7 @@ export async function ingest(
       outcome.tagsAttached += 1;
     } catch (error) {
       outcome.failures.push({
-        what: `tag ${tagId} on "${t.name}"`,
+        what: `tag ${tagId} on "${t.name}" (${id})`,
         reason: describe(error),
       });
     }
@@ -561,7 +614,7 @@ export async function ingest(
       if (added.length > 0) aliased.add(id);
     } catch (error) {
       outcome.failures.push({
-        what: `aliases for "${job.name}"`,
+        what: `aliases for "${job.name}" (${id})`,
         reason: describe(error),
       });
     }
@@ -630,8 +683,12 @@ async function readNeighbours(
   thoughtId: string,
 ): Promise<Neighbours> {
   const graph = await api.thoughts.getGraph(brainId, thoughtId);
-  const byName = (relation: RelationName): Map<string, string> =>
-    new Map(graph[LIST_OF[relation]].map((t) => [(t.name ?? "").trim(), t.id] as const));
+  const byName = (relation: RelationName): Neighbours[RelationName] =>
+    new Map(
+      graph[LIST_OF[relation]].map(
+        (t) => [(t.name ?? "").trim(), { id: t.id, kind: t.kind }] as const,
+      ),
+    );
   return { child: byName("child"), parent: byName("parent"), jump: byName("jump") };
 }
 

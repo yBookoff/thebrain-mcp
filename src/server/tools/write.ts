@@ -12,14 +12,26 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Relation, ThoughtKind } from "../../api/types.js";
 import {
   MAX_ALIASES,
+  mayHaveLanded,
   normalizeAliases,
   warnIfFencedCode,
   type AliasOutcome,
+  type UpdateThoughtInput,
 } from "../../api/index.js";
 import { linkFound } from "../../operations/ingest.js";
 import { confirmDestructive, confirmationInstructions } from "../confirm.js";
 import type { ServerContext } from "../context.js";
-import { bullet, fail, guard, join, ok, section } from "../respond.js";
+import {
+  bullet,
+  describeError,
+  fail,
+  guard,
+  join,
+  kindMark,
+  ok,
+  section,
+  type ToolResponse,
+} from "../respond.js";
 
 const brainId = z
   .string()
@@ -108,30 +120,76 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         await ctx.api.links.requireParent(bid, parentId, "parentId");
       }
 
-      const thoughtId = await ctx.api.thoughts.create(bid, {
-        name,
-        ...(parentId !== undefined ? { sourceThoughtId: parentId } : {}),
-        ...(relation !== undefined ? { relation: RELATION_VALUES[relation] } : {}),
-        ...(typeId !== undefined ? { typeId } : {}),
-        ...(label !== undefined ? { label } : {}),
-        ...(aliases.length > 0 ? { aliases } : {}),
-      });
+      const hasNote = note !== undefined && note.trim() !== "";
+      const tags = tagIds ?? [];
+      let thoughtId: string;
+      try {
+        thoughtId = await ctx.api.thoughts.create(bid, {
+          name,
+          ...(parentId !== undefined ? { sourceThoughtId: parentId } : {}),
+          ...(relation !== undefined ? { relation: RELATION_VALUES[relation] } : {}),
+          ...(typeId !== undefined ? { typeId } : {}),
+          ...(label !== undefined ? { label } : {}),
+          ...(aliases.length > 0 ? { aliases } : {}),
+        });
+      } catch (error) {
+        // A create with no answer is not a create that failed: the thought
+        // may be there, and the same call sent again would make a second.
+        if (!mayHaveLanded(error)) throw error;
+        return fail(
+          join([
+            describeError(error),
+            section("Next", afterNoAnswer(name, parentId, hasNote, tags.length > 0)),
+          ]),
+        );
+      }
 
       const done: string[] = [`created thought "${name}" — ${thoughtId}`];
       if (aliases.length > 0) done.push(`aliases: ${JSON.stringify(aliases)}`);
       const warnings: string[] = [];
 
-      if (note !== undefined && note.trim() !== "") {
-        await ctx.api.notes.set(bid, thoughtId, note);
-        done.push("note written");
-        const warning = warnIfFencedCode(note);
-        if (warning !== null) warnings.push(warning);
+      // The thought exists from here on, and nothing below may lose its
+      // identifier: a note or a tag that failed used to throw, the result was
+      // the error alone, and the call sent again made a second thought.
+      const steps: Step[] = [];
+      if (hasNote) {
+        steps.push({
+          what: "note",
+          run: async () => {
+            await ctx.api.notes.set(bid, thoughtId, note);
+            const warning = warnIfFencedCode(note);
+            if (warning !== null) warnings.push(warning);
+            return ["note written"];
+          },
+        });
       }
-
-      for (const tagId of tagIds ?? []) {
-        await ctx.api.links.attachTag(bid, thoughtId, tagId);
+      for (const tagId of tags) {
+        steps.push({
+          what: `tag ${tagId}`,
+          run: async () => {
+            await ctx.api.links.attachTag(bid, thoughtId, tagId);
+            return [`tag attached: ${tagId}`];
+          },
+        });
       }
-      if ((tagIds ?? []).length > 0) done.push(`tags attached: ${tagIds!.length}`);
+      const { done: written, stopped } = await inOrder(steps);
+      if (stopped !== null) {
+        // The note is the first step, so it is left over only when it is
+        // what failed; the tags come last, so any failure leaves one.
+        const rest = [
+          ...(stopped.what === "note" ? ["the note with brain_set_note"] : []),
+          ...(tags.length > 0 ? ["tags with brain_tag"] : []),
+        ];
+        return writtenInPart(
+          [...done, ...written],
+          stopped,
+          "The thought exists, and its identifier works immediately: do not create it " +
+            `again. Fix the cause and write only the rest to ${thoughtId}: ${rest.join(", ")}.`,
+          warnings,
+        );
+      }
+      if (hasNote) done.push("note written");
+      if (tags.length > 0) done.push(`tags attached: ${tags.length}`);
 
       return ok(
         join([
@@ -194,19 +252,57 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       if (provided.length === 0 && !editsAliases) {
         return fail("no fields were supplied to change");
       }
-      await ctx.api.thoughts.update(bid, thoughtId, changes);
-      const done = provided.map(([k, v]) => `${k} = ${JSON.stringify(v)}`);
+      const line = ([k, v]: readonly [string, unknown]): string => `${k} = ${JSON.stringify(v)}`;
+      // One field to a request. The API applies a patch one operation at a
+      // time and keeps what it wrote before the one it refuses, without
+      // saying which that was: with a colour it refused, a name sent in the
+      // same patch was changed, and the result was the error alone. A field
+      // sent alone is written or it is not.
+      //
+      // The type goes first. What refuses a typeId refuses it ahead of the
+      // write, and that has to be ahead of every write of the call.
+      const typeFirst = [
+        ...provided.filter(([key]) => key === "typeId"),
+        ...provided.filter(([key]) => key !== "typeId"),
+      ];
+      const steps: Step[] = typeFirst.map((field) => ({
+        what: line(field),
+        run: async () => {
+          const change = { [field[0]]: field[1] } as UpdateThoughtInput;
+          await ctx.api.thoughts.update(bid, thoughtId, change);
+          return [line(field)];
+        },
+      }));
+      let aliasLines: string[] = [];
       if (editsAliases) {
-        done.push(
-          ...describeAliasOutcome(
-            await ctx.api.thoughts.changeAliases(bid, thoughtId, {
-              add: addAliases,
-              remove: removeAliases,
-            }),
-          ),
+        steps.push({
+          what: "aliases",
+          run: async () => {
+            // With the name this call has just written: the read behind an
+            // alias edit still returns the old one, and the old name kept as
+            // an alias was dropped as equal to the name.
+            aliasLines = describeAliasOutcome(
+              await ctx.api.thoughts.changeAliases(
+                bid,
+                thoughtId,
+                { add: addAliases, remove: removeAliases },
+                { name: changes.name },
+              ),
+            );
+            return aliasLines;
+          },
+        });
+      }
+      const { done, stopped } = await inOrder(steps);
+      if (stopped !== null) {
+        if (wasAll(done, stopped)) throw stopped.error;
+        return writtenInPart(
+          done,
+          stopped,
+          `Fix the cause and send only the rest, in a brain_update_thought call for ${thoughtId}.`,
         );
       }
-      return ok(section("Done", bullet(done))!);
+      return ok(section("Done", bullet([...provided.map(line), ...aliasLines]))!);
     }),
   );
 
@@ -358,14 +454,39 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       for (const tagId of [...(add ?? []), ...(remove ?? [])]) {
         await ctx.api.links.requireTag(bid, tagId, thoughtId);
       }
-      const done: string[] = [];
-      for (const tagId of add ?? []) {
-        await ctx.api.links.attachTag(bid, thoughtId, tagId);
-        done.push(`attached ${tagId}`);
-      }
-      for (const tagId of remove ?? []) {
-        const removed = await ctx.api.links.detachTag(bid, thoughtId, tagId);
-        done.push(removed ? `removed ${tagId}` : `tag ${tagId} was not on the thought`);
+      // "Was not on the thought" is an answer about a thought that is there.
+      // The lookup behind a removal is a 404 for a thought nobody has as for
+      // a tag that is not on one, and the first used to get that answer too.
+      // So the thought is read before it is given, once a call: a removal
+      // that finds its tag costs nothing more.
+      let read: Promise<unknown> | undefined;
+      const thoughtIsThere = (): Promise<unknown> =>
+        (read ??= ctx.api.thoughts.get(bid, thoughtId));
+      const steps: Step[] = [
+        ...(add ?? []).map((tagId) => ({
+          what: `attach ${tagId}`,
+          run: async () => {
+            await ctx.api.links.attachTag(bid, thoughtId, tagId);
+            return [`attached ${tagId}`];
+          },
+        })),
+        ...(remove ?? []).map((tagId) => ({
+          what: `remove ${tagId}`,
+          run: async () => {
+            if (await ctx.api.links.detachTag(bid, thoughtId, tagId)) return [`removed ${tagId}`];
+            await thoughtIsThere();
+            return [`tag ${tagId} was not on the thought`];
+          },
+        })),
+      ];
+      const { done, stopped } = await inOrder(steps);
+      if (stopped !== null) {
+        if (wasAll(done, stopped)) throw stopped.error;
+        return writtenInPart(
+          done,
+          stopped,
+          `Fix the cause and send only the rest, in a brain_tag call for ${thoughtId}.`,
+        );
       }
       return ok(
         join([
@@ -453,8 +574,11 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
 
       const graph = await ctx.api.thoughts.getGraph(bid, thoughtId);
       const note = await ctx.api.notes.get(bid, thoughtId).catch(() => "");
+      // Marked when it is a type or a tag, as a read result marks one: that
+      // is not one thought's own, and the person asked should see which it is.
+      const named = `"${graph.thought.name ?? "(unnamed)"}"${kindMark(graph.thought.kind)}`;
       const summary = join([
-        `Delete the thought "${graph.thought.name ?? "(unnamed)"}"?`,
+        `Delete the thought ${named}?`,
         bullet(
           [
             `links: ${graph.links.length}`,
@@ -472,11 +596,152 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       }
 
       await ctx.api.thoughts.delete(bid, thoughtId);
-      ctx.store(bid).remove([thoughtId]);
-      return ok(
-        section("Deleted", `"${graph.thought.name ?? "(unnamed)"}" is gone from the brain`)!,
-      );
+      const gone = `${named} is gone from the brain`;
+      try {
+        ctx.store(bid).remove([thoughtId]);
+      } catch (error) {
+        // The thought is deleted whatever became of the index. Thrown, this
+        // used to be the whole result, and read as a deletion that failed.
+        return writtenInPart(
+          [gone],
+          { what: "its entry in the semantic index", error, skipped: [] },
+          "The thought is deleted, and is not to be deleted again. Its entry stays in " +
+            "the semantic index until brain_index is run with action=sync.",
+        );
+      }
+      return ok(section("Deleted", gone)!);
     }),
+  );
+}
+
+/** One write of a call that makes several, one after another. */
+interface Step {
+  /** What it writes, as "Failed" and "Skipped" name it. */
+  what: string;
+  /** Writes it, and resolves to the lines "Done" has for it. */
+  run: () => Promise<string[]>;
+}
+
+/** The step a call stopped at, why, and the steps after it, which were not tried. */
+interface Stopped {
+  what: string;
+  error: unknown;
+  skipped: string[];
+}
+
+/**
+ * Runs the steps in order and stops at the first that fails.
+ *
+ * A batch goes on past a failure (`ingest`), and a call about one thought
+ * does not. A batch's writes are in flight together, and what it leaves for
+ * a second call can be made twice. Here the writes follow one another, and
+ * with the thought's identifier in the result each of them can be sent again
+ * without making anything twice. What fails after a write that went through
+ * is most often the connection, and every further try could wait out the
+ * timeout with the identifier still untold.
+ */
+async function inOrder(steps: readonly Step[]): Promise<{ done: string[]; stopped: Stopped | null }> {
+  const done: string[] = [];
+  for (const [i, step] of steps.entries()) {
+    try {
+      done.push(...(await step.run()));
+    } catch (error) {
+      const skipped = steps.slice(i + 1).map((s) => s.what);
+      return { done, stopped: { what: step.what, error, skipped } };
+    }
+  }
+  return { done, stopped: null };
+}
+
+/**
+ * Whether the step that failed was all the call had to do: nothing done
+ * before it, nothing left after it. Then the error is the whole of the
+ * result, and reads as it did.
+ *
+ * Not so the first of several. Its error alone says nothing of the rest, and
+ * the rest was not sent: a type that was accepted and did not read back used
+ * to have the other fields in the same patch, and now stops the call ahead
+ * of them.
+ */
+function wasAll(done: readonly string[], stopped: Stopped): boolean {
+  return done.length === 0 && stopped.skipped.length === 0;
+}
+
+/**
+ * The result of a call that stopped part way. It is an error, so that it is
+ * not read as done, and it is not the error alone, which used to be read as
+ * nothing done: `brain_create_thought` lost the identifier of the thought it
+ * had made, and the call sent again made a second.
+ *
+ * The sections are `brain_ingest`'s: what was done, by identifier; what
+ * failed and why; what was not tried; what to call for the rest. `next` is
+ * the tool's own last sentences.
+ *
+ * "Failed" is hedged, always. A step can fail after its write went through:
+ * a type that was accepted and did not read back, a write that got no
+ * answer. Its line says so, and the sentence under "Next" defers to it.
+ */
+function writtenInPart(
+  done: readonly string[],
+  stopped: Stopped,
+  next: string,
+  warnings: readonly string[] = [],
+): ToolResponse {
+  // "Nothing was written" is the refusal's own sentence, and true of the
+  // call only while nothing stands under "Done".
+  const reason = describeError(stopped.error, done.length === 0);
+  return fail(
+    join([
+      section("Done", bullet(done)),
+      section(
+        "Failed",
+        bullet([`${stopped.what}: ${reason}${mayHaveLanded(stopped.error) ? UNANSWERED : ""}`]),
+      ),
+      section("Skipped", bullet(stopped.skipped)),
+      warnings.length > 0 ? section("Warning", bullet(warnings)) : null,
+      section(
+        "Next",
+        "The call stopped at its first failure, and nothing is rolled back. " +
+          (done.length > 0 ? "What is under Done was done. " : "") +
+          "What is under Failed was not, unless its line says otherwise" +
+          (stopped.skipped.length > 0 ? ", and what is under Skipped was not tried. " : ". ") +
+          next,
+      ),
+    ]),
+  );
+}
+
+/** Added to a write that got no answer, which is not a write that failed. */
+const UNANSWERED = " — no answer came, so TheBrain may have carried it out all the same";
+
+/**
+ * What follows a create that got no answer. The thought may be there with no
+ * identifier to give, so this says where to look before it is created again:
+ * next to its parent, or, for a thought created with none, by name. The
+ * index knows a new thought only after a sync, and a search that missed it
+ * for that reason would be read as "not there".
+ */
+function afterNoAnswer(
+  name: string,
+  parentId: string | undefined,
+  hasNote: boolean,
+  hasTags: boolean,
+): string {
+  const rest = [
+    ...(hasNote ? ["its note with brain_set_note"] : []),
+    ...(hasTags ? ["its tags with brain_tag"] : []),
+  ];
+  return (
+    `No answer came to the create, so TheBrain may have made "${name}" all the same, ` +
+    "and there is no identifier to give for it. Before creating it again, look for it " +
+    (parentId !== undefined
+      ? `next to ${parentId} with brain_get_thought.`
+      : "with brain_search, after brain_index with action=sync where the brain has an " +
+        "index: with no parent it is next to no thought, and TheBrain's own search " +
+        "finds a new thought only after some seconds.") +
+    (rest.length > 0
+      ? ` Nothing else of the call was written: if the thought is there, write ${rest.join(" and ")}.`
+      : "")
   );
 }
 

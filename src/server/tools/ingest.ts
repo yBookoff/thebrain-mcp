@@ -9,7 +9,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { MAX_ALIASES, warnIfFencedCode } from "../../api/index.js";
 import { IngestValidationError, ingest } from "../../operations/ingest.js";
 import type { ServerContext } from "../context.js";
-import { bullet, fail, guard, join, ok, section, table } from "../respond.js";
+import { bullet, fail, guard, join, kindMark, ok, section, table } from "../respond.js";
 import { ALIAS_COST } from "./write.js";
 
 const relation = z
@@ -118,18 +118,29 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
         throw error;
       }
 
+      // Only the notes that were written: one that was not, its thought
+      // having failed or the note itself, used to be listed here as one that
+      // "will be corrupted".
+      const noted = new Set(outcome.notesWrittenFor);
       const fenceWarnings = thoughts
-        .filter((t) => t.note !== undefined && warnIfFencedCode(t.note) !== null)
+        .filter(
+          (t) => noted.has(t.tempId) && t.note !== undefined && warnIfFencedCode(t.note) !== null,
+        )
         .map((t) => t.name);
 
       // A batch that left something unwritten is an error, so that it is not
       // read as done. Its table names each thought by tempId too: the plan
       // that follows refers to what exists by identifier.
       const partial = outcome.failures.length > 0 || outcome.skipped.length > 0;
-      const row = (how: string, t: { tempId: string; thoughtId: string; name: string }) => [
+      // A thought the plan found in place may be a type or a tag, and is
+      // marked as a read result marks one: what the plan made is ordinary.
+      const row = (
+        how: string,
+        t: { tempId: string; thoughtId: string; name: string; kind?: number },
+      ) => [
         how,
         t.name,
-        t.thoughtId,
+        t.thoughtId + (t.kind === undefined ? "" : kindMark(t.kind)),
         ...(partial ? [t.tempId] : []),
       ];
       const rows = [

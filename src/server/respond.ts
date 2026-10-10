@@ -35,27 +35,32 @@ export function fail(text: string): ToolResponse {
  * nobody has is a 404 or a 403 by the request (docs/api-map.md, L3). A
  * message for one never names the other, and the API's own words are kept
  * wherever they carry the identifier.
+ *
+ * `alone` is false for a step that failed after the call had written
+ * something. A refusal ahead of a write says that nothing was written: true
+ * of the step, and it would be read of the call.
  */
-export function describeError(error: unknown): string {
+export function describeError(error: unknown, alone = true): string {
   if (error instanceof EmbedderUnavailableError) return error.message;
 
   if (error instanceof TheBrainError) {
+    const nothing = alone ? " Nothing was written." : "";
     switch (error.kind) {
       case "invalid_uuid":
         return `${error.message}. Take identifiers from brain_list, brain_search or brain_get_thought — do not invent them.`;
       case "not_a_type":
-        return `${error.message}. Nothing was written. Take type identifiers from brain_list_types_and_tags.`;
+        return `${error.message}.${nothing} Take type identifiers from brain_list_types_and_tags.`;
       case "not_a_tag":
-        return `${error.message}. Nothing was written. Take tag identifiers from brain_list_types_and_tags.`;
+        return `${error.message}.${nothing} Take tag identifiers from brain_list_types_and_tags.`;
       case "not_a_parent":
         return (
-          `${error.message}. Nothing was written. A thought linked under a type is given ` +
+          `${error.message}.${nothing} A thought linked under a type is given ` +
           "that type in place of the one it had. To set a type pass it as typeId to " +
           "brain_update_thought or brain_create_thought; for a parent name an ordinary thought."
         );
       case "tag_as_parent":
         return (
-          `${error.message}. Nothing was written. A thought linked under a tag is tagged ` +
+          `${error.message}.${nothing} A thought linked under a tag is tagged ` +
           "with it, and gets no parent. To attach a tag pass it to brain_tag, or as tagIds to " +
           "brain_create_thought or brain_ingest; for a parent name an ordinary thought."
         );
@@ -84,6 +89,19 @@ export function describeError(error: unknown): string {
           `TheBrain answered 403 and named no cause${requestOf(error)}. That is its answer ` +
           `when an identifier in the call names nothing in this brain. ${GONE} ${TAKE_IDENTIFIERS}`
         );
+      case "bad_request":
+        // The one 400 that names nothing. A create answers it for a parent
+        // deleted a moment ago and for a typeId nobody has (L3, L26), and
+        // makes no thought.
+        if (/^could not create thought\.?$/i.test(error.message.trim())) {
+          return (
+            `${sentence(error.message)} TheBrain named no cause${requestOf(error)}. It answers ` +
+            "so when the parent named for the new thought was deleted a moment ago, or the " +
+            "type named for it is no thought of this brain. Nothing was created. Read the " +
+            "parent and the type with brain_get_thought before sending the call again."
+          );
+        }
+        return error.toToolMessage();
       default:
         return error.toToolMessage();
     }

@@ -404,12 +404,177 @@ reads as it did, to the character.
 dropped connection says nothing of what TheBrain did. With the answer to a
 create dropped on its way back the thought was there, 3 times of 3, and the
 batch reported it failed. `mayHaveLanded()` tells such a failure from a
-refused connection and from an answer, and the result says on that line that
+refused connection, from an answer, and from a read that got none: a create
+reads its parent and its type first, and a read wrote nothing whatever became
+of it. The result says on that line that
 the thought may exist and where to look before creating it again. A thought
 with a parent is found by the next run, whatever its relation to it; one with
 no parent is not.
 
+**The report says each thing once, of the thought it is about.** Four places
+where it did not, each seen through the real handler on 15.0.640, three times
+of three.
+
+*A line for a note, a tag or an alias named its thought by title.* Two plan
+thoughts can share a title, and the tools that write a note or a tag afterwards
+take an identifier. The line carries it now: `note for "Same" (<identifier>)`.
+A thought that was not created has none, and is named by its `tempId` as it
+was.
+
+*Two plan items for one thought were two failures.* They are one create, by
+the registry above. When it failed, the second item stood under "Failed" with
+the first one's reason, though nothing had been sent for it. It is still not
+sent on its own, and that is decided, not left over. A create of its own would
+be the same request under another label: refused again while the cause lasts,
+and a second thought when the first got no answer and was made all the same.
+Made, it would leave one thought both failed and created, with what hangs on
+the first item skipped. Whether to try again is the caller's to say, with the
+reason in front of it (§3). So there is one request and one line under
+"Failed", and the other item stands under "Skipped" as the same thought, with
+what hangs on either. A namesake under another relation waits on the same
+create to learn whether it is one, and is skipped the same way.
+
+*The warning about code fences listed notes that were not written*, as notes
+that "will be corrupted": the note of a thought that failed, and a note whose
+own write failed. The outcome names the thoughts whose note was written, and
+the warning goes by that.
+
+*A `brainId` that is no brain was a failure a thought.* Every read ahead of
+the writes is refused for such a brain, and the plan with it, in the words
+`describeError()` has for it (§5). A plan that names nothing in the brain, no
+parent, type or tag, sends none of those reads: each create at its top was
+refused in turn, with the API's bare 401 on a line of its own and "Fix the
+cause and send the plan again" under them. That plan reads the brain first,
+which is one request for the plan that had none ahead of its writes. Any other
+plan sends what it sent.
+
 Nothing is deleted to tidy up after a failure. Deletion needs a human (§6).
+
+### A call about one thought, written in part
+
+Four tools write more than once in a call. `brain_create_thought` makes the
+thought and then writes its note and its tags; `brain_update_thought` patches
+fields and then edits aliases; `brain_tag` works through two lists;
+`brain_delete_thought` deletes and then takes the thought out of the index.
+Each threw at the first failure, `guard()` made the exception the whole
+result, and what had been written before it went unsaid. The other write
+tools make one write a call.
+
+Measured through the real handlers on 15.0.640, three times of three each. The
+failure was caused on purpose where the API would give one: a tag deleted
+between the check and its turn, a colour that is not `#rrggbb`, aliases past
+the limit of a hundred. Elsewhere it was put in on the way to the live API: a
+500, and an answer dropped on its way back.
+
+- `brain_create_thought` answered `boom (POST …/update)` for a thought that
+  existed, and the same call sent again made a second one. With a tag deleted
+  in between it answered "tagId … is not a tag … Nothing was written", over a
+  thought with its note and one tag.
+- With the answer to its create dropped it answered that the request had
+  exceeded 30000 ms and to check that the desktop app is running, and the
+  thought was there.
+- `brain_update_thought` given a name, a caption and a colour by name answered
+  the colour's 400, with the name and the caption changed. Given a name and
+  aliases that would pass a hundred, it answered the limit's sentence, with
+  the name changed.
+- `brain_tag` given three tags, the second deleted in between, answered
+  "Nothing was written" with one tag attached.
+
+**One shape, `brain_ingest`'s.** A call that stopped part way is `isError`,
+so that it is not read as done, and it is not the error alone, which was read
+as nothing done. "Done" lists what was written, the thought by its
+identifier; "Failed" the step that failed, with why; "Skipped" the steps
+after it, which were not tried; "Next" says that nothing is rolled back and
+what to call for the rest: `brain_set_note` and `brain_tag` with the new
+thought's identifier, and never a second create. The reason under "Failed" is
+`describeError()`'s. Once something stands under "Done" it is given without
+its "Nothing was written", which is true of the step refused and would be
+read of the call.
+
+**"Failed" is hedged, and a step is listed there only when its write was.**
+A step can fail after its write went through. A write that got no answer may
+have been carried out, and its line says so. A type can be accepted and not
+read back in time, and its error says that. So "Next" says that what is under
+"Failed" was not done *unless its line says otherwise*. And the read that
+waits for a write no longer fails the write: a read-back that threw used to
+pass its error on as the step's, and aliases that were in the brain stood
+under "Failed". A failed read has not shown the write, and no more: the wait
+goes on to its two seconds, and the aliases are then listed as written and
+not read back yet, the type as accepted.
+
+**A call stops at its first failure, where a batch goes on.** A batch's
+writes are in flight together, and what it leaves for a second call can be
+made twice, so it finishes what it can. Here the writes follow one another on
+one thought, and with the identifier in the result every one of them can be
+sent again and makes nothing twice. What fails after a write that went
+through is most often the connection, and each further try could wait out the
+timeout with the identifier still untold: a client that gives up on the call
+first would lose it after all. One line under "Failed" is also the cause, and
+not the same refusal once a tag.
+
+**A call with one thing to do fails as it did**, to the character: its error
+is the whole of the result. So does a create that is refused, since nothing
+hangs on a thought that was not made, and the call is its own retry. The
+first of several writes failing is given the shape, with nothing under
+"Done": its error alone says nothing of the writes that were not sent after
+it. That is not only tidiness. A type that was accepted and did not read back
+used to have the other fields in its patch, and now stops the call ahead of
+them. The result of a call written whole is what it was, which tests pin for
+all four tools.
+
+**A create with no answer** is told as `brain_ingest` tells it: the thought
+may be there with no identifier to give, and the result says where to look
+before creating it again, next to its parent or, for a thought made with
+none, by name.
+
+**One field to a request.** `brain_update_thought` sent its fields in one
+patch. The API applies a patch an operation at a time, keeps what it wrote
+before the one it refuses (`docs/api-map.md`, row L19), and does not say which
+that was, so a refused patch cannot be reported field by field. A field sent
+alone is written or it is not. Sixty thoughts patched a field at a time, four
+or five fields each, read back whole every time. It costs a request a field
+past the first: 22 ms for four fields where one patch took 18, and nothing
+measurable for two. The type goes first, since what refuses a `typeId`
+refuses it ahead of the write, and that has to be ahead of every write of the
+call. A type takes the wait for its read-back either way: 164 ms at the
+median with four other fields, where the one patch took 182.
+
+**The alias edit is told the name the call has just written.** An alias
+equal to the thought's name is not one, so `changeAliases()` drops it, going
+by the name it reads. Straight after a rename that read still returns the old
+name, 19 times of 20. So a call that renamed a thought and kept the old name
+as an alias, which is what the organize skill suggests for a rename, lost it
+and answered "aliases unchanged", in a result that was no error: 10 times of
+10 as the tool was. With a type in the same call it kept the alias, 10 of 10,
+only because the wait for the type came between the patch and the read, and
+the type going first would have ended that. The API has no such trouble: it
+kept the old name as an alias sent straight after the rename, 20 times of 20.
+`changeAliases()` takes the name the caller has just written and compares
+with that: 10 of 10 kept, with a type and without.
+
+**"Was not on the thought" is said of a thought that is there.** The lookup
+behind a removal is the same 404 for a thought nobody has as for a tag that
+is not on one (`docs/api-map.md`, row L3), and `brain_tag` gave that answer
+for both, in a result that was no error. It reads the thought before it gives
+it, once a call, and passes the read's 404 on. A removal that finds its tag
+reads nothing more, so the check costs one request on the answer it protects
+and none anywhere else. Read ahead of the first write it would have cost that
+request on every call, to refuse an attach the API refuses by itself, naming
+the thought.
+
+**A write result marks a type or a tag where it has the kind in hand.**
+`brain_ingest` lists a thought it found in place with `[type]` or `[tag]`
+after its identifier, as a read result does: a type or a tag can hang under a
+thought as an ordinary child, the plan's thought of that name lands on it (§7,
+item 18), and what the plan put under it is refused. The kind is in the graph
+that found it. `brain_delete_thought` marks the thought in its question and
+in its answer, from the graph it reads for the question: a type or a tag is
+not one thought's own, and the person asked should see which it is. An
+ordinary thought is unmarked, and what a call created is ordinary. Not marked:
+the ends of a link, in `brain_link` and in a plan's links. The upper end of a
+parent or child link is read, and refused unless it is ordinary; the lower end
+and both ends of a jump are not read at all. A mark there would cost a read an
+end on every call, against the rule above that a mark costs no request.
 
 ---
 
@@ -458,6 +623,13 @@ for an identifier nobody has do not mention `brainId`. And a refusal about
 the brain is not turned into an answer: `brain_search` with no index used to
 drop it and report nothing found. What each request answers is in
 `docs/api-map.md`, row L3.
+
+One answer names nothing at all: the 400 `"Could not create thought."`, which
+a create gets under a parent deleted a moment ago and for a `typeId` nobody
+has (rows L3 and L26). It was passed on as it came. `describeError()` now says
+that no cause was given, which two it is the answer for, that nothing was
+created, and to read the parent and the type before sending the call again.
+It names both because the API names neither, and still not `brainId`.
 
 **Degradation is reported, not hidden.** When semantic search falls back to the
 lexical fan-out, the outcome carries `degradedReason` and the tool prints it. An

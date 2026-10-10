@@ -148,8 +148,22 @@ function fakeBrain(
   /** Every graph read, by thought, and by thought what the next reads throw. */
   const graphReads: string[] = [];
   const failGraph = new Map<string, Error[]>();
+  /** How many times the brain itself was read, and whether it is there to read. */
+  const brain = { reads: 0, there: true };
+  // As the API: every request to a brain that is not there is this 401.
+  const noBrain = (): TheBrainError =>
+    new TheBrainError("unknown_brain", `Access to brain ${BRAIN} is unauthorized.`, {
+      status: 401,
+    });
 
   const api = {
+    brains: {
+      async get(_b: string) {
+        brain.reads += 1;
+        if (!brain.there) throw noBrain();
+        return { id: BRAIN };
+      },
+    },
     thoughts: {
       async create(
         _b: string,
@@ -161,6 +175,7 @@ function fakeBrain(
           typeId?: string;
         },
       ) {
+        if (!brain.there) throw noBrain();
         if (failOn.has(input.name)) throw new Error("server refused");
         if (failWith.has(input.name)) throw failWith.get(input.name)!;
         // As the real method: a thought is not made the child of a type.
@@ -223,8 +238,13 @@ function fakeBrain(
           copy.stale -= 1;
           return copy.graph;
         }
+        // As the API: every thought in a graph's lists carries its kind.
         const named = (ids: string[]) =>
-          ids.map((i) => ({ id: i, name: thoughts.get(i)?.name ?? "" }));
+          ids.map((i) => ({
+            id: i,
+            name: thoughts.get(i)?.name ?? "",
+            kind: types.has(i) ? 2 : tags.has(i) ? 4 : 1,
+          }));
         const has = listsOf(id);
         const graph = {
           thought: { id, name: thoughts.get(id)?.name ?? "" },
@@ -270,6 +290,8 @@ function fakeBrain(
     },
     notes: {
       async set(_b: string, id: string, markdown: string) {
+        // By its text: two thoughts of one name are told apart by their notes.
+        if (failOn.has(`note: ${markdown}`)) throw new Error("server refused");
         const t = thoughts.get(id);
         if (t !== undefined) t.note = markdown;
       },
@@ -331,6 +353,7 @@ function fakeBrain(
       // As the API: the tag's attachment is the pair's one link, with the tag
       // at its head, and the tag's graph lists the thought as a child.
       async attachTag(_b: string, thoughtId: string, tagId: string) {
+        if (failOn.has(`tag on ${thoughtId}`)) throw new Error("server refused");
         const carried = thoughts.get(thoughtId)?.tags;
         if (carried !== undefined && !carried.includes(tagId)) carried.push(tagId);
         const there = joining(thoughtId, tagId);
@@ -369,6 +392,7 @@ function fakeBrain(
     lag,
     graphReads,
     failGraph,
+    brain,
   };
 }
 
@@ -860,7 +884,9 @@ describe("a thought of the same name under another relation", () => {
       const outcome = await ingest(fake.api, BRAIN, {
         thoughts: [{ tempId: "x", name: "Same", parent: ROOT, relation: have }],
       });
-      expect(outcome.reused, have).toEqual([{ tempId: "x", thoughtId: THERE, name: "Same" }]);
+      expect(outcome.reused, have).toEqual([
+        { tempId: "x", thoughtId: THERE, name: "Same", kind: 1 },
+      ]);
       expect(outcome.failures, have).toEqual([]);
     }
   });
@@ -1108,20 +1134,92 @@ describe("a thought that fails in the middle of a batch", () => {
     expect(roots(fake)).toEqual(["root"]);
   });
 
-  it("two plan items for one thought fail together, and what is under either is skipped", async () => {
+  const twins: IngestPlan = {
+    thoughts: [
+      { tempId: "x", name: "Same", parent: ROOT, note: "one" },
+      { tempId: "y", name: "Same", parent: ROOT },
+      { tempId: "under", name: "Leaf", parent: "y" },
+    ],
+  };
+  /** The creates sent, by the name asked for. */
+  const createsOf = ({ api }: Fake): string[] =>
+    vi.mocked(api.thoughts.create).mock.calls.map(([, input]) => input.name);
+
+  it("two plan items for one thought are one create: one fails, and the other is skipped as the same thought", async () => {
+    // Both used to be listed as failed, with the one reason, though the
+    // second was never sent.
     const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    vi.spyOn(fake.api.thoughts, "create");
+    fake.failOn.add("Same");
+    const outcome = await ingest(fake.api, BRAIN, twins);
+
+    expect(names(fake)).toEqual(["root"]);
+    expect(createsOf(fake)).toEqual(["Same"]);
+    expect(outcome.failures).toEqual([{ what: 'thought "Same" (x)', reason: "server refused" }]);
+    expect(outcome.skipped).toEqual([
+      { what: 'thought "Same" (y)', reason: 'is the same thought as "x", which was not created' },
+      // What hangs on either names the one that was tried.
+      { what: 'thought "Leaf" (under)', reason: needs("x") },
+    ]);
+    expect(outcome.notesWritten).toBe(0);
+  });
+
+  it("the second of two is not sent on its own when the first got no answer: it would be made twice", async () => {
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    vi.spyOn(fake.api.thoughts, "create");
+    fake.lostOn.add("Same");
+    const outcome = await ingest(fake.api, BRAIN, twins);
+
+    // The one create went through, with no identifier to report.
+    expect(names(fake)).toEqual(["Same", "root"]);
+    expect(createsOf(fake)).toEqual(["Same"]);
+    expect(outcome.failures).toEqual([
+      { what: 'thought "Same" (x)', reason: "request exceeded 30000 ms", unanswered: true },
+    ]);
+    expect(outcome.skipped.map((s) => s.what)).toEqual(['thought "Same" (y)', 'thought "Leaf" (under)']);
+
+    // The next run finds it, for both items, and finishes the plan: once
+    // the parent's graph lists it, which the batch could not wait for.
+    fake.lostOn.clear();
+    await fake.api.thoughts.getGraph(BRAIN, ROOT);
+    const second = await ingest(fake.api, BRAIN, twins);
+    expect(second.reused.map((r) => r.tempId)).toEqual(["x", "y"]);
+    expect(second.created.map((c) => c.tempId)).toEqual(["under"]);
+    expect(names(fake)).toEqual(["Leaf", "Same", "root"]);
+  });
+
+  it("once the cause is gone the same plan makes the thought once, for both items", async () => {
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    fake.failOn.add("Same");
+    await ingest(fake.api, BRAIN, twins);
+    fake.failOn.clear();
+    const second = await ingest(fake.api, BRAIN, twins);
+
+    expect(second.created.map((c) => c.tempId)).toEqual(["x", "under"]);
+    expect(second.reused.map((r) => r.tempId)).toEqual(["y"]);
+    expect(second.failures).toEqual([]);
+    expect(second.skipped).toEqual([]);
+    expect(names(fake)).toEqual(["Leaf", "Same", "root"]);
+  });
+
+  it("a namesake under another relation waits on the same create, and is skipped as a namesake", async () => {
+    // Made, the first would stop it as a namesake. Not made, it is not sent:
+    // it used to be listed as failed with the first one's reason.
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    vi.spyOn(fake.api.thoughts, "create");
     fake.failOn.add("Same");
     const outcome = await ingest(fake.api, BRAIN, {
       thoughts: [
         { tempId: "x", name: "Same", parent: ROOT },
-        { tempId: "y", name: "Same", parent: ROOT },
-        { tempId: "under", name: "Leaf", parent: "y" },
+        { tempId: "y", name: "Same", parent: ROOT, relation: "jump" },
       ],
     });
 
-    expect(names(fake)).toEqual(["root"]);
-    expect(outcome.failures.map((f) => f.what)).toEqual(['thought "Same" (x)', 'thought "Same" (y)']);
-    expect(outcome.skipped).toEqual([{ what: 'thought "Leaf" (under)', reason: needs("y") }]);
+    expect(createsOf(fake)).toEqual(["Same"]);
+    expect(outcome.failures.map((f) => f.what)).toEqual(['thought "Same" (x)']);
+    expect(outcome.skipped).toEqual([
+      { what: 'thought "Same" (y)', reason: 'is a namesake of "x", which was not created' },
+    ]);
   });
 
   it("a link between two branches that both failed names both", async () => {
@@ -1213,6 +1311,130 @@ describe("a thought that fails in the middle of a batch", () => {
       { what: 'thought "Top" (top)', reason: "could not reach http://localhost:11522" },
       { what: 'thought "Side" (side)', reason: "boom" },
     ]);
+  });
+});
+
+describe("what a failed note, tag or alias is listed as", () => {
+  const A = "cccccccc-0000-4000-8000-000000000003";
+  const B = "dddddddd-0000-4000-8000-000000000004";
+  /** Two thoughts of one title, under two parents: only an identifier tells them apart. */
+  const plan: IngestPlan = {
+    thoughts: [
+      { tempId: "one", name: "Same", parent: A, note: "first", tagIds: [TAG] },
+      { tempId: "two", name: "Same", parent: B, note: "second", tagIds: [TAG] },
+    ],
+  };
+  const brain = () =>
+    fakeBrain([
+      { id: A, name: "A" },
+      { id: B, name: "B" },
+    ]);
+
+  it("a note that fails names its thought by identifier, not by a title two thoughts share", async () => {
+    // It used to read `note for "Same"`, for either of them.
+    const fake = brain();
+    fake.failOn.add("note: second");
+    const outcome = await ingest(fake.api, BRAIN, plan);
+
+    const two = outcome.created.find((c) => c.tempId === "two")!.thoughtId;
+    expect(outcome.failures).toEqual([
+      { what: `note for "Same" (${two})`, reason: "server refused" },
+    ]);
+    expect(fake.thoughts.get(two)?.note).toBe("");
+  });
+
+  it("a tag that fails names its thought by identifier too", async () => {
+    const fake = brain();
+    vi.spyOn(fake.api.links, "attachTag").mockImplementationOnce(async () => {
+      throw new Error("server refused");
+    });
+    const outcome = await ingest(fake.api, BRAIN, plan);
+
+    const failed = vi.mocked(fake.api.links.attachTag).mock.calls[0]![1];
+    expect(outcome.created.map((c) => c.thoughtId)).toContain(failed);
+    expect(outcome.failures).toEqual([
+      { what: `tag ${TAG} on "Same" (${failed})`, reason: "server refused" },
+    ]);
+    expect(outcome.tagsAttached).toBe(1);
+  });
+
+  it("the outcome names the thoughts whose note was written, and no other", async () => {
+    // What the report's warning about code fences goes by: it used to list
+    // every plan thought with a fenced note, written or not.
+    const fake = brain();
+    fake.failOn.add("note: first").add("Gone");
+    const outcome = await ingest(fake.api, BRAIN, {
+      thoughts: [
+        ...plan.thoughts,
+        { tempId: "gone", name: "Gone", parent: A, note: "never" },
+        { tempId: "bare", name: "Bare", parent: A },
+        { tempId: "blank", name: "Blank", parent: A, note: "  " },
+      ],
+    });
+
+    expect(outcome.notesWrittenFor).toEqual(["two"]);
+    expect(outcome.notesWritten).toBe(1);
+  });
+});
+
+describe("a brain that is not there", () => {
+  const TYPE = "cccccccc-0000-4000-8000-000000000003";
+  const nothingNamed: IngestPlan = {
+    thoughts: [
+      { tempId: "a", name: "A" },
+      { tempId: "b", name: "B", parent: "a", note: "n" },
+      { tempId: "c", name: "C" },
+    ],
+    links: [{ from: "a", to: "c" }],
+  };
+
+  it("stops a plan that names nothing in it once, ahead of the first write", async () => {
+    // Such a plan read nothing before its writes, and each create at its top
+    // was refused in turn: a failure a thought, with nothing to say which
+    // identifier was wrong.
+    const fake = fakeBrain();
+    vi.spyOn(fake.api.thoughts, "create");
+    fake.brain.there = false;
+
+    const refusal = await ingest(fake.api, BRAIN, nothingNamed).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(refusal).toBeInstanceOf(TheBrainError);
+    expect((refusal as TheBrainError).kind).toBe("unknown_brain");
+    expect(fake.brain.reads).toBe(1);
+    expect(fake.api.thoughts.create).not.toHaveBeenCalled();
+  });
+
+  it("that plan reads the brain once when it is there, and is written as before", async () => {
+    const fake = fakeBrain();
+    const outcome = await ingest(fake.api, BRAIN, nothingNamed);
+
+    expect(fake.brain.reads).toBe(1);
+    expect(outcome.created.map((c) => c.tempId)).toEqual(["a", "c", "b"]);
+    expect(outcome.failures).toEqual([]);
+  });
+
+  it("a plan that names a parent, a type or a tag has read it already, and sends no read more", async () => {
+    // Each of those reads is refused for such a brain, and the plan with it.
+    for (const named of [{ parent: ROOT }, { typeId: TYPE }, { tagIds: [TAG] }]) {
+      const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+      fake.types.add(TYPE);
+      const outcome = await ingest(fake.api, BRAIN, {
+        thoughts: [{ tempId: "a", name: "A", ...named }],
+      });
+      expect(outcome.created, JSON.stringify(named)).toHaveLength(1);
+      expect(fake.brain.reads, JSON.stringify(named)).toBe(0);
+    }
+  });
+
+  it("a parent the plan only jumps to is not read ahead of the writes, so the brain is", async () => {
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    await ingest(fake.api, BRAIN, {
+      thoughts: [{ tempId: "a", name: "A", parent: ROOT, relation: "jump" }],
+    });
+    expect(fake.parentReads).toEqual([]);
+    expect(fake.brain.reads).toBe(1);
   });
 });
 
@@ -1316,7 +1538,9 @@ describe("aliases in a batch", () => {
 
     expect(outcome.created).toHaveLength(1);
     expect(outcome.aliasesWritten).toBe(0);
-    expect(outcome.failures).toEqual([{ what: 'aliases for "RAG"', reason: "server refused" }]);
+    expect(outcome.failures).toEqual([
+      { what: `aliases for "RAG" (${RAG})`, reason: "server refused" },
+    ]);
   });
 });
 
@@ -1535,7 +1759,8 @@ describe("a type named as a parent in a batch", () => {
       links: [{ from: OTHER, to: "x", relation: "parent" }],
     });
 
-    expect(outcome.reused).toEqual([{ tempId: "x", thoughtId: TYPE, name: "Pattern" }]);
+    // With what it is: the graph that listed it gave its kind.
+    expect(outcome.reused).toEqual([{ tempId: "x", thoughtId: TYPE, name: "Pattern", kind: 2 }]);
     expect(outcome.created).toEqual([]);
     expect(outcome.linksCreated).toBe(0);
     expect(outcome.failures.map((f) => f.what)).toEqual([
@@ -1646,7 +1871,7 @@ describe("a tag named as a parent in a batch", () => {
       links: [{ from: OTHER, to: "x", relation: "parent" }],
     });
 
-    expect(outcome.reused).toEqual([{ tempId: "x", thoughtId: HELD, name: "gotcha" }]);
+    expect(outcome.reused).toEqual([{ tempId: "x", thoughtId: HELD, name: "gotcha", kind: 4 }]);
     expect(outcome.created).toEqual([]);
     expect(outcome.linksCreated).toBe(0);
     expect(outcome.failures.map((f) => f.what)).toEqual([

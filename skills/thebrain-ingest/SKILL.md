@@ -87,7 +87,10 @@ the plan is in the brain, with its identifiers in the table.
 - With no table, no thought was written: fix the cause and send the plan as
   it was.
 - A note or a tag that failed on a thought from the table: write it with
-  `brain_set_note` or `brain_tag`.
+  `brain_set_note` or `brain_tag`. Its line gives the thought's identifier.
+- A line under "Skipped" saying a thought is the same thought as another: the
+  plan named one thought twice, and it was sent once. What stopped it is on
+  the other item's line under "Failed".
 - A line saying that no answer came: the thought may exist all the same. Look
   at its parent with `brain_get_thought` before creating it again.
 - A line saying that the parent already has a thought of this name under
@@ -98,6 +101,17 @@ the plan is in the brain, with its identifiers in the table.
   give it a name that tells the two apart.
 - Nothing is rolled back, and tidying up by deletion is not yours to decide.
   Tell the person what is in the brain and what is not.
+
+**The tools that write one thought answer the same way.** An error from
+`brain_create_thought`, `brain_update_thought` or `brain_tag` that has a
+"Failed" section stopped part way: what is under "Done" is written, the call
+stopped at the line under "Failed", and what is under "Skipped" was not tried.
+Do not send the call again as it was. A thought listed under "Done" exists,
+and created again it is a duplicate. Write only the rest, to the identifier
+the result gives, with the tool its last section names. An error with no
+"Failed" section wrote nothing unless it says otherwise. One that says no
+answer came may have made the thought: look for it where the result says
+before creating it again.
 
 ### 5. Show the result
 
@@ -205,6 +219,9 @@ one exists — five nearly identical types are worse than one general one.
 In a traversal and among a thought's neighbours, a type or a tag is marked
 `[type]` or `[tag]` after its identifier, and a search asked to include them
 says which in a `Kind` column. A thought with no mark is an ordinary one.
+`brain_ingest` marks a thought it found in place the same way: a plan thought
+that "existed" as a `[type]` or a `[tag]` landed on one of that name under its
+parent, and nothing can be put under it.
 `brain_get_thought` shows a thought's own type with its identifier, ready to
 reuse.
 

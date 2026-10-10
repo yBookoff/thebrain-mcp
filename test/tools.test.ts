@@ -728,11 +728,11 @@ describe("brain_update_thought", () => {
     });
 
     expect(result.isError).toBe(false);
+    // One field to a request: a patch refused part way keeps what came
+    // before, and does not say how far it got.
     expect(sent("PATCH")).toEqual([
-      [
-        { op: "remove", path: "/label" },
-        { op: "remove", path: "/backgroundColor" },
-      ],
+      [{ op: "remove", path: "/label" }],
+      [{ op: "remove", path: "/backgroundColor" }],
     ]);
     expect(calls.filter((c) => c.method === "DELETE").map((c) => c.path)).toEqual([
       `/api/links/${BRAIN}/${LINK}`,
@@ -1026,7 +1026,7 @@ describe("brain_ingest when a thought fails in the middle of a batch", () => {
 
     expect(result.isError).toBe(true);
     expect(result.text).toContain(`created  Top    ${TOP}  top`);
-    expect(result.text).toContain('## Failed\n- note for "Top": boom');
+    expect(result.text).toContain(`## Failed\n- note for "Top" (${TOP}): boom`);
     expect(result.text).not.toContain("## Skipped");
     expect(result.text).toContain("nothing is rolled back");
   });
@@ -1634,6 +1634,7 @@ describe("an identifier that is not a tag", () => {
    */
   const routes = (link: Record<string, unknown> | null = null): Route[] => {
     const others: Record<string, { name: string; kind: number }> = {
+      [THOUGHT]: { name: "RAG", kind: 1 },
       [PARENT]: { name: "Constraints", kind: 1 },
       [TAG]: { name: "gotcha", kind: 4 },
       [TYPE]: { name: "Pattern", kind: 2 },
@@ -2710,5 +2711,1182 @@ describe("what an alias costs", () => {
     });
     expect(result.isError).toBe(true);
     expect(calls).toEqual([]);
+  });
+});
+
+describe("a call that fails after it has written", () => {
+  const TYPE = "eeeeeeee-0000-4000-8000-000000000005";
+  const TAG = "ffffffff-0000-4000-8000-000000000006";
+  const TAG_B = "ffffffff-0000-4000-8000-00000000000b";
+  const TAG_C = "ffffffff-0000-4000-8000-00000000000c";
+  const NOBODY = "99999999-0000-4000-8000-000000000009";
+  const KINDS: Record<string, number> = {
+    [THOUGHT]: 1,
+    [PARENT]: 1,
+    [TYPE]: 2,
+    [TAG]: 4,
+    [TAG_B]: 4,
+    [TAG_C]: 4,
+  };
+
+  const said = (status: number, text: string) => (): Response =>
+    new Response(JSON.stringify(text), {
+      status,
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
+  const boom = said(500, "boom");
+  /** What the API answers for the read of a thought nobody has. */
+  const bareNotFound = (): Response =>
+    new Response(JSON.stringify({ title: "Not Found", status: 404 }), {
+      status: 404,
+      headers: { "content-type": "application/problem+json" },
+    });
+  const noAnswer = (): never => {
+    // What the client makes of a timeout: the request may have reached TheBrain.
+    throw new DOMException("timed out", "TimeoutError");
+  };
+
+  /**
+   * A brain of two ordinary thoughts, a type and three tags, which takes
+   * every write. `first` goes ahead of its routes, and is where a test puts
+   * the answer that fails. A patch is kept, so a type and aliases read back.
+   */
+  const routes = (first: Route[] = [], link: Record<string, unknown> | null = null): Route[] => {
+    const held: { typeId: string | null; aliases: string[] } = { typeId: null, aliases: [] };
+    return [
+      ...first,
+      ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
+      ["GET /graph", () => graph(thought("RAG"))],
+      [
+        "GET /api/thoughts/",
+        (url) => {
+          const id = url.pathname.split("/").pop()!;
+          if (!(id in KINDS)) return bareNotFound();
+          return { ...thought("RAG"), id, kind: KINDS[id], ...(id === THOUGHT ? held : { aliases: [] }) };
+        },
+      ],
+      [
+        "PATCH /api/thoughts/",
+        (_url, body) => {
+          for (const op of body as Array<{ op: string; path: string; value?: unknown }>) {
+            if (op.path === "/typeId") held.typeId = op.value as string;
+            if (op.path === "/aliases") held.aliases = (op.value as string[] | undefined) ?? [];
+          }
+          return 200;
+        },
+      ],
+      ["POST /api/thoughts/", () => ({ id: THOUGHT })],
+      ["POST /api/notes/", () => 200],
+      ["GET /api/notes/", () => noNote],
+      ["POST /api/links/", () => ({ id: LINK })],
+      ["GET /api/links/", () => (link === null ? 404 : { id: LINK, ...link })],
+      ["DELETE /api/", () => 200],
+    ];
+  };
+  const requests = (calls: Array<{ method: string; path: string }>): string[] =>
+    calls.map((c) => `${c.method} ${c.path}`);
+  const writes = (calls: Array<{ method: string; path: string }>): string[] =>
+    requests(calls.filter((c) => c.method !== "GET"));
+
+  const AT_FIRST = "The call stopped at its first failure, and nothing is rolled back. ";
+  const NOT = "What is under Failed was not, unless its line says otherwise";
+  /** The sentences under "Next" when something stands under "Done". */
+  const IN_PART = `${AT_FIRST}What is under Done was done. ${NOT}`;
+  const STOPPED = ", and what is under Skipped was not tried. ";
+  const TAKE = " It may have been deleted, or be another brain's. Take identifiers from brain_search or brain_get_thought.";
+
+  describe("brain_create_thought", () => {
+    const EXISTS =
+      "The thought exists, and its identifier works immediately: do not create it again. " +
+      `Fix the cause and write only the rest to ${THOUGHT}: `;
+
+    it("a note that fails leaves the identifier of the thought it made, and what to finish with", async () => {
+      // The result used to be the error alone, "boom (POST …)": the thought
+      // was there, and the call sent again made a second.
+      const { call, calls } = await connect(routes([["POST /api/notes/", boom]]));
+      const result = await call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        parentId: PARENT,
+        note: "body",
+        tagIds: [TAG],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        [
+          "## Done",
+          `- created thought "RAG" — ${THOUGHT}`,
+          "",
+          "## Failed",
+          `- note: boom (POST /api/notes/${BRAIN}/${THOUGHT}/update)`,
+          "",
+          "## Skipped",
+          `- tag ${TAG}`,
+          "",
+          "## Next",
+          `${IN_PART}${STOPPED}${EXISTS}the note with brain_set_note, tags with brain_tag.`,
+        ].join("\n"),
+      );
+      // One thought, and nothing sent past the failure.
+      expect(writes(calls)).toEqual([
+        `POST /api/thoughts/${BRAIN}`,
+        `POST /api/notes/${BRAIN}/${THOUGHT}/update`,
+      ]);
+    });
+
+    it("a tag that fails leaves what was written by identifier, and does not say that nothing was", async () => {
+      // A tag deleted between the check ahead of the create and its own
+      // turn. The result used to be that refusal with its "Nothing was
+      // written", over a thought with a note and a tag.
+      let reads = 0;
+      const { call, calls } = await connect(
+        routes([
+          [`GET /api/thoughts/${BRAIN}/${TAG_B}`, () => ((reads += 1) > 1 ? 404 : thought("b", { id: TAG_B, kind: 4 }))],
+        ]),
+      );
+      const result = await call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        parentId: PARENT,
+        note: "body",
+        tagIds: [TAG, TAG_B, TAG_C],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        [
+          "## Done",
+          `- created thought "RAG" — ${THOUGHT}`,
+          "- note written",
+          `- tag attached: ${TAG}`,
+          "",
+          "## Failed",
+          `- tag ${TAG_B}: tagId ${TAG_B} is not a tag: no thought in this brain has that ` +
+            "identifier. Take tag identifiers from brain_list_types_and_tags.",
+          "",
+          "## Skipped",
+          `- tag ${TAG_C}`,
+          "",
+          "## Next",
+          `${IN_PART}${STOPPED}${EXISTS}tags with brain_tag.`,
+        ].join("\n"),
+      );
+      expect(result.text).not.toContain("Nothing was written");
+      expect(writes(calls)).toEqual([
+        `POST /api/thoughts/${BRAIN}`,
+        `POST /api/notes/${BRAIN}/${THOUGHT}/update`,
+        `POST /api/links/${BRAIN}`,
+      ]);
+    });
+
+    it("the last write failing leaves nothing skipped, and a note that was written keeps its warning", async () => {
+      const { call } = await connect(routes([["POST /api/links/", boom]]));
+      const result = await call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        note: "```\ncode\n```\n",
+        tagIds: [TAG],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        [
+          "## Done",
+          `- created thought "RAG" — ${THOUGHT}`,
+          "- note written",
+          "",
+          "## Failed",
+          `- tag ${TAG}: boom (POST /api/links/${BRAIN})`,
+          "",
+          "## Warning",
+          "- this note contains a fenced code block — TheBrain drops the closing ``` on save " +
+            "and the rest of the text gets swallowed into the block. Prefer indenting code by " +
+            "four spaces",
+          "",
+          "## Next",
+          `${IN_PART}. ${EXISTS}tags with brain_tag.`,
+        ].join("\n"),
+      );
+    });
+
+    it("a write that got no answer is not called unwritten", async () => {
+      const { call } = await connect(routes([["POST /api/notes/", noAnswer]]));
+      const result = await call("brain_create_thought", { brainId: BRAIN, name: "RAG", note: "body" });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain(
+        "## Failed\n- note: request exceeded 30000 ms Check that the TheBrain desktop app is " +
+          "running and its local API is enabled. — no answer came, so TheBrain may have carried " +
+          "it out all the same\n",
+      );
+      expect(result.text).toContain(
+        `## Next\n${IN_PART}. ${EXISTS}the note with brain_set_note.`,
+      );
+    });
+
+    it("a read that got no answer is not a write that may have gone through", async () => {
+      const lost =
+        "request exceeded 30000 ms Check that the TheBrain desktop app is running and its " +
+        "local API is enabled.";
+      // Ahead of the create, the read of the parent: nothing was sent to make a thought.
+      const before = await connect(routes([[`GET /api/thoughts/${BRAIN}/${PARENT}`, noAnswer]]));
+      const refused = await before.call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        parentId: PARENT,
+      });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toBe(lost);
+      expect(writes(before.calls)).toEqual([]);
+
+      // After it, the tag's own read at its turn: the tag is not attached.
+      let reads = 0;
+      const after = await connect(
+        routes([
+          [
+            `GET /api/thoughts/${BRAIN}/${TAG}`,
+            () => ((reads += 1) > 1 ? noAnswer() : thought("gotcha", { id: TAG, kind: 4 })),
+          ],
+        ]),
+      );
+      const result = await after.call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        tagIds: [TAG],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain(`## Failed\n- tag ${TAG}: ${lost}\n`);
+      expect(result.text).not.toContain("no answer came");
+      expect(result.text).toContain(`## Next\n${IN_PART}. ${EXISTS}tags with brain_tag.`);
+    });
+
+    it("a create that got no answer says the thought may be there, and where to look for it", async () => {
+      // It used to be the network's message alone, and the thought was there
+      // with no word that it might be.
+      const lost =
+        "request exceeded 30000 ms Check that the TheBrain desktop app is running and its " +
+        'local API is enabled.\n\n## Next\nNo answer came to the create, so TheBrain may have made "RAG" ' +
+        "all the same, and there is no identifier to give for it. Before creating it again, look for it ";
+
+      const under = await connect(routes([["POST /api/thoughts/", noAnswer]]));
+      const result = await under.call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        parentId: PARENT,
+        note: "body",
+        tagIds: [TAG],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        `${lost}next to ${PARENT} with brain_get_thought. Nothing else of the call was written: ` +
+          "if the thought is there, write its note with brain_set_note and its tags with brain_tag.",
+      );
+      expect(writes(under.calls)).toEqual([`POST /api/thoughts/${BRAIN}`]);
+
+      // With no parent there is nothing to look next to.
+      const alone = await connect(routes([["POST /api/thoughts/", noAnswer]]));
+      expect((await alone.call("brain_create_thought", { brainId: BRAIN, name: "RAG" })).text).toBe(
+        `${lost}with brain_search, after brain_index with action=sync where the brain has an ` +
+          "index: with no parent it is next to no thought, and TheBrain's own search finds a " +
+          "new thought only after some seconds.",
+      );
+    });
+
+    it("a create that is refused is the error it was, and one refused for no cause says what to read", async () => {
+      // The 400 a create gets under a parent deleted a moment ago. It used
+      // to be passed on as it came, "Could not create thought. (POST …)".
+      const { call, calls } = await connect(
+        routes([["POST /api/thoughts/", said(400, "Could not create thought.")]]),
+      );
+      const result = await call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        parentId: PARENT,
+        note: "body",
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        `Could not create thought. TheBrain named no cause (POST /api/thoughts/${BRAIN}). It ` +
+          "answers so when the parent named for the new thought was deleted a moment ago, or " +
+          "the type named for it is no thought of this brain. Nothing was created. Read the " +
+          "parent and the type with brain_get_thought before sending the call again.",
+      );
+      expect(writes(calls)).toEqual([`POST /api/thoughts/${BRAIN}`]);
+    });
+
+    it("written whole it reads as it did, to the character", async () => {
+      const { call } = await connect(routes());
+      const result = await call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        parentId: PARENT,
+        note: "```\ncode\n```\n",
+        tagIds: [TAG, TAG_B],
+        aliases: ["R.A.G."],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(
+        [
+          "## Done",
+          `- created thought "RAG" — ${THOUGHT}`,
+          '- aliases: ["R.A.G."]',
+          "- note written",
+          "- tags attached: 2",
+          "",
+          "## Warning",
+          "- this note contains a fenced code block — TheBrain drops the closing ``` on save " +
+            "and the rest of the text gets swallowed into the block. Prefer indenting code by " +
+            "four spaces",
+          "",
+          "## Next",
+          "The identifier above works immediately. Searching for this thought by name only " +
+            "succeeds after a few seconds, so refer to it by identifier.",
+        ].join("\n"),
+      );
+    });
+  });
+
+  describe("brain_update_thought", () => {
+    const REST = `Fix the cause and send only the rest, in a brain_update_thought call for ${THOUGHT}.`;
+    /** As the API: a colour that is not `#rrggbb` is a 400, and the patch stops there. */
+    const colours: Route = [
+      "PATCH /api/thoughts/",
+      (_url, body) =>
+        (body as Array<{ path: string; value?: unknown }>).some(
+          (op) => op.path.endsWith("Color") && !/^#[0-9a-f]{6}$/i.test(String(op.value)),
+        )
+          ? said(400, "Color format is malformed - should be like '#123456'.")()
+          : 200,
+    ];
+
+    it("a field the API refuses leaves the ones before it listed as written, and the rest as not tried", async () => {
+      // The fields went in one patch. The API keeps what it wrote before the
+      // operation it refuses, so the name was changed, and the result was the
+      // colour's error alone.
+      const { call, sent } = await connect(routes([colours]));
+      const result = await call("brain_update_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        name: "renamed",
+        label: "caption",
+        foregroundColor: "red",
+        backgroundColor: "#112233",
+        addAliases: ["R.A.G."],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        [
+          "## Done",
+          '- name = "renamed"',
+          '- label = "caption"',
+          "",
+          "## Failed",
+          "- foregroundColor = \"red\": Color format is malformed - should be like '#123456'. " +
+            `(PATCH /api/thoughts/${BRAIN}/${THOUGHT})`,
+          "",
+          "## Skipped",
+          '- backgroundColor = "#112233"',
+          "- aliases",
+          "",
+          "## Next",
+          `${IN_PART}${STOPPED}${REST}`,
+        ].join("\n"),
+      );
+      // A field to a request, so what is listed as written is what was sent
+      // alone and answered 200, and nothing went out past the refusal.
+      expect(sent("PATCH")).toEqual([
+        [{ op: "replace", path: "/name", value: "renamed" }],
+        [{ op: "replace", path: "/label", value: "caption" }],
+        [{ op: "replace", path: "/foregroundColor", value: "red" }],
+      ]);
+    });
+
+    it("aliases that fail after the fields leave the fields listed as written", async () => {
+      // Refused by the limit of a hundred, after the name was changed: the
+      // result used to be the limit's sentence alone.
+      const { call } = await connect(
+        routes([
+          [
+            `GET /api/thoughts/${BRAIN}/${THOUGHT}`,
+            () => thought("RAG", { aliases: Array.from({ length: 99 }, (_, i) => `a${i}`) }),
+          ],
+        ]),
+      );
+      const result = await call("brain_update_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        name: "renamed",
+        addAliases: ["one more", "and another"],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        [
+          "## Done",
+          '- name = "renamed"',
+          "",
+          "## Failed",
+          "- aliases: a thought holds at most 100 aliases, and this would make 101. Remove some first",
+          "",
+          "## Next",
+          `${IN_PART}. ${REST}`,
+        ].join("\n"),
+      );
+    });
+
+    it("a patch that got no answer is not called unwritten", async () => {
+      let patches = 0;
+      const { call } = await connect(
+        routes([["PATCH /api/thoughts/", () => ((patches += 1) === 2 ? noAnswer() : 200)]]),
+      );
+      const result = await call("brain_update_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        name: "renamed",
+        label: "caption",
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain('## Done\n- name = "renamed"\n');
+      expect(result.text).toContain(
+        '- label = "caption": request exceeded 30000 ms Check that the TheBrain desktop app is ' +
+          "running and its local API is enabled. — no answer came, so TheBrain may have carried " +
+          "it out all the same\n",
+      );
+      expect(result.text).toContain(`## Next\n${IN_PART}. ${REST}`);
+    });
+
+    it("the first write failing says what was not tried after it, with nothing under Done", async () => {
+      // Its error alone would say nothing of the fields that were not sent.
+      const { call, sent } = await connect(routes([["PATCH /api/thoughts/", boom]]));
+      const result = await call("brain_update_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        name: "renamed",
+        label: "caption",
+        addAliases: ["R.A.G."],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        [
+          "## Failed",
+          `- name = "renamed": boom (PATCH /api/thoughts/${BRAIN}/${THOUGHT})`,
+          "",
+          "## Skipped",
+          '- label = "caption"',
+          "- aliases",
+          "",
+          "## Next",
+          `${AT_FIRST}${NOT}${STOPPED}${REST}`,
+        ].join("\n"),
+      );
+      expect(sent("PATCH")).toHaveLength(1);
+    });
+
+    it("a call with one thing to do fails as it did, to the character", async () => {
+      const { call } = await connect(routes([["PATCH /api/thoughts/", boom]]));
+      const result = await call("brain_update_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        name: "renamed",
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(`boom (PATCH /api/thoughts/${BRAIN}/${THOUGHT})`);
+    });
+
+    it("a refusal ahead of the first write still says that nothing was written, and lists the rest", async () => {
+      // True of the call here: nothing stands under Done.
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_update_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        name: "renamed",
+        typeId: PARENT,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        [
+          "## Failed",
+          `- typeId = "${PARENT}": typeId ${PARENT} is not a type: it is the thought "RAG". ` +
+            "Nothing was written. Take type identifiers from brain_list_types_and_tags.",
+          "",
+          "## Skipped",
+          '- name = "renamed"',
+          "",
+          "## Next",
+          `${AT_FIRST}${NOT}${STOPPED}${REST}`,
+        ].join("\n"),
+      );
+      expect(writes(calls)).toEqual([]);
+    });
+
+    it("a rename keeps the old name as an alias, though the thought still reads back under it", async () => {
+      // The read behind the alias edit returns the old name for a moment
+      // after the rename. The alias was dropped as equal to the name, and
+      // the result said there was nothing to add: 10 times of 10 live.
+      const { call, sent } = await connect(routes());
+      const result = await call("brain_update_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        name: "Retrieval",
+        addAliases: ["RAG", "retrieval"],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(
+        ["## Done", '- name = "Retrieval"', '- aliases added: ["RAG"]', '- aliases now: ["RAG"]'].join(
+          "\n",
+        ),
+      );
+      // And the new name is the one an alias cannot repeat.
+      expect(sent("PATCH")).toEqual([
+        [{ op: "replace", path: "/name", value: "Retrieval" }],
+        [{ op: "replace", path: "/aliases", value: ["RAG"] }],
+      ]);
+    });
+
+    it("aliases written whose read-back fails are listed as written, not as failed", async () => {
+      // The read that waits for the new list failed, and its error used to
+      // be the step's: "Failed" for aliases that were in the brain.
+      vi.useFakeTimers();
+      try {
+        let reads = 0;
+        const { call, sent } = await connect(
+          routes([
+            [
+              `GET /api/thoughts/${BRAIN}/${THOUGHT}`,
+              () => ((reads += 1) > 1 ? boom() : thought("RAG", { aliases: [] })),
+            ],
+          ]),
+        );
+        const pending = call("brain_update_thought", {
+          brainId: BRAIN,
+          thoughtId: THOUGHT,
+          label: "caption",
+          addAliases: ["R.A.G."],
+        });
+        await vi.advanceTimersByTimeAsync(5000);
+        const result = await pending;
+
+        expect(result.isError).toBe(false);
+        expect(result.text).toContain('- aliases added: ["R.A.G."]');
+        expect(result.text).toContain("the new aliases are written but do not read back yet");
+        expect(sent("PATCH")).toHaveLength(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("the type goes first, so what refuses it refuses it ahead of every other field", async () => {
+      const { call, sent } = await connect(routes());
+      const result = await call("brain_update_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        name: "renamed",
+        typeId: TYPE,
+        backgroundColor: "#112233",
+      });
+      expect(result.isError).toBe(false);
+      expect(sent("PATCH")).toEqual([
+        [{ op: "replace", path: "/typeId", value: TYPE }],
+        [{ op: "replace", path: "/name", value: "renamed" }],
+        [{ op: "replace", path: "/backgroundColor", value: "#112233" }],
+      ]);
+    });
+
+    it("a type that is accepted and does not read back stops the call, and the fields after it are listed as not tried", async () => {
+      // The other fields used to be in the type's patch, and were written.
+      // They are not sent now, and the type's error alone would not say so.
+      vi.useFakeTimers();
+      try {
+        const { call, sent } = await connect([
+          [
+            "GET /api/thoughts/",
+            (url) =>
+              url.pathname.endsWith(TYPE)
+                ? thought("Pattern", { id: TYPE, kind: 2 })
+                : thought("RAG", { aliases: [] }),
+          ],
+          ["PATCH /api/thoughts/", () => 200],
+        ]);
+        const pending = call("brain_update_thought", {
+          brainId: BRAIN,
+          thoughtId: THOUGHT,
+          name: "renamed",
+          typeId: TYPE,
+        });
+        await vi.advanceTimersByTimeAsync(5000);
+        const result = await pending;
+
+        expect(result.isError).toBe(true);
+        expect(result.text).toBe(
+          [
+            "## Failed",
+            `- typeId = "${TYPE}": the type was accepted, but the thought does not read back ` +
+              "with it yet. After a burst of writes that can take seconds: read the thought " +
+              "before setting the type again",
+            "",
+            "## Skipped",
+            '- name = "renamed"',
+            "",
+            "## Next",
+            `${AT_FIRST}${NOT}${STOPPED}${REST}`,
+          ].join("\n"),
+        );
+        expect(sent("PATCH")).toEqual([[{ op: "replace", path: "/typeId", value: TYPE }]]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a type whose read-back fails is told as accepted, not as the read's error", async () => {
+      // The patch went through and the read that waits for it failed. The
+      // read's error used to be the result, and said nothing of the type.
+      vi.useFakeTimers();
+      try {
+        let patched = false;
+        const { call } = await connect([
+          [`GET /api/thoughts/${BRAIN}/${TYPE}`, () => thought("Pattern", { id: TYPE, kind: 2 })],
+          ["GET /api/thoughts/", () => (patched ? boom() : thought("RAG"))],
+          ["PATCH /api/thoughts/", () => ((patched = true), 200)],
+        ]);
+        const pending = call("brain_update_thought", {
+          brainId: BRAIN,
+          thoughtId: THOUGHT,
+          typeId: TYPE,
+        });
+        await vi.advanceTimersByTimeAsync(5000);
+        const result = await pending;
+
+        expect(result.isError).toBe(true);
+        expect(result.text).toMatch(/^the type was accepted, but the thought does not read back/);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("written whole it reads as it did, to the character, in the order of the arguments", async () => {
+      const { call } = await connect(routes());
+      const result = await call("brain_update_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        name: "renamed",
+        label: null,
+        typeId: TYPE,
+        foregroundColor: "#112233",
+        addAliases: ["R.A.G."],
+        removeAliases: ["never there"],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(
+        [
+          "## Done",
+          '- name = "renamed"',
+          "- label = null",
+          `- typeId = "${TYPE}"`,
+          '- foregroundColor = "#112233"',
+          '- aliases added: ["R.A.G."]',
+          '- aliases now: ["R.A.G."]',
+        ].join("\n"),
+      );
+    });
+  });
+
+  describe("brain_tag", () => {
+    const REST = `Fix the cause and send only the rest, in a brain_tag call for ${THOUGHT}.`;
+    const NOTE =
+      "## Note\nTag changes are not visible in the graph immediately — up to half a second. " +
+      "Re-reading the thought right away may still show the old tags.";
+    const tagLink = { thoughtIdA: TAG, thoughtIdB: THOUGHT, relation: 1, meaning: 5 };
+
+    it("a write that fails midway leaves the tags before it listed as attached, and the rest as not tried", async () => {
+      // The result used to be the error alone, with a tag attached.
+      const { call, calls } = await connect(
+        routes(
+          [
+            [
+              "POST /api/links/",
+              (_url, body) =>
+                (body as { thoughtIdB: string }).thoughtIdB === TAG_B ? boom() : { id: LINK },
+            ],
+          ],
+          tagLink,
+        ),
+      );
+      const result = await call("brain_tag", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        add: [TAG, TAG_B, TAG_C],
+        remove: [TAG],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        [
+          "## Done",
+          `- attached ${TAG}`,
+          "",
+          "## Failed",
+          `- attach ${TAG_B}: boom (POST /api/links/${BRAIN})`,
+          "",
+          "## Skipped",
+          `- attach ${TAG_C}`,
+          `- remove ${TAG}`,
+          "",
+          "## Next",
+          `${IN_PART}${STOPPED}${REST}`,
+        ].join("\n"),
+      );
+      expect(writes(calls)).toEqual([`POST /api/links/${BRAIN}`, `POST /api/links/${BRAIN}`]);
+    });
+
+    it("a tag deleted since the check is refused at its turn, without a word that nothing was written", async () => {
+      let reads = 0;
+      const { call } = await connect(
+        routes([
+          [`GET /api/thoughts/${BRAIN}/${TAG_B}`, () => ((reads += 1) > 1 ? 404 : thought("b", { id: TAG_B, kind: 4 }))],
+        ]),
+      );
+      const result = await call("brain_tag", { brainId: BRAIN, thoughtId: THOUGHT, add: [TAG, TAG_B] });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        [
+          "## Done",
+          `- attached ${TAG}`,
+          "",
+          "## Failed",
+          `- attach ${TAG_B}: tagId ${TAG_B} is not a tag: no thought in this brain has that ` +
+            "identifier. Take tag identifiers from brain_list_types_and_tags.",
+          "",
+          "## Next",
+          `${IN_PART}. ${REST}`,
+        ].join("\n"),
+      );
+    });
+
+    it("the first write failing says what was not tried after it, and one tag alone fails as it did", async () => {
+      const { call, calls } = await connect(routes([["POST /api/links/", boom]]));
+      const result = await call("brain_tag", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        add: [TAG, TAG_B],
+        remove: [TAG_C],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        [
+          "## Failed",
+          `- attach ${TAG}: boom (POST /api/links/${BRAIN})`,
+          "",
+          "## Skipped",
+          `- attach ${TAG_B}`,
+          `- remove ${TAG_C}`,
+          "",
+          "## Next",
+          `${AT_FIRST}${NOT}${STOPPED}${REST}`,
+        ].join("\n"),
+      );
+      expect(writes(calls)).toHaveLength(1);
+
+      const alone = await connect(routes([["POST /api/links/", boom]]));
+      const one = await alone.call("brain_tag", { brainId: BRAIN, thoughtId: THOUGHT, add: [TAG] });
+      expect(one.isError).toBe(true);
+      expect(one.text).toBe(`boom (POST /api/links/${BRAIN})`);
+    });
+
+    it("a tag taken off a thought nobody has is an error, not a tag that was not on it", async () => {
+      // The lookup behind a removal is a 404 for such a thought, as for a
+      // tag that is not on one, and the answer used to be "was not on the
+      // thought", in a result that was no error.
+      const gone =
+        `No thought in this brain has the identifier ${NOBODY} ` +
+        `(GET /api/thoughts/${BRAIN}/${NOBODY}).${TAKE}`;
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_tag", { brainId: BRAIN, thoughtId: NOBODY, remove: [TAG] });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(gone);
+      expect(writes(calls)).toEqual([]);
+
+      // With more to remove, the rest is listed as not tried.
+      const more = await connect(routes());
+      const two = await more.call("brain_tag", {
+        brainId: BRAIN,
+        thoughtId: NOBODY,
+        remove: [TAG, TAG_B],
+      });
+      expect(two.isError).toBe(true);
+      expect(two.text).toContain(`## Failed\n- remove ${TAG}: ${gone}\n\n## Skipped\n- remove ${TAG_B}\n`);
+      expect(two.text).not.toContain("was not on the thought");
+      expect(writes(more.calls)).toEqual([]);
+    });
+
+    it("a tag that was not on a thought that is there reads as it did, at one read a call", async () => {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_tag", { brainId: BRAIN, thoughtId: THOUGHT, remove: [TAG, TAG_B] });
+
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(
+        [
+          "## Done",
+          `- tag ${TAG} was not on the thought`,
+          `- tag ${TAG_B} was not on the thought`,
+          "",
+          NOTE,
+        ].join("\n"),
+      );
+      // The two tags, the first lookup, the thought, the second lookup.
+      expect(requests(calls)).toEqual([
+        `GET /api/thoughts/${BRAIN}/${TAG}`,
+        `GET /api/thoughts/${BRAIN}/${TAG_B}`,
+        `GET /api/links/${BRAIN}/${THOUGHT}/${TAG}`,
+        `GET /api/thoughts/${BRAIN}/${THOUGHT}`,
+        `GET /api/links/${BRAIN}/${THOUGHT}/${TAG_B}`,
+      ]);
+    });
+
+    it("written whole it reads as it did, to the character, and a removal that finds its tag reads no thought", async () => {
+      const { call, calls } = await connect(routes([], tagLink));
+      const result = await call("brain_tag", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        add: [TAG_B],
+        remove: [TAG],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(
+        ["## Done", `- attached ${TAG_B}`, `- removed ${TAG}`, "", NOTE].join("\n"),
+      );
+      expect(requests(calls)).not.toContain(`GET /api/thoughts/${BRAIN}/${THOUGHT}`);
+    });
+  });
+
+  describe("brain_delete_thought", () => {
+    /** Deletion allowed, and an index that takes a removal or throws on it. */
+    const deleting = (remove: () => void) => () => ({
+      config: { allowDestructive: true },
+      store: () => ({ remove }),
+    });
+    const deleted = (active: unknown): Route[] => [["GET /graph", () => graph(active)], ...routes()];
+
+    it("an index that fails after the deletion does not read as a deletion that failed", async () => {
+      // The index's error used to be the whole result, for a thought that
+      // was gone for good.
+      const { call, calls } = await connect(
+        deleted(thought("RAG")),
+        deleting(() => {
+          throw new Error("database is locked");
+        }),
+      );
+      const result = await call("brain_delete_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        confirm: true,
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        [
+          "## Done",
+          '- "RAG" is gone from the brain',
+          "",
+          "## Failed",
+          "- its entry in the semantic index: database is locked",
+          "",
+          "## Next",
+          `${IN_PART}. The thought is deleted, and is not to be deleted again. Its entry stays ` +
+            "in the semantic index until brain_index is run with action=sync.",
+        ].join("\n"),
+      );
+      expect(writes(calls)).toEqual([`DELETE /api/thoughts/${BRAIN}/${THOUGHT}`]);
+    });
+
+    it("written whole it reads as it did, to the character", async () => {
+      const removed: string[][] = [];
+      const { call } = await connect(
+        deleted(thought("RAG")),
+        deleting((...args: unknown[]) => void removed.push(args[0] as string[])),
+      );
+      const asked = await call("brain_delete_thought", { brainId: BRAIN, thoughtId: THOUGHT });
+      expect(asked.isError).toBe(true);
+      expect(asked.text).toMatch(/^Delete the thought "RAG"\?\n\n- links: 0\n- children: 0\n/);
+
+      const result = await call("brain_delete_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        confirm: true,
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe('## Deleted\n"RAG" is gone from the brain');
+      expect(removed).toEqual([[THOUGHT]]);
+    });
+
+    it("a type or a tag is marked in the question and in the answer, as a read result marks one", async () => {
+      for (const [kind, mark] of [
+        [2, "[type]"],
+        [4, "[tag]"],
+      ] as const) {
+        const { call } = await connect(
+          deleted(thought("gotcha", { kind })),
+          deleting(() => undefined),
+        );
+        const asked = await call("brain_delete_thought", { brainId: BRAIN, thoughtId: THOUGHT });
+        expect(asked.text, mark).toMatch(new RegExp(`^Delete the thought "gotcha" \\${mark}\\?\\n`));
+
+        const result = await call("brain_delete_thought", {
+          brainId: BRAIN,
+          thoughtId: THOUGHT,
+          confirm: true,
+        });
+        expect(result.text, mark).toBe(`## Deleted\n"gotcha" ${mark} is gone from the brain`);
+      }
+    });
+  });
+});
+
+describe("what brain_ingest says of a batch written in part", () => {
+  const NOBODY = "99999999-0000-4000-8000-000000000009";
+  const TAG = "ffffffff-0000-4000-8000-000000000006";
+  const HELD = "eeeeeeee-0000-4000-8000-000000000005";
+  const FENCED = "```\ncode\n```\n";
+  const WARNING = (names: string) =>
+    "## Warning\nTheBrain drops the closing ``` on save, so notes with fenced code blocks " +
+    `will be corrupted: ${names}. Prefer indenting code by four spaces.`;
+  type Create = { name: string; sourceThoughtId?: string };
+  /** The identifier a thought of each name is created with. */
+  const ID: Record<string, string> = {
+    Kept: "11111111-0000-4000-8000-000000000001",
+    Lost: "22222222-0000-4000-8000-000000000002",
+    Same: "33333333-0000-4000-8000-000000000003",
+  };
+
+  /**
+   * A brain where PARENT is an ordinary thought with `children` under it,
+   * TAG is a tag and nobody has NOBODY. A thought is created with the
+   * identifier `ID` has for its name; `first` goes ahead of the routes.
+   */
+  const routes = (first: Route[] = [], children: unknown[] = []): Route[] => [
+    ...first,
+    ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
+    [
+      "GET /graph",
+      (url) =>
+        url.pathname.includes(NOBODY)
+          ? generic403()
+          : { ...graph(thought("parent", { id: PARENT })), children },
+    ],
+    [
+      "GET /api/thoughts/",
+      (url) => {
+        const id = url.pathname.split("/").pop()!;
+        if (id === NOBODY) return 404;
+        return { ...thought("Constraints", { aliases: [] }), id, kind: id === TAG ? 4 : 1 };
+      },
+    ],
+    [
+      "POST /api/thoughts/",
+      (_url, body) => {
+        const asked = body as Create;
+        return asked.sourceThoughtId === NOBODY
+          ? new Response(JSON.stringify(`Source Thought ${NOBODY} could not be located`), {
+              status: 404,
+              headers: { "content-type": "application/json" },
+            })
+          : { id: ID[asked.name] ?? THOUGHT };
+      },
+    ],
+    ["POST /api/notes/", () => 200],
+    ["PATCH /api/thoughts/", () => 200],
+    ["POST /api/links/", () => ({ id: LINK })],
+    ["GET /api/links/", () => 404],
+  ];
+  const boom = (): Response => new Response(JSON.stringify("boom"), { status: 500 });
+
+  it("the warning about code fences names only the notes that were written", async () => {
+    // It used to name every plan thought with a fenced note: the one that
+    // was not created, and the one whose note failed, as notes that "will be
+    // corrupted".
+    const { call } = await connect(
+      routes([[`POST /api/notes/${BRAIN}/${ID["Lost"]}`, boom]]),
+    );
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [
+        { tempId: "kept", name: "Kept", parent: PARENT, note: FENCED },
+        { tempId: "lost", name: "Lost", parent: PARENT, note: FENCED },
+        { tempId: "gone", name: "Gone", parent: NOBODY, note: FENCED },
+      ],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(`${WARNING("Kept")}\n`);
+    expect(result.text).toContain(
+      [
+        "## Failed",
+        `- thought "Gone" (gone): Source Thought ${NOBODY} could not be located`,
+        `- note for "Lost" (${ID["Lost"]}): boom`,
+      ].join("\n"),
+    );
+  });
+
+  it("with no fenced note written there is no such warning, and written whole it reads as it did", async () => {
+    const none = await connect(routes([["POST /api/notes/", boom]]));
+    const failed = await none.call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [{ tempId: "lost", name: "Lost", parent: PARENT, note: FENCED }],
+    });
+    expect(failed.isError).toBe(true);
+    expect(failed.text).not.toContain("## Warning");
+
+    const whole = await connect(routes());
+    const result = await whole.call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [
+        { tempId: "kept", name: "Kept", parent: PARENT, note: FENCED },
+        { tempId: "lost", name: "Lost", parent: PARENT, note: FENCED },
+        { tempId: "plain", name: "Plain", parent: PARENT, note: "prose" },
+      ],
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain(
+      `- notes written: 3\n- tags attached: 0\n\n${WARNING("Kept, Lost")}\n\n## Next\n`,
+    );
+  });
+
+  it("a note, a tag and an alias that fail name their thought by identifier", async () => {
+    // By title alone, `note for "Same"`, the line could be either of two
+    // plan thoughts, and the tool that writes the note takes an identifier.
+    const { call } = await connect(
+      routes(
+        [
+          ["POST /api/notes/", boom],
+          ["POST /api/links/", (_url, body) => ((body as { relation: number }).relation === 2 ? boom() : { id: LINK })],
+          ["PATCH /api/thoughts/", boom],
+        ],
+        [{ id: HELD, name: "Held", kind: 1 }],
+      ),
+    );
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [
+        { tempId: "same", name: "Same", parent: PARENT, note: "body", tagIds: [TAG] },
+        { tempId: "held", name: "Held", parent: PARENT, aliases: ["H"] },
+      ],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(
+      [
+        "## Failed",
+        `- note for "Same" (${ID["Same"]}): boom`,
+        `- tag ${TAG} on "Same" (${ID["Same"]}): boom`,
+        `- aliases for "Held" (${HELD}): boom`,
+      ].join("\n"),
+    );
+  });
+
+  it("two plan items for one thought that fails are one line under Failed, and the other is skipped", async () => {
+    // Both used to stand under Failed with the one reason, as if two
+    // requests had been refused.
+    const { call, sent } = await connect(routes());
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [
+        { tempId: "x", name: "Same", parent: NOBODY },
+        { tempId: "y", name: "Same", parent: NOBODY },
+        { tempId: "under", name: "Leaf", parent: "y" },
+      ],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(
+      [
+        "## Failed",
+        `- thought "Same" (x): Source Thought ${NOBODY} could not be located`,
+        "",
+        "## Skipped",
+        '- thought "Same" (y): is the same thought as "x", which was not created',
+        '- thought "Leaf" (under): depends on "x", which was not created',
+        "",
+        "## Next",
+        "None of the plan's thoughts was written",
+      ].join("\n"),
+    );
+    expect(sent("POST")).toHaveLength(1);
+  });
+
+  it("a thought the plan found in place that is a type or a tag is marked, and an ordinary one is not", async () => {
+    // A type or a tag can hang under a thought as an ordinary child, and
+    // the plan's thought of that name lands on it. It was listed like any
+    // other, and what the plan put under it was refused.
+    const TYPE = "eeeeeeee-0000-4000-8000-00000000000e";
+    const { call } = await connect(
+      routes(
+        [],
+        [
+          { id: TYPE, name: "Pattern", kind: 2 },
+          { id: TAG, name: "gotcha", kind: 4 },
+          { id: HELD, name: "Held", kind: 1 },
+        ],
+      ),
+    );
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [
+        { tempId: "p", name: "Pattern", parent: PARENT },
+        { tempId: "g", name: "gotcha", parent: PARENT },
+        { tempId: "h", name: "Held", parent: PARENT },
+        { tempId: "k", name: "Kept", parent: PARENT },
+      ],
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain(
+      [
+        "## Thoughts",
+        "Outcome  Title    Identifier",
+        "───────  ───────  ───────────────────────────────────────────",
+        `created  Kept     ${ID["Kept"]}`,
+        `existed  Pattern  ${TYPE} [type]`,
+        `existed  gotcha   ${TAG} [tag]`,
+        `existed  Held     ${HELD}`,
+      ].join("\n"),
+    );
+  });
+
+  it("a brainId that is no brain stops a plan that names nothing there at one request, with no write", async () => {
+    // Such a plan reads nothing ahead of its writes, and each thought at its
+    // top used to be listed under Failed with the API's 401, with nothing
+    // to say that it was the brainId.
+    const { call, calls } = await connect(
+      ["GET", "POST"].map(
+        (method): Route => [
+          `${method} /api/`,
+          () =>
+            new Response(JSON.stringify(`Access to brain ${BRAIN} is unauthorized.`), {
+              status: 401,
+              headers: { "content-type": "application/json; charset=utf-8" },
+            }),
+        ],
+      ),
+    );
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [
+        { tempId: "a", name: "A" },
+        { tempId: "b", name: "B", parent: "a" },
+        { tempId: "c", name: "C" },
+      ],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toBe(
+      `Access to brain ${BRAIN} is unauthorized. The key was accepted: it is brainId that ` +
+        "names no brain open to it. Take brainId from brain_list. The other identifiers " +
+        "in the call were not looked at.",
+    );
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([`GET /api/brains/${BRAIN}`]);
   });
 });

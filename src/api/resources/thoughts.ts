@@ -406,11 +406,18 @@ export class ThoughtsResource {
    * silently undo the first: measured, two edits in a row left only the second
    * alias. Edits made at the same moment can still collide; the API has no way
    * to prevent that.
+   *
+   * `known.name` is the name a caller gave the thought a moment ago. The read
+   * here still returns the old one then, 19 times of 20, and an alias equal
+   * to it was dropped as the name's own: a rename that kept the old name as
+   * an alias lost it, and reported nothing to add. The API keeps such an
+   * alias, sent straight after the rename, 20 times of 20.
    */
   async changeAliases(
     brainId: string,
     thoughtId: string,
     changes: AliasChanges,
+    known: { name?: string | undefined } = {},
   ): Promise<AliasOutcome> {
     const thought = await this.get(brainId, thoughtId);
     const current = aliasesOf(thought);
@@ -420,7 +427,7 @@ export class ThoughtsResource {
 
     // The API drops an alias equal to the name, in any case, so asking for one
     // is not a change.
-    const taken = new Set([...kept, thought.name ?? ""].map(aliasKey));
+    const taken = new Set([...kept, known.name ?? thought.name ?? ""].map(aliasKey));
     const added = normalizeAliases(changes.add ?? []).filter((a) => !taken.has(aliasKey(a)));
 
     const aliases = [...kept, ...added];
@@ -448,7 +455,13 @@ export class ThoughtsResource {
     return { aliases, added, removed, readBack };
   }
 
-  /** Waits for a write to show up on a read of the thought. */
+  /**
+   * Waits for a write to show up on a read of the thought.
+   *
+   * A read that fails has not shown the write, and no more than that: thrown
+   * from here, its error passed for the write's own, and a write that had
+   * gone through was reported as one that failed.
+   */
   async #readsBack(
     brainId: string,
     thoughtId: string,
@@ -456,7 +469,8 @@ export class ThoughtsResource {
   ): Promise<boolean> {
     const deadline = Date.now() + READ_BACK.timeoutMs;
     for (;;) {
-      if (landed(await this.get(brainId, thoughtId))) return true;
+      const thought = await this.get(brainId, thoughtId).catch(() => null);
+      if (thought !== null && landed(thought)) return true;
       if (Date.now() >= deadline) return false;
       await new Promise((resolve) => setTimeout(resolve, READ_BACK.stepMs));
     }

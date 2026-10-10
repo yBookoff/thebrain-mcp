@@ -1640,6 +1640,35 @@ suite("resource layer against the live API", () => {
       await settle();
       expect((await api.thoughts.get(brainId, id)).label).toBeNull();
     });
+
+    it("fields patched one to a request, one after another, are each written or refused alone", async () => {
+      // What `brain_update_thought` sends, so that it can say which fields a
+      // call wrote. Measured: 60 thoughts patched a field at a time, four or
+      // five fields each, read back whole every time; a colour that is not
+      // `#rrggbb` refused 9 times of 9, in three spellings.
+      const id = await make("field-by-field");
+      const renamed = `${PREFIX}field-by-field-renamed`;
+      await api.thoughts.update(brainId, id, { name: renamed });
+      await api.thoughts.update(brainId, id, { label: "caption" });
+      const refused = await api.thoughts.update(brainId, id, { foregroundColor: "red" }).then(
+        () => null,
+        (error: unknown) => error as TheBrainError,
+      );
+      expect(refused?.kind).toBe("bad_request");
+      expect(refused?.message).toMatch(/^Color format is malformed/);
+      await api.thoughts.update(brainId, id, { backgroundColor: "#112233" });
+
+      const after = await read(
+        id,
+        (t) => t.name === renamed && t.label === "caption" && t.backgroundColor !== null,
+      );
+      expect([after.name, after.label, after.backgroundColor?.toLowerCase()]).toEqual([
+        renamed,
+        "caption",
+        "#112233",
+      ]);
+      expect(after.foregroundColor).toBeNull();
+    });
   });
 
   /**
@@ -4074,6 +4103,31 @@ suite("resource layer against the live API", () => {
       api.client.patch(`/api/thoughts/${brainId}/${id}`, {
         jsonPatch: [{ op, path, ...(value === undefined ? {} : { value }) }],
       });
+
+    it("a renamed thought keeps its old name as an alias, sent before the new name reads back", async (ctx) => {
+      await requireAliases(ctx);
+      // Measured: the read between the rename and the alias still had the old
+      // name 19 times of 20, and the API kept the alias 20 times of 20. An
+      // alias edit that compared with that read dropped it as the name's own:
+      // through brain_update_thought the old name was lost 10 times of 10.
+      const old = `${PREFIX}alias-renamed-from`;
+      const renamed = `${PREFIX}alias-renamed-to`;
+      const id = await makeWith("alias-renamed-from", []);
+      await settle(300);
+
+      await api.thoughts.update(brainId, id, { name: renamed });
+      const outcome = await api.thoughts.changeAliases(
+        brainId,
+        id,
+        { add: [old, renamed] },
+        { name: renamed },
+      );
+      // The new name is the one an alias cannot repeat.
+      expect(outcome.added).toEqual([old]);
+
+      expect(await stored(id, sameSet([old]))).toEqual([old]);
+      expect((await api.thoughts.get(brainId, id)).name).toBe(renamed);
+    });
 
     it("aliases given at creation are stored, and the graph carries them too", async (ctx) => {
       await requireAliases(ctx);

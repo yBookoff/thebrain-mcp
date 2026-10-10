@@ -209,6 +209,54 @@ describe("error explanations point at the next step", () => {
   it("a non-error is coerced to a string", () => {
     expect(describeError("a string")).toBe("a string");
   });
+
+  it("the 400 a create gives with no cause says what it answers so for, and what to read", () => {
+    // Measured: a create under a parent deleted a moment ago, and one with a
+    // typeId nobody has. Neither makes a thought. It used to be passed on as
+    // it came, "Could not create thought. (POST …)".
+    const refused = (message: string, path: string): string =>
+      describeError(new TheBrainError("bad_request", message, { status: 400, method: "POST", path }));
+    const text = refused("Could not create thought.", `/api/thoughts/${BRAIN}`);
+    expect(text).toBe(
+      `Could not create thought. TheBrain named no cause (POST /api/thoughts/${BRAIN}). It ` +
+        "answers so when the parent named for the new thought was deleted a moment ago, or " +
+        "the type named for it is no thought of this brain. Nothing was created. Read the " +
+        "parent and the type with brain_get_thought before sending the call again.",
+    );
+    // It names no identifier, so it names both it can be about, and no other.
+    expect(text).not.toMatch(/brainId|brain_list\b|THEBRAIN_API_KEY/);
+
+    // A 400 that says what it is about is passed on with its request, as before.
+    expect(refused(`Could not get target thought ${NOBODY}`, `/api/links/${BRAIN}`)).toBe(
+      `Could not get target thought ${NOBODY} (POST /api/links/${BRAIN})`,
+    );
+  });
+
+  it("a refusal met after the call has written does not say that nothing was written", () => {
+    // True of the step that was refused, and it would be read of the call:
+    // brain_create_thought said it over a thought it had just made.
+    for (const kind of ["not_a_type", "not_a_tag", "not_a_parent", "tag_as_parent"] as const) {
+      const error = new TheBrainError(kind, "1f0e is not one");
+      expect(describeError(error), kind).toContain("1f0e is not one. Nothing was written. ");
+      expect(describeError(error, false), kind).toBe(
+        describeError(error).replace(" Nothing was written.", ""),
+      );
+    }
+    // No other explanation makes that claim, and each reads the same either way.
+    for (const error of [
+      new TheBrainError("network", "no connection"),
+      new TheBrainError("not_found", "Not Found", {
+        method: "PATCH",
+        path: `/api/thoughts/${BRAIN}/${NOBODY}`,
+      }),
+      new TheBrainError("forbidden", ROUTER_403, { method: "GET", path: "/api/t" }),
+      new TheBrainError("server", "boom", { method: "POST", path: "/api/t" }),
+      new Error("something went wrong"),
+    ]) {
+      expect(describeError(error, false)).toBe(describeError(error));
+      expect(describeError(error)).not.toMatch(/Nothing was written/);
+    }
+  });
 });
 
 describe("formatting", () => {
