@@ -37,7 +37,6 @@ const RELATION_VALUES = {
   child: Relation.Child,
   parent: Relation.Parent,
   jump: Relation.Jump,
-  sibling: Relation.Sibling,
 } as const;
 
 export function registerWriteTools(server: McpServer, ctx: ServerContext): void {
@@ -61,9 +60,12 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
               "so a type goes in typeId.",
           ),
         relation: z
-          .enum(["child", "parent", "jump", "sibling"])
+          .enum(["child", "parent", "jump"])
           .optional()
-          .describe("How the new thought relates to that one. Child by default."),
+          .describe(
+            "How the new thought relates to that one. Child by default. For a sibling " +
+              "of a thought, give that thought's parent as parentId.",
+          ),
         note: z.string().optional().describe("Note body in Markdown."),
         typeId: z
           .string()
@@ -264,12 +266,14 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         fromId: z.string().describe("Source thought."),
         toId: z.string().describe("Target thought."),
         relation: z
-          .enum(["child", "parent", "jump", "sibling"])
+          .enum(["child", "parent", "jump"])
           .optional()
           .describe(
             "How the target relates to the source. Defaults to jump — a sideways link " +
-              "that leaves the hierarchy alone. A type cannot be the parent: that link " +
-              "would set the child's type, which is what typeId of brain_update_thought is for.",
+              "that leaves the hierarchy alone. Siblings are not linked to each other: " +
+              "they are thoughts with a parent in common. A type cannot be the parent: " +
+              "that link would set the child's type, which is what typeId of " +
+              "brain_update_thought is for.",
           ),
         name: z.string().optional().describe("Link label: how exactly one relates to the other."),
       },

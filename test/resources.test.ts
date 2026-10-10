@@ -12,6 +12,7 @@ import {
   warnIfFencedCode,
 } from "../src/api/index.js";
 import {
+  Relation,
   aliasesOf,
   type AttachmentDto,
   type ModificationLogDto,
@@ -1083,6 +1084,74 @@ describe("updating a link: flat fields become JSON Patch", () => {
     const { api, fetchImpl } = apiWith([["PATCH /api/links", () => 200]]);
     await api.links.update(BRAIN, LINK, { name: undefined });
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("a relation is refused before any request, and the fields beside it with it", async () => {
+    // Measured: patched to 4 a link answers 200 and stays as it was, to 2 it
+    // swaps its ends every time, and to 1 with a type above it sets a type.
+    // The type has no such field, so each of these is one forced past it.
+    const { api, fetchImpl } = apiWith([["PATCH /api/links", () => 200]]);
+    for (const relation of [4, 2, 1, 3]) {
+      await expect(
+        api.links.update(BRAIN, LINK, { name: "never written", relation } as never),
+      ).rejects.toMatchObject({
+        kind: "bad_request",
+        message: /does not change a link's relation.*create\(\)/s,
+      });
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("a relation that is none of the three", () => {
+  const SOURCE = "eeeeeeee-0000-4000-8000-000000000005";
+  const brain = () =>
+    apiWith([
+      ["/api/thoughts/", () => thought(SOURCE, "source")],
+      ["POST /api/thoughts/", () => ({ id: THOUGHT })],
+    ]);
+
+  it("the spec's Sibling is not one of the relations there are to send", () => {
+    expect(Relation).toEqual({ Child: 1, Parent: 2, Jump: 3 });
+  });
+
+  it("create refuses it before any request", async () => {
+    // Measured: the API answers 200 to any number and creates the thought.
+    // With 4 or 0 it is linked to nothing; with 5 or -1 by a link that
+    // carries the number and that no list of the graph shows.
+    const { api, fetchImpl } = brain();
+    for (const relation of [4, 0, 5, -1]) {
+      await expect(
+        api.thoughts.create(BRAIN, {
+          name: "new",
+          sourceThoughtId: SOURCE,
+          relation: relation as Relation,
+        }),
+      ).rejects.toMatchObject({
+        kind: "bad_request",
+        message: expect.stringContaining(
+          `relation must be 1 (child), 2 (parent) or 3 (jump), got ${relation}.`,
+        ),
+      });
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("create sends each of the three as it is, and a child's when given none", async () => {
+    for (const [relation, sentAs] of [
+      [Relation.Child, 1],
+      [Relation.Parent, 2],
+      [Relation.Jump, 3],
+      [undefined, 1],
+    ] as const) {
+      const { api, calls } = brain();
+      await api.thoughts.create(BRAIN, {
+        name: "new",
+        sourceThoughtId: SOURCE,
+        ...(relation !== undefined ? { relation } : {}),
+      });
+      expect(calls.at(-1)!.body).toMatchObject({ sourceThoughtId: SOURCE, relation: sentAs });
+    }
   });
 });
 

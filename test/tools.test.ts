@@ -980,6 +980,103 @@ describe("a type named as a parent", () => {
   });
 });
 
+describe("a sibling is no relation", () => {
+  /**
+   * A brain that answers 200 to what it is sent. The live API does so to a
+   * thought created as a sibling, which it links to nothing; a link sent as
+   * one it refuses with a 400.
+   */
+  const routes = (): Route[] => [
+    ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
+    ["GET /graph", () => graph(thought("parent"))],
+    ["GET /api/thoughts/", () => thought("Constraints", { aliases: [] })],
+    ["POST /api/thoughts/", () => ({ id: THOUGHT })],
+    ["POST /api/notes/", () => 200],
+    ["POST /api/links/", () => ({ id: LINK })],
+    ["GET /api/links/", () => 404],
+  ];
+  type Argument = { description?: string; enum?: string[]; $ref?: string };
+  /** Every argument of every tool that takes a relation. */
+  const relations = async (): Promise<Record<string, Argument>> => {
+    const { client } = await connect([]);
+    const { tools } = await client.listTools();
+    const schema = (name: string) => tools.find((t) => t.name === name)!.inputSchema;
+    const properties = (name: string): Record<string, Argument> =>
+      schema(name).properties as Record<string, Argument>;
+    const item = (list: string): Record<string, Argument> =>
+      (
+        properties("brain_ingest")[list] as unknown as {
+          items: { properties: Record<string, Argument> };
+        }
+      ).items.properties;
+    // A plan's links take their relation from its thoughts', by reference.
+    const followed = (argument: Argument): Argument =>
+      argument.$ref === undefined
+        ? argument
+        : (argument.$ref
+            .slice(2)
+            .split("/")
+            .reduce<unknown>(
+              (node, key) => (node as Record<string, unknown>)[key],
+              schema("brain_ingest"),
+            ) as Argument);
+    // Nowhere else either: no schema has the word for a value.
+    expect(
+      tools.filter((t) => JSON.stringify(t.inputSchema).includes('"sibling"')).map((t) => t.name),
+    ).toEqual([]);
+    return {
+      "brain_create_thought.relation": properties("brain_create_thought")["relation"]!,
+      "brain_link.relation": properties("brain_link")["relation"]!,
+      "brain_ingest.thoughts.relation": item("thoughts")["relation"]!,
+      "brain_ingest.links.relation": followed(item("links")["relation"]!),
+    };
+  };
+
+  it("no tool offers it: a relation is child, parent or jump", async () => {
+    for (const [where, argument] of Object.entries(await relations())) {
+      expect(argument.enum, where).toEqual(["child", "parent", "jump"]);
+    }
+  });
+
+  it("sent all the same, it is an error the model reads, and nothing goes out", async () => {
+    // brain_create_thought used to answer "created thought" for a thought the
+    // API had linked to nothing, and brain_ingest to list it as created.
+    // brain_link got the API's 400, and so did a plan's link, with the rest
+    // of the plan written by then.
+    const relation = "sibling";
+    const top = { tempId: "top", name: "Retrieval", parent: PARENT, note: "body" };
+    for (const [tool, args] of [
+      ["brain_create_thought", { name: "RAG", parentId: PARENT, relation, note: "body" }],
+      ["brain_link", { fromId: THOUGHT, toId: PARENT, relation, name: "beside" }],
+      [
+        "brain_ingest",
+        { thoughts: [top, { tempId: "rag", name: "RAG", parent: PARENT, relation }] },
+      ],
+      ["brain_ingest", { thoughts: [top], links: [{ from: "top", to: PARENT, relation }] }],
+    ] as const) {
+      const { call, calls } = await connect(routes());
+      // A result, not a protocol error: `call` would have thrown on one.
+      const result = await call(tool, { brainId: BRAIN, ...args });
+      expect(result.isError, tool).toBe(true);
+      // It names the argument and the values there are to choose from.
+      for (const word of ["relation", "child", "parent", "jump"]) {
+        expect(result.text, tool).toContain(word);
+      }
+      expect(calls, tool).toEqual([]);
+    }
+  });
+
+  it("the arguments that could be taken for it say where a sibling goes", async () => {
+    const described = await relations();
+    expect(described["brain_create_thought.relation"]!.description).toMatch(
+      /sibling.*that thought's parent as parentId/s,
+    );
+    expect(described["brain_link.relation"]!.description).toMatch(
+      /Siblings are not linked.*parent in common/s,
+    );
+  });
+});
+
 describe("what an alias costs", () => {
   it("is stated on every argument that can write one", async () => {
     // Per TheBrain's spec the first alias raises the version a brain requires

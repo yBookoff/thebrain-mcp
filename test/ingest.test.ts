@@ -255,6 +255,43 @@ describe("plan validation before any write", () => {
     ).toThrowError(/no-such-thing/);
   });
 
+  it("a relation that is none of the three is rejected, on a thought and on a link", () => {
+    // `sibling` was one of the names, and the API writes nothing with it.
+    // Looked up now it gives no number, which `create` would take for a child.
+    const sibling = "sibling" as never;
+    expect(() =>
+      planLevels({ thoughts: [{ tempId: "a", name: "one", parent: ROOT, relation: sibling }] }),
+    ).toThrowError(/thought "a" has the relation "sibling".*child, parent or jump/);
+    expect(() =>
+      planLevels({
+        thoughts: [{ tempId: "a", name: "one" }],
+        links: [{ from: "a", to: ROOT, relation: sibling }],
+      }),
+    ).toThrowError(new RegExp(`the link a -> ${ROOT} has the relation "sibling"`));
+    // Nor a name that every object answers to.
+    expect(() =>
+      planLevels({ thoughts: [{ tempId: "a", name: "one", relation: "toString" as never }] }),
+    ).toThrowError(IngestValidationError);
+  });
+
+  it("each of the three relations passes, and so does none", () => {
+    const levels = planLevels({
+      thoughts: [
+        { tempId: "a", name: "one", parent: ROOT, relation: "child" },
+        { tempId: "b", name: "two", parent: ROOT, relation: "parent" },
+        { tempId: "c", name: "three", parent: ROOT, relation: "jump" },
+        { tempId: "d", name: "four", parent: ROOT },
+      ],
+      links: [
+        { from: "a", to: "b", relation: "child" },
+        { from: "a", to: "c", relation: "parent" },
+        { from: "a", to: "d", relation: "jump" },
+        { from: "b", to: "c" },
+      ],
+    });
+    expect(levels).toHaveLength(1);
+  });
+
   it("levels are laid out by depth regardless of input order", () => {
     const levels = planLevels({
       thoughts: [
@@ -294,6 +331,26 @@ describe("writing a batch", () => {
     const created = new Map(outcome.created.map((c) => [c.tempId, c.thoughtId]));
     expect(thoughts.get(created.get("a")!)?.parent).toBe(created.get("root"));
     expect(links.find((l) => l.name === "contradicts")).toBeDefined();
+  });
+
+  it("a relation that is none of the three stops the plan before its first write", async () => {
+    // A thought sent as a sibling used to be created with no link and listed
+    // as created, and a link sent as one failed with the rest written.
+    const sibling = "sibling" as never;
+    const { api, thoughts, links } = fakeBrain([{ id: ROOT, name: "root" }]);
+    const beside = { tempId: "c", name: "Idea C", parent: "a", relation: sibling };
+    await expect(
+      ingest(api, BRAIN, { ...plan, thoughts: [...plan.thoughts, beside] }),
+    ).rejects.toThrowError(IngestValidationError);
+    await expect(
+      ingest(api, BRAIN, {
+        ...plan,
+        links: [...plan.links!, { from: "b", to: "a", relation: sibling }],
+      }),
+    ).rejects.toThrowError(IngestValidationError);
+
+    expect([...thoughts.keys()]).toEqual([ROOT]);
+    expect(links).toEqual([]);
   });
 
   it("links resolve through returned identifiers, not names", async () => {

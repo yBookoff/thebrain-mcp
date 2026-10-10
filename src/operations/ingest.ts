@@ -18,13 +18,12 @@ import { ALIASES_UNSUPPORTED, normalizeAliases, type TheBrainApi } from "../api/
 import { Relation } from "../api/types.js";
 import { mapWithConcurrency } from "../semantic/indexer.js";
 
-export type RelationName = "child" | "parent" | "jump" | "sibling";
+export type RelationName = "child" | "parent" | "jump";
 
 export const RELATION_BY_NAME: Readonly<Record<RelationName, number>> = {
   child: Relation.Child,
   parent: Relation.Parent,
   jump: Relation.Jump,
-  sibling: Relation.Sibling,
 };
 
 export interface IngestThought {
@@ -113,6 +112,7 @@ export function planLevels(plan: IngestPlan): IngestThought[][] {
     if (t.name.trim() === "") {
       throw new IngestValidationError(`thought "${t.tempId}" has an empty name`);
     }
+    requireRelation(t.relation, `thought "${t.tempId}"`);
     byTempId.set(t.tempId, t);
   }
 
@@ -127,6 +127,7 @@ export function planLevels(plan: IngestPlan): IngestThought[][] {
   }
 
   for (const link of plan.links ?? []) {
+    requireRelation(link.relation, `the link ${link.from} -> ${link.to}`);
     for (const [side, ref] of [
       ["from", link.from],
       ["to", link.to],
@@ -445,6 +446,19 @@ function parentEnds(plan: IngestPlan): Map<string, string> {
   return ends;
 }
 
+/**
+ * Refuses a relation by a name that is none of the three. Looked up, such a
+ * name gives no number, and `create` takes that for a child. `sibling` was one
+ * of the names once: the API makes no link of it, and creates the thought
+ * asked for with none.
+ */
+function requireRelation(relation: string | undefined, where: string): void {
+  if (relation === undefined || Object.hasOwn(RELATION_BY_NAME, relation)) return;
+  throw new IngestValidationError(
+    `${where} has the relation "${relation}", and a relation is child, parent or jump`,
+  );
+}
+
 /** The aliases a plan item asks for, blanks and repeats dropped. */
 function planAliases(t: IngestThought): string[] {
   return normalizeAliases(t.aliases ?? []);
@@ -459,7 +473,6 @@ function describeRelation(relation: number): string {
     [Relation.Child]: "parent-child",
     [Relation.Parent]: "parent-child",
     [Relation.Jump]: "jump",
-    [Relation.Sibling]: "sibling",
   };
   return names[relation] ?? `kind ${relation}`;
 }

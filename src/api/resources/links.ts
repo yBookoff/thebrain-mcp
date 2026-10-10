@@ -22,6 +22,9 @@ export interface CreateLinkInput {
  *
  * An absent field is left alone; `null` clears a name or a colour, the two
  * fields that can be cleared.
+ *
+ * No `relation`, and `update` refuses one: see there. What a link is, is set
+ * by `create`, which rewrites the link two thoughts already share.
  */
 export interface UpdateLinkInput {
   /** Cleared, a name reads back as `""`, not as the `null` of a link never named. */
@@ -38,12 +41,6 @@ export interface UpdateLinkInput {
   thickness?: number | undefined;
   /** 0 to 7. A new link reads -1, which is a 400 to write. */
   direction?: number | undefined;
-  /**
-   * 1 makes `thoughtIdB` the child and 3 makes a jump, the ends staying as
-   * they are. 2 swaps the ends every time it is sent, and 4 answers 200 and
-   * changes nothing: neither is guarded here.
-   */
-  relation?: number | undefined;
 }
 
 export class LinksResource {
@@ -120,6 +117,11 @@ export class LinksResource {
    * A name or a colour is cleared with `remove`. `replace` with null is a 400
    * for a colour, and for a name a 200 that leaves the name where it was.
    *
+   * A `relation` is refused, forced past the type too. Patched to 4 a link
+   * answers 200 and stays as it was; to 2 it swaps its ends each time the
+   * patch is sent; and to 1 or 2 with a type left above, it becomes the lower
+   * thought's type, which `create` refuses.
+   *
    * The API applies a patch one operation at a time and keeps what it wrote
    * before the one it refuses: an update that throws may have landed in part.
    */
@@ -130,6 +132,15 @@ export class LinksResource {
   ): Promise<void> {
     assertUuid(brainId, "brainId");
     assertUuid(linkId, "linkId");
+    // Ahead of the request, so the fields beside it are not written either.
+    if ((changes as { relation?: unknown }).relation !== undefined) {
+      throw new TheBrainError(
+        "bad_request",
+        "update() does not change a link's relation: patched to 4 the link answers 200 and " +
+          "stays as it was, and to 2 it swaps its ends every time the patch is sent. " +
+          "create() between the same two thoughts rewrites the link that is there",
+      );
+    }
     // Ahead of the request: a fraction is a 403 and null a 400, and by then
     // the fields before the thickness are written.
     if (changes.thickness !== undefined && !Number.isInteger(changes.thickness)) {

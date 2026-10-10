@@ -67,6 +67,9 @@ export interface UpdateThoughtInput {
 /** The API keeps the first hundred aliases of a longer list and drops the rest. */
 export const MAX_ALIASES = 100;
 
+/** What a new thought can be to its source: the API's own list has one more. */
+const RELATIONS: readonly number[] = Object.values(Relation);
+
 /**
  * A read straight after a write usually still returns the old value.
  *
@@ -214,6 +217,17 @@ export class ThoughtsResource {
     assertUuid(brainId, "brainId");
     if (input.sourceThoughtId !== undefined) {
       assertUuid(input.sourceThoughtId, "sourceThoughtId");
+    }
+    // Ahead of the request, which answers 200 to any number and creates the
+    // thought. With 4, the spec's "Sibling", or with 0 it has no link at all;
+    // with 5 it has one that no list of the graph shows.
+    if (input.relation !== undefined && !RELATIONS.includes(input.relation)) {
+      throw new TheBrainError(
+        "bad_request",
+        `relation must be 1 (child), 2 (parent) or 3 (jump), got ${String(input.relation)}. ` +
+          "The API would create the thought all the same: for 4, which the spec calls " +
+          "Sibling, with no link to its source",
+      );
     }
     // Ahead of the request: a thought made under a type is one of that type,
     // with no parent, and with another `typeId` beside it carries both types.

@@ -28,8 +28,13 @@ export type AccessType = (typeof AccessType)[keyof typeof AccessType];
  * rewrites `Parent` into a tag attachment (`relation = Child`, `meaning = Tag`).
  * Towards a `kind = Type` it makes the type's link, setting or replacing the
  * thought's type; `links.create` and `thoughts.create` refuse that.
+ *
+ * The spec lists a fourth, `Sibling = 4`. It is left out because nothing can
+ * be written with it: a link is refused with a 400, a thought is created with
+ * no link at all, and a patch answers 200 and changes nothing. Siblings are
+ * thoughts with a parent in common, which is two parent links and no third.
  */
-export const Relation = { Child: 1, Parent: 2, Jump: 3, Sibling: 4 } as const;
+export const Relation = { Child: 1, Parent: 2, Jump: 3 } as const;
 export type Relation = (typeof Relation)[keyof typeof Relation];
 
 /**
@@ -37,7 +42,7 @@ export type Relation = (typeof Relation)[keyof typeof Relation];
  * empirically. Read-only: the server derives it from the target's `kind`.
  */
 export const LinkMeaning = {
-  /** Ordinary link: child / parent / jump / sibling. */
+  /** Ordinary link: child / parent / jump. */
   Normal: 1,
   /** Type attachment. Created when a thought's `typeId` is set. */
   Type: 2,

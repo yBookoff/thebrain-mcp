@@ -214,9 +214,10 @@ Four properties, each of which took a bug to get right:
 
 - **Order-independent.** `planLevels()` topologically sorts by parent reference,
   so the input can be in any order.
-- **Validated before the first write.** Cycles, dangling references, empty names
-  and duplicate `tempId`s are rejected up front. A plan either starts writing or
-  does not — no half-written graph from a mistake that was visible in advance.
+- **Validated before the first write.** Cycles, dangling references, empty names,
+  duplicate `tempId`s and a relation that is none of the three are rejected up
+  front. A plan either starts writing or does not — no half-written graph from a
+  mistake that was visible in advance.
 - **Idempotent.** Re-running the same plan reuses existing thoughts instead of
   duplicating them. Dedup is by `(parentId, trimmed name)`, and an **in-flight
   promise registry** makes it hold *within* one batch: two identical names in the
@@ -343,6 +344,24 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     and reported: the call asked for a link, the API can only set a type
     there, and `typeId` is the argument that asks for one. A jump to a type
     stays an ordinary link.
+19. **Nothing is written as a sibling.** The spec lists a fourth relation,
+    `Sibling = 4`. A link sent with it is a 400; a thought created with it is
+    a 200 and a thought linked to nothing; a patch with it is a 200 that
+    changes nothing. Siblings are thoughts with a parent in common: a graph
+    lists them when asked, and no link joins them. The tools offered the word
+    all the same. `brain_create_thought` answered "created thought" for one
+    left with no link, and `brain_ingest` listed it as created and made it
+    again on the next run. So the tools take `child`, `parent` and `jump`, and
+    `Relation` has no fourth: a value that cannot work is not in a schema to
+    be picked from, and one sent anyway is refused there, as an error the
+    model reads, before any request. The server does not make a sibling by
+    linking under the source's parent, because which parent is the caller's
+    to say (§3); the arguments say to pass it. `thoughts.create()` and
+    `planLevels()` refuse a relation that is none of the three, and
+    `links.update()` takes no relation at all: patched to 2 a link swaps its
+    ends on every send, and to 1 under a type it sets one (item 18).
+    `links.create()` is what changes a link: it rewrites the one two thoughts
+    share.
 
 ### Write visibility
 

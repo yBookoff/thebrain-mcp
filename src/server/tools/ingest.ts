@@ -13,7 +13,7 @@ import { bullet, fail, guard, join, ok, section, table } from "../respond.js";
 import { ALIAS_COST } from "./write.js";
 
 const relation = z
-  .enum(["child", "parent", "jump", "sibling"])
+  .enum(["child", "parent", "jump"])
   .describe("How this thought relates to its parent. Usually child.");
 
 export function registerIngestTool(server: McpServer, ctx: ServerContext): void {

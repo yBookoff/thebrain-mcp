@@ -40,9 +40,10 @@ import {
   type LinkDto,
   type ModificationLogDto,
   type ThoughtDto,
+  type ThoughtGraphDto,
 } from "../src/api/index.js";
 import { describeChange, subjectIds } from "../src/operations/changes.js";
-import { ingest } from "../src/operations/ingest.js";
+import { IngestValidationError, ingest } from "../src/operations/ingest.js";
 import type { Embedder } from "../src/semantic/embedder.js";
 import {
   SemanticIndexer,
@@ -2601,6 +2602,9 @@ suite("resource layer against the live API", () => {
     it("direction takes 0 to 7 and not the -1 of a new link; relation 4 changes nothing, and 2 swaps the ends each time", async () => {
       const { id, a, b } = await linked("link-ends");
       const ends = (l: LinkDto): unknown[] => [l.relation, l.thoughtIdA, l.thoughtIdB];
+      // As the API takes it: `update` refuses a relation, for what follows.
+      const relate = (value: number): Promise<unknown> =>
+        patch(id, { op: "replace", path: "/relation", value });
       const fresh = await api.links.get(brainId, id);
       expect(fresh.direction).toBe(-1);
       expect(ends(fresh)).toEqual([Relation.Jump, a, b]);
@@ -2615,14 +2619,14 @@ suite("resource layer against the live API", () => {
         expect(refused?.message).toMatch(/invalid 'direction'/i);
       }
 
-      // Accepted, with nothing to show for it.
-      await api.links.update(brainId, id, { relation: Relation.Sibling });
+      // Accepted, with nothing to show for it: 4 is the spec's "Sibling".
+      await relate(4);
       await settle();
       const still = await api.links.get(brainId, id);
       expect(still.direction).toBe(0);
       expect(ends(still)).toEqual([Relation.Jump, a, b]);
 
-      await api.links.update(brainId, id, { relation: Relation.Child });
+      await relate(Relation.Child);
       expect(ends(await read(id, (l) => l.relation === Relation.Child))).toEqual([
         Relation.Child,
         a,
@@ -2630,16 +2634,22 @@ suite("resource layer against the live API", () => {
       ]);
       // A parent is stored as a child link the other way round, so the same
       // patch sent again puts the ends back.
-      await api.links.update(brainId, id, { relation: Relation.Parent });
+      await relate(Relation.Parent);
       expect(ends(await read(id, (l) => l.thoughtIdA === b))).toEqual([Relation.Child, b, a]);
-      await api.links.update(brainId, id, { relation: Relation.Parent });
+      await relate(Relation.Parent);
       expect(ends(await read(id, (l) => l.thoughtIdA === a))).toEqual([Relation.Child, a, b]);
       // And the sibling that changed a jump into nothing does as much for a child.
-      await api.links.update(brainId, id, { relation: Relation.Sibling });
+      await relate(4);
+      // Past the four the spec lists a patch is refused, where a create is not.
+      for (const value of [0, 5, -1]) {
+        const refused = await refusal(id, { op: "replace", path: "/relation", value });
+        expect(refused?.kind, `relation ${value}`).toBe("bad_request");
+        expect(refused?.message).toMatch(/invalid 'relation'/i);
+      }
       await settle();
       expect(ends(await api.links.get(brainId, id))).toEqual([Relation.Child, a, b]);
 
-      await api.links.update(brainId, id, { relation: Relation.Jump });
+      await relate(Relation.Jump);
       expect(ends(await read(id, (l) => l.relation === Relation.Jump))).toEqual([
         Relation.Jump,
         a,
@@ -2677,6 +2687,278 @@ suite("resource layer against the live API", () => {
       expect((await read(id, (l) => l.name === "renamed")).name).toBe("renamed");
       await settle();
       expect((await api.links.get(brainId, id)).thickness).toBe(-1);
+    });
+
+    it("a relation patched to child or parent with a type left above sets the thought's type", async () => {
+      // What `links.create` refuses for a new link (a type is never a parent),
+      // a patch does to one that is there: one more reason `update` takes none.
+      const typeId = await make("link-patched-type", ThoughtKind.Type);
+      for (const [name, typeFirst, value] of [
+        ["link-patched-child", true, Relation.Child],
+        ["link-patched-parent", false, Relation.Parent],
+      ] as const) {
+        const id = await make(name);
+        const link = await api.links.create(brainId, {
+          thoughtIdA: typeFirst ? typeId : id,
+          thoughtIdB: typeFirst ? id : typeId,
+          relation: Relation.Jump,
+        });
+        expect((await api.thoughts.get(brainId, id)).typeId, name).toBeNull();
+
+        await patch(link, { op: "replace", path: "/relation", value });
+        const typed = await eventually(
+          () => api.thoughts.get(brainId, id),
+          (t) => t.typeId === typeId,
+        );
+        expect(typed.typeId, name).toBe(typeId);
+        const after = await read(link, (l) => l.meaning === LinkMeaning.Type);
+        expect([after.thoughtIdA, after.relation, after.meaning], name).toEqual([
+          typeId,
+          Relation.Child,
+          LinkMeaning.Type,
+        ]);
+      }
+    });
+
+    it("update refuses a relation, and writes none of the fields beside it", async () => {
+      const { id, a, b } = await linked("link-no-relation");
+      for (const relation of [Relation.Child, Relation.Parent, 4]) {
+        await expect(
+          api.links.update(brainId, id, { name: "never written", relation } as never),
+        ).rejects.toMatchObject({ kind: "bad_request", message: /relation/ });
+      }
+      await settle();
+      const after = await api.links.get(brainId, id);
+      expect([after.name, after.relation, after.thoughtIdA, after.thoughtIdB]).toEqual([
+        null,
+        Relation.Jump,
+        a,
+        b,
+      ]);
+    });
+
+    it("create rewrites the link two thoughts share and names both ends, so sent twice it leaves the same link", async () => {
+      // What `update` points to instead: no end is named by its place in the
+      // link, so a parent's link does not swap back on the second send.
+      const { id, a, b } = await linked("link-twice", "kept");
+      const ends = (l: LinkDto): unknown[] => [l.relation, l.thoughtIdA, l.thoughtIdB];
+      for (const [relation, want] of [
+        [Relation.Parent, [Relation.Child, b, a]],
+        [Relation.Child, [Relation.Child, a, b]],
+        [Relation.Jump, [Relation.Jump, a, b]],
+      ] as const) {
+        const input = { thoughtIdA: a, thoughtIdB: b, relation };
+        expect(await api.links.create(brainId, input)).toBe(id);
+        expect(ends(await read(id, (l) => ends(l).join() === want.join()))).toEqual(want);
+        expect(await api.links.create(brainId, input)).toBe(id);
+        await settle(600);
+        expect(ends(await api.links.get(brainId, id)), `relation ${relation}`).toEqual(want);
+      }
+      expect((await api.links.get(brainId, id)).name).toBe("kept");
+    }, 30_000);
+  });
+
+  /**
+   * The spec's fourth relation, `Sibling = 4`. It names it for a new thought
+   * and gives a link's `relation` no values at all. Measured on TheBrain
+   * 15.0.640: nothing is written with it, and nothing in the API links two
+   * siblings. What a patch does with it is in the block above.
+   */
+  describe("the sibling relation", () => {
+    const SIBLING = 4;
+    const ids = (thoughts: readonly ThoughtDto[]): string[] => thoughts.map((t) => t.id);
+    const under = async (name: string, parent: string): Promise<string> => {
+      const id = await api.thoughts.create(brainId, {
+        name: PREFIX + name,
+        sourceThoughtId: parent,
+      });
+      created.push(id);
+      return id;
+    };
+    /** A thought as the API creates it, whatever relation it is sent with, or none. */
+    const rawUnder = async (name: string, extra: Record<string, unknown>): Promise<string> => {
+      const { id } = await api.client.post<{ id: string }>(`/api/thoughts/${brainId}`, {
+        json: { name: PREFIX + name, kind: ThoughtKind.Normal, acType: 0, ...extra },
+      });
+      created.push(id);
+      return id;
+    };
+    /** The error a link is refused with, or null when it is made. */
+    const refusal = (
+      thoughtIdA: string,
+      thoughtIdB: string,
+      relation?: number,
+    ): Promise<TheBrainError | null> =>
+      api.client
+        .post(`/api/links/${brainId}`, {
+          json: { thoughtIdA, thoughtIdB, ...(relation === undefined ? {} : { relation }) },
+        })
+        .then(
+          () => null,
+          (error: unknown) => error as TheBrainError,
+        );
+
+    it("a link is refused as a sibling's from either end, under one parent or under none, and a link already there stays as it was", async () => {
+      const parent = await make("sib-parent");
+      const a = await under("sib-a", parent);
+      const b = await under("sib-b", parent);
+      const lone = await make("sib-lone");
+      const other = await make("sib-other");
+      const refused = { kind: "bad_request", status: 400, message: "Invalid link relation 4" };
+
+      for (const [from, to] of [
+        [a, b],
+        [b, a],
+        // No parent in common: these two have none at all.
+        [lone, other],
+        [other, lone],
+      ] as const) {
+        expect(await refusal(from, to, SIBLING)).toMatchObject(refused);
+      }
+      await settle(600);
+      expect(await api.links.between(brainId, a, b)).toBeNull();
+      expect(await api.links.between(brainId, lone, other)).toBeNull();
+
+      // Linked already, by a jump and by a parent's link: the same answer.
+      const jump = await api.links.create(brainId, {
+        thoughtIdA: lone,
+        thoughtIdB: other,
+        relation: Relation.Jump,
+      });
+      expect(await refusal(lone, other, SIBLING)).toMatchObject(refused);
+      expect(await refusal(a, parent, SIBLING)).toMatchObject(refused);
+      await settle(600);
+      const kept = await api.links.between(brainId, lone, other);
+      expect([kept?.id, kept?.relation]).toEqual([jump, Relation.Jump]);
+      const above = await api.links.between(brainId, a, parent);
+      expect([above?.thoughtIdA, above?.relation]).toEqual([parent, Relation.Child]);
+    });
+
+    it("a link takes 1, 2 or 3 and has no default: any other number, and none, is the same 400", async () => {
+      const a = await make("rel-a");
+      const b = await make("rel-b");
+      for (const relation of [0, 5, -1]) {
+        expect((await refusal(a, b, relation))?.message).toBe(`Invalid link relation ${relation}`);
+      }
+      expect(await refusal(a, b)).toMatchObject({
+        kind: "bad_request",
+        message: "Invalid link relation 0",
+      });
+      await settle(600);
+      expect(await api.links.between(brainId, a, b)).toBeNull();
+    });
+
+    it("a thought created as a sibling of its source is linked to nothing", async () => {
+      // A 200 and an identifier, as for any thought: the answer does not say.
+      const parent = await make("sib-source-parent");
+      const source = await under("sib-source", parent);
+      const typeId = await make("sib-new-type", ThoughtKind.Type);
+      const bare = await rawUnder("sib-new", { sourceThoughtId: source, relation: SIBLING });
+      const typed = await rawUnder("sib-new-typed", {
+        sourceThoughtId: source,
+        relation: SIBLING,
+        typeId,
+      });
+
+      await settle();
+      const alone = await api.thoughts.getGraph(brainId, bare, { includeSiblings: true });
+      expect(alone.links).toEqual([]);
+      expect(alone.siblings).toEqual([]);
+      // A type beside it is set, and is all the thought has.
+      const graph = await api.thoughts.getGraph(brainId, typed);
+      expect(graph.links.map((l) => [l.thoughtIdA, l.meaning])).toEqual([
+        [typeId, LinkMeaning.Type],
+      ]);
+      expect(graph.parents).toEqual([]);
+
+      // Nor did the source gain a sibling, or its parent a child.
+      const from = await api.thoughts.getGraph(brainId, source, { includeSiblings: true });
+      expect(from.links.map((l) => l.thoughtIdA)).toEqual([parent]);
+      expect(from.siblings).toEqual([]);
+      expect(ids((await api.thoughts.getGraph(brainId, parent)).children)).toEqual([source]);
+    });
+
+    it("a thought's relation to its source has no default either, and a number past the three is written on a link no list shows", async () => {
+      const source = await make("rel-source");
+      const unlinked = [
+        await rawUnder("rel-none", { sourceThoughtId: source }),
+        await rawUnder("rel-null", { sourceThoughtId: source, relation: null }),
+        await rawUnder("rel-0", { sourceThoughtId: source, relation: 0 }),
+      ];
+      const odd: Array<[string, number]> = [];
+      for (const relation of [5, -1]) {
+        const id = await rawUnder(`rel-${relation}`, { sourceThoughtId: source, relation });
+        odd.push([id, relation]);
+      }
+
+      await settle();
+      for (const id of unlinked) {
+        expect((await api.thoughts.getGraph(brainId, id)).links).toEqual([]);
+      }
+      for (const [id, relation] of odd) {
+        const graph = await api.thoughts.getGraph(brainId, id);
+        expect(graph.links.map((l) => [l.thoughtIdA, l.thoughtIdB, l.relation])).toEqual([
+          [source, id, relation],
+        ]);
+        expect([...graph.parents, ...graph.children, ...graph.jumps]).toEqual([]);
+      }
+      const graph = await api.thoughts.getGraph(brainId, source);
+      expect([...graph.parents, ...graph.children, ...graph.jumps]).toEqual([]);
+      expect(graph.links.map((l) => l.relation).sort()).toEqual([-1, 5]);
+    });
+
+    it("siblings are thoughts with a parent in common: a graph lists them when asked, and no link joins them", async () => {
+      const parent = await make("sibs-parent");
+      const a = await under("sibs-a", parent);
+      const b = await under("sibs-b", parent);
+
+      const asked = await eventually(
+        () => api.thoughts.getGraph(brainId, a, { includeSiblings: true }),
+        (g) => g.siblings.length === 1,
+      );
+      expect(ids(asked.siblings)).toEqual([b]);
+      // Each one's link is from the parent, and there is none between them.
+      expect(asked.links.length).toBeGreaterThan(0);
+      expect(asked.links.every((l) => l.thoughtIdA === parent)).toBe(true);
+      expect(await api.links.between(brainId, a, b)).toBeNull();
+
+      // Not asked for, the list is not sent at all.
+      const unasked = await api.client.get<ThoughtGraphDto>(
+        `/api/thoughts/${brainId}/${a}/graph`,
+        { query: { includeSiblings: false } },
+      );
+      expect(unasked.siblings).toBeNull();
+      expect(ids(unasked.parents ?? [])).toEqual([parent]);
+    });
+
+    it("create refuses a relation that is none of the three, and ingest a plan that names one, before anything is written", async () => {
+      const source = await make("sib-refused-source");
+      for (const relation of [SIBLING, 0, 5]) {
+        await expect(
+          api.thoughts.create(brainId, {
+            name: `${PREFIX}sib-never-made`,
+            sourceThoughtId: source,
+            relation: relation as Relation,
+          }),
+        ).rejects.toMatchObject({ kind: "bad_request", message: /^relation must be 1 \(child\)/ });
+      }
+
+      // The name the plan once had for it, past the type that has dropped it.
+      const sibling = "sibling" as never;
+      const top = { tempId: "top", name: `${PREFIX}sib-plan-top`, parent: source };
+      const leaf = { tempId: "leaf", name: `${PREFIX}sib-plan-leaf`, parent: "top" };
+      await expect(
+        ingest(api, brainId, { thoughts: [top, { ...leaf, relation: sibling }] }),
+      ).rejects.toThrowError(IngestValidationError);
+      await expect(
+        ingest(api, brainId, {
+          thoughts: [top, leaf],
+          links: [{ from: "leaf", to: source, relation: sibling }],
+        }),
+      ).rejects.toThrowError(IngestValidationError);
+
+      await settle();
+      expect((await api.thoughts.getGraph(brainId, source)).links).toEqual([]);
     });
   });
 
