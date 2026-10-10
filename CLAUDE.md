@@ -46,8 +46,20 @@ Dependencies point one way: `server` → `operations` → {`semantic`, `api`}.
 Full catalogue in [`docs/api-map.md`](docs/api-map.md). The ones that produce
 silent wrong behaviour rather than a loud failure:
 
-- **A malformed UUID returns HTTP 200 with an HTML page.** Validate before the
-  request; sniff the body after.
+- **A malformed UUID in the path returns HTTP 200 with an HTML page** to a
+  `GET`; a write with one is a 400 with no body. Validate before the request;
+  sniff the body after.
+- **The status does not say which identifier was wrong.** A `brainId` that is
+  no brain is a 401, `"Access to brain <id> is unauthorized."`, from every
+  request, whatever else it names: `unknown_brain`, never `auth`, which is the
+  key's. A thought nobody has is a bare 404 to its read and to a patch, the
+  catch-all 403 to its graph, a 404 that names it to a create under it, a 400
+  that names it to a link, and a 200 to a `DELETE`; its note reads as empty,
+  and a note written to it is stored. The 403 names no cause and also answers
+  requests that fail for reasons of their own, so only the read's 404 is taken
+  for "no such thought" (`requireType`, `requireTag`, `requireParent`).
+  `describeError()` keeps the API's words where they carry the identifier, and
+  a message about one identifier never names another.
 - **`/types` and `/tags` return 400 when empty.** Wrap in `emptyOn400()`.
 - **`notes/append` on a thought with no note is a silent no-op.** Read first.
 - **A note is an attachment.** `graph.attachments` flags it with `isNotes`; its
@@ -93,7 +105,20 @@ silent wrong behaviour rather than a loud failure:
   replaces the one it had. `links.create()` and `thoughts.create()` read the
   upper end first and throw `not_a_parent`; a tool calls
   `links.requireParent()` before its first write. A jump to a type is an
-  ordinary link. A tag above is still let through, and tags the thought.
+  ordinary link. A tag above is refused by the same read, with
+  `tag_as_parent`: it would tag the thought and leave it with no parent, and
+  `brain_tag` and `tagIds` are what attach a tag.
+- **`POST /api/links` answers 200 with an identifier of zeros for a link it
+  does not make**: a thought with itself under any relation, and a tag under a
+  type. `createdId()` turns that into `zero_id` for both creates;
+  `links.create()` and `planLevels()` refuse a thought linked to itself before
+  anything is sent.
+- **Two thoughts share one link, and no link reads back with `relation` 2.** A
+  parent's link is stored as a child's from the other end, so `thoughtIdA` is
+  the upper end, the tag or the type. Never compare a stored `relation` with
+  the one asked for: use `linkFound()`. Nothing is posted over a link that is
+  there, since it would replace it. A label goes onto an ordinary link
+  whatever its relation, never onto a tag's attachment or a type's link.
 - **Nothing is written as a sibling.** The spec's `relation: 4` is a 400 for a
   link, a 200 and a thought linked to nothing for a create, and a 200 that
   changes nothing for a patch. Siblings are thoughts with a parent in common;
@@ -144,6 +169,13 @@ silent wrong behaviour rather than a loud failure:
   read of that graph that fails fails the thought, never "nothing there". A
   thought with no parent is still made by every run, and a `relation` with no
   parent is refused before any write.
+- **A read result marks every thought that is not an ordinary one, and only
+  those.** `kindMark()` and `kindLabel()` in `src/server/respond.ts`: `[type]`
+  or `[tag]` after the identifier, a `Kind` column in `brain_search`, nothing
+  for an ordinary thought. A new read tool that names a thought prints its
+  mark. It costs no request: every thought the API returns carries `kind`, in
+  a graph's lists and in a search hit. In vector mode the kind is the index's
+  own, and the index does not follow a thought that changes kind.
 - **Search is prefix-based.** This is why `src/semantic/` exists.
 
 ## Semantic layer
