@@ -95,15 +95,107 @@ describe("error explanations point at the next step", () => {
   });
 
   it("a router miss is explained in human terms, not as \"HTML arrived\"", () => {
-    expect(describeError(new TheBrainError("route_miss", "html"))).toMatch(
-      /not found or is malformed/,
-    );
+    const text = describeError(new TheBrainError("route_miss", "html"));
+    expect(text).toMatch(/identifier in the request is malformed/);
+    // Measured: an identifier nobody has never gets the app's page.
+    expect(text).not.toMatch(/not found/);
   });
 
-  it("403 on the local API is explained as a missing object", () => {
-    expect(describeError(new TheBrainError("forbidden", "denied"))).toMatch(
-      /exists in this brain/,
+  const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
+  const NOBODY = "99999999-0000-4000-8000-000000000009";
+  const ROUTER_403 =
+    "To use the TheBrain API, make requests to /api (e.g. /api/brains). " +
+    "An API key is required via the Authorization header.";
+  const answered = (
+    kind: "unknown_brain" | "not_found" | "forbidden",
+    message: string,
+    method: string,
+    path: string,
+  ): string => describeError(new TheBrainError(kind, message, { method, path }));
+
+  it("a brainId that is no brain is explained as that, not as a rejected key", () => {
+    // The API answers 401 to both, in different words.
+    const text = answered(
+      "unknown_brain",
+      `Access to brain ${BRAIN} is unauthorized.`,
+      "GET",
+      `/api/thoughts/${BRAIN}/${NOBODY}/graph`,
     );
+    expect(text).toBe(
+      `Access to brain ${BRAIN} is unauthorized. The key was accepted: it is brainId that ` +
+        "names no brain open to it. Take brainId from brain_list. The other identifiers " +
+        "in the call were not looked at.",
+    );
+    expect(text).not.toMatch(/THEBRAIN_API_KEY|Settings/);
+    // Nor as a wrong thought identifier: every request to such a brain is this 401.
+    expect(text).not.toMatch(/brain_search|brain_get_thought|deleted/);
+  });
+
+  it("a 404 that names what it did not find keeps the API's words", () => {
+    // A create under a parent nobody has, and a URL attached to a thought nobody has.
+    expect(
+      answered(
+        "not_found",
+        `Source Thought ${NOBODY} could not be located`,
+        "POST",
+        `/api/thoughts/${BRAIN}`,
+      ),
+    ).toBe(
+      `Source Thought ${NOBODY} could not be located. It may have been deleted, or be ` +
+        "another brain's. Take identifiers from brain_search or brain_get_thought.",
+    );
+    expect(
+      answered(
+        "not_found",
+        `Thought \`${NOBODY}\` not found.`,
+        "POST",
+        `/api/attachments/${BRAIN}/${NOBODY}/url`,
+      ),
+    ).toMatch(new RegExp(`^Thought \`${NOBODY}\` not found\\. It may have been deleted`));
+  });
+
+  it("a bare 404 names what the path addressed, by its identifier", () => {
+    // A read and a patch of a thought or a link nobody has say only "Not Found".
+    const thought = answered("not_found", "Not Found", "PATCH", `/api/thoughts/${BRAIN}/${NOBODY}`);
+    expect(thought).toBe(
+      `No thought in this brain has the identifier ${NOBODY} ` +
+        `(PATCH /api/thoughts/${BRAIN}/${NOBODY}). It may have been deleted, or be another ` +
+        "brain's. Take identifiers from brain_search or brain_get_thought.",
+    );
+    expect(answered("not_found", "Not Found", "GET", `/api/links/${BRAIN}/${NOBODY}`)).toMatch(
+      new RegExp(`^No link in this brain has the identifier ${NOBODY} \\(GET `),
+    );
+    // Two identifiers, or one that is not the thing's own: no guess is made.
+    for (const path of [
+      `/api/links/${BRAIN}/${NOBODY}/${BRAIN}`,
+      `/api/attachments/${BRAIN}/${NOBODY}/metadata`,
+    ]) {
+      expect(answered("not_found", "Not Found", "GET", path)).toMatch(
+        new RegExp(`^Not found \\(GET ${path}\\)\\. It may have been deleted`),
+      );
+    }
+  });
+
+  it("the catch-all 403 is not called a matter of access, and names the request", () => {
+    // What the graph of a thought nobody has answers. The old text began "Access denied".
+    const text = answered("forbidden", ROUTER_403, "GET", `/api/thoughts/${BRAIN}/${NOBODY}/graph`);
+    expect(text).toBe(
+      "TheBrain answered 403 and named no cause " +
+        `(GET /api/thoughts/${BRAIN}/${NOBODY}/graph). That is its answer when an identifier ` +
+        "in the call names nothing in this brain. It may have been deleted, or be another " +
+        "brain's. Take identifiers from brain_search or brain_get_thought.",
+    );
+    expect(text).not.toMatch(/denied|API key/i);
+  });
+
+  it("an identifier nobody has is never explained as a wrong brainId or a wrong key", () => {
+    for (const text of [
+      answered("not_found", "Not Found", "GET", `/api/thoughts/${BRAIN}/${NOBODY}`),
+      answered("not_found", `Source Thought ${NOBODY} could not be located`, "POST", "/api/t"),
+      answered("forbidden", ROUTER_403, "GET", `/api/thoughts/${BRAIN}/${NOBODY}/graph`),
+    ]) {
+      expect(text).not.toMatch(/brainId|brain_list\b|THEBRAIN_API_KEY/);
+    }
   });
 
   it("the missing-embeddings-package message passes through verbatim", () => {

@@ -1907,6 +1907,317 @@ suite("resource layer against the live API", () => {
   });
 
   /**
+   * What each request answers for an identifier nothing in the brain has, and
+   * for a `brainId` that is no brain: L3 and L28 in docs/api-map.md. Reads and
+   * refused writes, which add nothing to the brain; the note the API accepts
+   * is removed after. Measured on TheBrain 15.0.640.
+   */
+  describe("an identifier nobody has, and a brainId that is no brain", () => {
+    const CATCH_ALL =
+      "To use the TheBrain API, make requests to /api (e.g. /api/brains). " +
+      "An API key is required via the Authorization header.";
+    const BARE_404 = "404 not_found: Not Found";
+    /** How a request was refused: status, the kind made of it, the API's text. */
+    const answer = (request: Promise<unknown>): Promise<string> =>
+      request.then(
+        () => "accepted",
+        (e: unknown) =>
+          e instanceof TheBrainError ? `${e.status} ${e.kind}: ${e.message}` : String(e),
+      );
+    /** What the brain holds, by the counts a stray write would move. */
+    const counts = async (): Promise<number[]> => {
+      const s = await api.brains.statistics(brainId);
+      return [s.thoughts, s.links, s.notes, s.webLinks, s.thoughtTypes, s.tags];
+    };
+
+    it("a thought nobody has: the read and a patch are a bare 404, the graph the catch-all 403, and the rest read as empty", async () => {
+      const nobody = crypto.randomUUID();
+      expect(await answer(api.thoughts.get(brainId, nobody))).toBe(BARE_404);
+      expect(await answer(api.thoughts.update(brainId, nobody, { name: "never" }))).toBe(BARE_404);
+      expect(await answer(api.thoughts.update(brainId, nobody, { label: null }))).toBe(BARE_404);
+      for (const includeSiblings of [false, true]) {
+        expect(await answer(api.thoughts.getGraph(brainId, nobody, { includeSiblings }))).toBe(
+          `403 forbidden: ${CATCH_ALL}`,
+        );
+      }
+      // Not refused at all: no attachments, no history, and the note of a
+      // thought that has none.
+      expect(await api.attachments.ofThought(brainId, nobody)).toEqual([]);
+      expect(await api.thoughts.modifications(brainId, nobody)).toEqual([]);
+      expect(await api.notes.getRaw(brainId, nobody)).toMatchObject({
+        sourceId: nobody,
+        markdown: "",
+        modificationDateTime: "0001-01-01T00:00:00",
+      });
+      // The same for every identifier that names no thought of this brain.
+      const zeros = "00000000-0000-0000-0000-000000000000";
+      for (const id of [zeros, brainId]) {
+        expect(await answer(api.thoughts.get(brainId, id)), id).toBe(BARE_404);
+        expect(await answer(api.thoughts.getGraph(brainId, id)), id).toBe(
+          `403 forbidden: ${CATCH_ALL}`,
+        );
+      }
+    });
+
+    it("a thought of another brain is nobody here", async (ctx) => {
+      // Read through this brain only: the other one is not written to, nor asked.
+      const other = (await api.brains.list()).find((b) => b.id !== brainId);
+      if (other === undefined) return ctx.skip();
+      expect(await answer(api.thoughts.get(brainId, other.homeThoughtId))).toBe(BARE_404);
+      expect(await answer(api.thoughts.getGraph(brainId, other.homeThoughtId))).toBe(
+        `403 forbidden: ${CATCH_ALL}`,
+      );
+    });
+
+    it("a write that names one says so in its own words, a create and an attachment with the identifier, and nothing is made", async () => {
+      const id = await make("nobody-anchor");
+      const nobody = crypto.randomUUID();
+      const other = crypto.randomUUID();
+      const never = { name: `${PREFIX}never-made`, kind: ThoughtKind.Normal, acType: 0 };
+      await settle(400);
+      const before = await counts();
+
+      // A new thought: the source is named, the type is not.
+      for (const relation of [Relation.Child, Relation.Parent, Relation.Jump]) {
+        expect(
+          await answer(
+            api.thoughts.create(brainId, { name: never.name, sourceThoughtId: nobody, relation }),
+          ),
+          `relation ${relation}`,
+        ).toBe(`404 not_found: Source Thought ${nobody} could not be located`);
+      }
+      // Past the client, which reads a typeId before it sends one (L21).
+      for (const under of [{}, { sourceThoughtId: id, relation: Relation.Child }]) {
+        expect(
+          await answer(
+            api.client.post(`/api/thoughts/${brainId}`, {
+              json: { ...never, ...under, typeId: nobody },
+            }),
+          ),
+        ).toBe("400 bad_request: Could not create thought.");
+      }
+      expect(
+        await answer(
+          api.client.patch(`/api/thoughts/${brainId}/${id}`, {
+            jsonPatch: [{ op: "replace", path: "/typeId", value: nobody }],
+          }),
+        ),
+      ).toBe(`403 forbidden: ${CATCH_ALL}`);
+
+      // A link: a 400 that names the end, the source when both are nobody's.
+      const link = (a: string, b: string, relation: Relation): Promise<string> =>
+        answer(api.links.create(brainId, { thoughtIdA: a, thoughtIdB: b, relation }));
+      for (const relation of [Relation.Child, Relation.Parent, Relation.Jump]) {
+        expect(await link(id, nobody, relation)).toBe(
+          `400 bad_request: Could not get target thought ${nobody}`,
+        );
+        expect(await link(nobody, id, relation)).toBe(
+          `400 bad_request: Could not get source thought ${nobody}`,
+        );
+        expect(await link(nobody, other, relation)).toBe(
+          `400 bad_request: Could not get source thought ${nobody}`,
+        );
+      }
+      // A link addressed by an identifier no link has, and by ends nobody has.
+      expect(await answer(api.links.get(brainId, nobody))).toBe(BARE_404);
+      expect(await answer(api.links.update(brainId, nobody, { name: "never" }))).toBe(BARE_404);
+      expect(await answer(api.links.delete(brainId, nobody))).toBe("400 bad_request: Bad Request");
+      expect(await api.links.attachments(brainId, nobody)).toEqual([]);
+      expect(await api.links.between(brainId, id, nobody)).toBeNull();
+      expect(await api.links.between(brainId, nobody, id)).toBeNull();
+      expect(await api.links.between(brainId, nobody, other)).toBeNull();
+
+      // An attachment, and a pin.
+      const thoughtNotFound = `404 not_found: Thought \`${nobody}\` not found.`;
+      const url = "https://example.com/zz-it-nobody";
+      expect(await answer(api.attachments.attachUrl(brainId, nobody, url))).toBe(thoughtNotFound);
+      expect(await answer(api.thoughts.pin(brainId, nobody))).toBe(thoughtNotFound);
+      expect(await answer(api.thoughts.unpin(brainId, nobody))).toBe(thoughtNotFound);
+      expect(await answer(api.attachments.metadata(brainId, nobody))).toBe(BARE_404);
+      expect(await answer(api.attachments.content(brainId, nobody))).toBe(BARE_404);
+      // The template, as the API sends it.
+      expect(await answer(api.attachments.delete(brainId, nobody))).toBe(
+        "400 bad_request: Could not delete attachment {attachmentId}",
+      );
+
+      // And one that is not refused: deleting a thought nobody has is a 200.
+      expect(await answer(api.thoughts.delete(brainId, nobody))).toBe("accepted");
+
+      await settle(400);
+      expect(await counts()).toEqual(before);
+    }, 30_000);
+
+    it("a brainId that is no brain: every request is the same 401, in words that are not the key's", async () => {
+      const id = await make("no-brain-anchor");
+      const noBrain = crypto.randomUUID();
+      const nobody = crypto.randomUUID();
+      const url = "https://example.com/zz-it-no-brain";
+      const name = `${PREFIX}never-made`;
+      const requests: Array<[string, () => Promise<unknown>]> = [
+        ["brain", () => api.brains.get(noBrain)],
+        ["statistics", () => api.brains.statistics(noBrain)],
+        ["log", () => api.brains.modifications(noBrain, { maxLogs: 5 })],
+        // Not the 400 of an empty list, which is read as one.
+        ["types", () => api.thoughts.listTypes(noBrain)],
+        ["tags", () => api.thoughts.listTags(noBrain)],
+        ["pins", () => api.thoughts.listPinned(noBrain)],
+        ["name", () => api.thoughts.findByName(noBrain, name)],
+        ["search", () => api.search.inBrain(noBrain, "zz")],
+        // A thought that exists elsewhere, and one nobody has: the brain is asked first.
+        ["thought", () => api.thoughts.get(noBrain, id)],
+        ["thought nobody has", () => api.thoughts.get(noBrain, nobody)],
+        ["graph", () => api.thoughts.getGraph(noBrain, id)],
+        ["history", () => api.thoughts.modifications(noBrain, id)],
+        ["patch", () => api.thoughts.update(noBrain, id, { name })],
+        ["delete", () => api.thoughts.delete(noBrain, nobody)],
+        ["create", () => api.thoughts.create(noBrain, { name })],
+        ["create under", () => api.thoughts.create(noBrain, { name, sourceThoughtId: id })],
+        ["a type's read", () => api.thoughts.requireType(noBrain, id)],
+        ["a tag's read", () => api.links.requireTag(noBrain, id)],
+        ["a parent's read", () => api.links.requireParent(noBrain, id, "parentId")],
+        ["link", () => api.links.get(noBrain, nobody)],
+        ["link between", () => api.links.between(noBrain, id, nobody)],
+        ["link create", () => api.links.create(noBrain, { thoughtIdA: id, thoughtIdB: nobody })],
+        ["link patch", () => api.links.update(noBrain, nobody, { name })],
+        ["link delete", () => api.links.delete(noBrain, nobody)],
+        ["note", () => api.notes.getRaw(noBrain, id)],
+        ["note set", () => api.notes.set(noBrain, id, "never")],
+        ["note append", () => api.notes.append(noBrain, id, "never")],
+        ["attachments", () => api.attachments.ofThought(noBrain, id)],
+        ["by-location", () => api.attachments.byLocation(noBrain, url)],
+        ["attach", () => api.attachments.attachUrl(noBrain, id, url)],
+        ["attachment", () => api.attachments.metadata(noBrain, nobody)],
+      ];
+      for (const [what, request] of requests) {
+        expect(await answer(request()), what).toBe(
+          `401 unknown_brain: Access to brain ${noBrain} is unauthorized.`,
+        );
+      }
+
+      // A rejected key is the other 401, and is asked about before the brain.
+      const badKey = new TheBrainApi({ apiKey: "not-the-key" });
+      for (const brain of [brainId, noBrain]) {
+        expect(await answer(badKey.thoughts.get(brain, id))).toBe("401 auth: Invalid API Key");
+      }
+    });
+
+    it("a note is written to an identifier nobody has, by an update and by an append, makes no thought, and outlives a delete of it", async () => {
+      const text = `${PREFIX}note for nobody`;
+      const writes: Array<[string, (id: string) => Promise<unknown>]> = [
+        ["update", (id) => api.notes.set(brainId, id, text)],
+        // Past `notes.append()`, which reads the note and sends an update when there is none.
+        [
+          "append",
+          (id) => api.client.post(`/api/notes/${brainId}/${id}/append`, { json: { markdown: text } }),
+        ],
+      ];
+      for (const [how, write] of writes) {
+        const nobody = crypto.randomUUID();
+        const hung = () => api.attachments.ofThought(brainId, nobody);
+        try {
+          // A 200, and the note is there to read.
+          expect(await answer(write(nobody)), how).toBe("accepted");
+          const note = await eventually(
+            () => api.notes.get(brainId, nobody),
+            (markdown) => markdown !== "",
+          );
+          expect(note, how).toBe(text);
+          // An attachment whose thought is the identifier, as any note is (L13).
+          const attached = await eventually(hung, (list) => list.length > 0);
+          expect(attached, how).toMatchObject([{ isNotes: true, sourceId: nobody, sourceType: 2 }]);
+
+          // No thought came of it, and deleting "it" answers 200 and leaves the note.
+          expect(await answer(api.thoughts.get(brainId, nobody)), how).toBe(BARE_404);
+          expect(await answer(api.thoughts.getGraph(brainId, nobody)), how).toBe(
+            `403 forbidden: ${CATCH_ALL}`,
+          );
+          await api.thoughts.delete(brainId, nobody);
+          await settle(500);
+          expect(await api.notes.get(brainId, nobody), how).toBe(text);
+        } finally {
+          // Only its attachment's deletion removes it: it hangs on no thought
+          // the sweep after the suite could find.
+          const left = await eventually(hung, (list) => list.length > 0, { timeoutMs: 2000 });
+          for (const a of left) await api.attachments.delete(brainId, a.id);
+        }
+        // For a moment the read of a note whose attachment is gone is the
+        // catch-all 403, for a thought that exists too: 12 of 12, up to 0.3 s.
+        const first = await answer(api.notes.getRaw(brainId, nobody));
+        expect(["accepted", `403 forbidden: ${CATCH_ALL}`], how).toContain(first);
+        const gone = await eventually(
+          () => api.notes.exists(brainId, nobody).catch(() => true),
+          (exists) => !exists,
+        );
+        expect(gone, how).toBe(false);
+      }
+    }, 30_000);
+
+    it("a thought deleted a moment ago still reads for a moment, and a create under it is the 400 only while it does", async () => {
+      // 96 deletions, each followed 0 to 300 ms later by a read and a create.
+      // While the read was still a 200 the create was the 400 that names
+      // nothing, 27 times, or already the 404, 7 times; once the read was a
+      // 404 the create was the 404 too, 62 of 62. From 200 ms on that was
+      // every create, and of the 12 sent at once it was 2: so the 400 cannot
+      // be pinned to "straight after". The graph was a 403 from the first
+      // request.
+      const doomed = await make("deleted-a-moment-ago");
+      await settle(500);
+      await api.thoughts.delete(brainId, doomed);
+      const under = { name: `${PREFIX}never-made`, kind: ThoughtKind.Normal, acType: 0 };
+      const create = (): Promise<string> =>
+        answer(
+          api.client
+            .post<{ id: string }>(`/api/thoughts/${brainId}`, {
+              json: { ...under, sourceThoughtId: doomed, relation: Relation.Child },
+            })
+            .then(({ id }) => created.push(id)),
+        );
+      const gone = `404 not_found: Source Thought ${doomed} could not be located`;
+
+      const graph = await answer(api.thoughts.getGraph(brainId, doomed));
+      const read = await answer(api.thoughts.get(brainId, doomed));
+      const made = await create();
+      expect(graph).toBe(`403 forbidden: ${CATCH_ALL}`);
+      expect(["accepted", BARE_404]).toContain(read);
+      expect(["400 bad_request: Could not create thought.", gone]).toContain(made);
+      if (read === BARE_404) expect(made).toBe(gone);
+
+      await settle(500);
+      expect(await answer(api.thoughts.get(brainId, doomed))).toBe(BARE_404);
+      expect(await create()).toBe(gone);
+    });
+
+    it("a malformed identifier in the path is the app's page to a read, and a 400 with no body to a write", async () => {
+      // The client refuses such an identifier before the request, so these go past it.
+      const bad = "not-a-uuid";
+      for (const path of [
+        `/api/thoughts/${brainId}/${bad}`,
+        `/api/thoughts/${brainId}/${bad}/graph`,
+        `/api/thoughts/${bad}/${brainId}`,
+        `/api/notes/${brainId}/${bad}`,
+        `/api/links/${brainId}/${bad}`,
+        `/api/brains/${bad}`,
+        // And a path the API does not have at all.
+        `/api/thoughts/${brainId}/${brainId}/nonsense`,
+      ]) {
+        await expect(api.client.get(path), path).rejects.toMatchObject({
+          kind: "route_miss",
+          status: 200,
+        });
+      }
+      const rename = [{ op: "replace" as const, path: "/name", value: "never" }];
+      const writes: Array<[string, () => Promise<unknown>]> = [
+        ["PATCH", () => api.client.patch(`/api/thoughts/${brainId}/${bad}`, { jsonPatch: rename })],
+        ["DELETE", () => api.client.delete(`/api/thoughts/${brainId}/${bad}`)],
+        ["POST", () => api.client.post(`/api/notes/${brainId}/${bad}/update`, { json: {} })],
+      ];
+      for (const [method, request] of writes) {
+        expect(await answer(request()), method).toBe("400 bad_request: (empty response)");
+      }
+    });
+  });
+
+  /**
    * A type is a link, and one pair of thoughts has one link. Measured on
    * TheBrain 15.0.640; the spec has none of it. `brain_link` and ingest ask
    * `links.between()` first and leave a link they find as it is.

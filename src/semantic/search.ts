@@ -13,7 +13,7 @@
  * either and its misses are substantive.
  */
 
-import type { TheBrainApi } from "../api/index.js";
+import { TheBrainError, type ApiErrorKind, type TheBrainApi } from "../api/index.js";
 import { ThoughtKind } from "../api/types.js";
 import { indexModelId } from "./document.js";
 import { EmbedderUnavailableError, type Embedder } from "./embedder.js";
@@ -50,6 +50,9 @@ export interface SearchOutcome {
 }
 
 const AUXILIARY_KINDS = [ThoughtKind.Type, ThoughtKind.Tag, ThoughtKind.System];
+
+/** What a search is refused with when its `brainId` is malformed, or is no brain. */
+const NO_BRAIN: readonly ApiErrorKind[] = ["invalid_uuid", "unknown_brain"];
 
 export class SemanticSearch {
   constructor(
@@ -154,7 +157,13 @@ export class SemanticSearch {
     const perVariant = await mapWithConcurrency(variants, 6, async (variant) => {
       const hits = await this.api.search
         .inBrain(brainId, variant, { maxResults: limit })
-        .catch(() => []);
+        .catch((error: unknown) => {
+          // A phrasing the search fails on is skipped. A brainId that names no
+          // brain fails every phrasing alike, and "nothing found" would be an
+          // answer no search gave.
+          if (error instanceof TheBrainError && NO_BRAIN.includes(error.kind)) throw error;
+          return [];
+        });
       return { variant, hits };
     });
 

@@ -1105,8 +1105,8 @@ describe("a typeId that is not a type", () => {
         (url) => {
           const id = url.pathname.split("/").pop()!;
           if (id === THOUGHT) return thought("RAG", { typeId, aliases: [] });
-          // A thought that does not exist is a 403.
-          return id in others ? { ...thought("", { aliases: [] }), id, ...others[id] } : 403;
+          // A thought that does not exist is a 404 to this read.
+          return id in others ? { ...thought("", { aliases: [] }), id, ...others[id] } : 404;
         },
       ],
       [
@@ -1254,6 +1254,207 @@ describe("a typeId that is not a type", () => {
     ]) {
       expect(argument?.description).toContain("brain_list_types_and_tags");
     }
+  });
+});
+
+describe("an identifier nobody has, and a brainId that is no brain", () => {
+  const TYPE = "eeeeeeee-0000-4000-8000-000000000005";
+  const TAG = "ffffffff-0000-4000-8000-000000000006";
+  const NOBODY = "99999999-0000-4000-8000-000000000009";
+
+  /** The API's answers, in its own words and shapes. */
+  const noBrain = (): Response =>
+    new Response(JSON.stringify(`Access to brain ${BRAIN} is unauthorized.`), {
+      status: 401,
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
+  const bareNotFound = (): Response =>
+    new Response(
+      JSON.stringify({
+        type: "https://tools.ietf.org/html/rfc9110#section-15.5.5",
+        title: "Not Found",
+        status: 404,
+        traceId: "00-5df1-eb95-00",
+      }),
+      { status: 404, headers: { "content-type": "application/problem+json" } },
+    );
+  const said404 = (text: string): Response =>
+    new Response(JSON.stringify(text), {
+      status: 404,
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
+  const catchAll = (): Response =>
+    new Response(
+      "To use the TheBrain API, make requests to /api (e.g. /api/brains). " +
+        "An API key is required via the Authorization header.",
+      { status: 403 },
+    );
+  const everyRequest = (answer: () => Response): Route[] =>
+    ["GET", "POST", "PATCH", "DELETE"].map((method): Route => [`${method} /api/`, answer]);
+  const embedder = { id: "test", dimensions: 3 } as unknown as Embedder;
+  const searching = (api: TheBrainApi) => ({
+    search: () => new SemanticSearch(api, new VectorStore(":memory:"), embedder),
+  });
+
+  describe("a brainId that is no brain", () => {
+    // Measured: every request with such a brain in its path is this 401,
+    // whatever else it names. The tools called it a rejected key.
+    const told =
+      `Access to brain ${BRAIN} is unauthorized. The key was accepted: it is brainId that ` +
+      "names no brain open to it. Take brainId from brain_list. The other identifiers " +
+      "in the call were not looked at.";
+
+    it.each([
+      ["brain_get_thought", { thoughtId: THOUGHT }],
+      ["brain_traverse", { thoughtId: THOUGHT }],
+      ["brain_list_types_and_tags", {}],
+      ["brain_recent_changes", {}],
+      ["brain_update_thought", { thoughtId: THOUGHT, name: "renamed" }],
+      ["brain_update_thought", { thoughtId: THOUGHT, typeId: TYPE }],
+      ["brain_create_thought", { name: "RAG" }],
+      ["brain_create_thought", { name: "RAG", parentId: PARENT, typeId: TYPE, tagIds: [TAG] }],
+      ["brain_set_note", { thoughtId: THOUGHT, markdown: "body" }],
+      ["brain_append_note", { thoughtId: THOUGHT, markdown: "body" }],
+      ["brain_link", { fromId: THOUGHT, toId: PARENT }],
+      ["brain_link", { fromId: THOUGHT, toId: PARENT, relation: "parent" }],
+      ["brain_tag", { thoughtId: THOUGHT, add: [TAG] }],
+      ["brain_tag", { thoughtId: THOUGHT, remove: [TAG] }],
+      ["brain_attach_url", { thoughtId: THOUGHT, url: "https://example.com/p" }],
+      ["brain_ingest", { thoughts: [{ tempId: "rag", name: "RAG", parent: PARENT }] }],
+      ["brain_ingest", { thoughts: [{ tempId: "rag", name: "RAG", typeId: TYPE }] }],
+    ])("%s %j says it is the brainId, and not the key or the thought", async (tool, args) => {
+      const { call } = await connect(everyRequest(noBrain));
+      const result = await call(tool, { brainId: BRAIN, ...args });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(told);
+    });
+
+    it("brain_search does not answer that nothing was found", async () => {
+      // With no index it asks TheBrain's search, and used to drop its refusal:
+      // an empty result and a note that the index is not built.
+      const { call } = await connect(everyRequest(noBrain), searching);
+      const result = await call("brain_search", {
+        brainId: BRAIN,
+        query: "RAG",
+        variants: ["retrieval"],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(told);
+    });
+
+    it("brain_search with a brainId that is no UUID is refused too, with no request", async () => {
+      const { call, calls } = await connect(everyRequest(noBrain), searching);
+      const result = await call("brain_search", { brainId: "my-brain", query: "RAG" });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain('brainId must be a UUID, got "my-brain"');
+      expect(calls).toEqual([]);
+    });
+
+    it("a phrasing the search itself refuses is still only skipped", async () => {
+      const { call } = await connect(
+        [
+          [
+            "GET /api/search",
+            (url) =>
+              url.searchParams.get("queryText") === "RAG"
+                ? [{ sourceThought: thought("RAG"), name: "RAG", isFromOtherBrain: false }]
+                : 400,
+          ],
+        ],
+        searching,
+      );
+      const result = await call("brain_search", {
+        brainId: BRAIN,
+        query: "RAG",
+        variants: ["retrieval"],
+      });
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain(THOUGHT);
+    });
+  });
+
+  describe("an identifier nobody has", () => {
+    const tail =
+      " It may have been deleted, or be another brain's. " +
+      "Take identifiers from brain_search or brain_get_thought.";
+
+    it("brain_create_thought keeps the API's words for a parent nobody has", async () => {
+      // It used to answer "Resource not found", with no identifier in it.
+      const { call, sent } = await connect([
+        ["GET /api/thoughts/", bareNotFound],
+        ["POST /api/thoughts/", () => said404(`Source Thought ${NOBODY} could not be located`)],
+      ]);
+      const result = await call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        parentId: NOBODY,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(`Source Thought ${NOBODY} could not be located.${tail}`);
+      // The create is still what answers for it: the read lets it through.
+      expect(sent("POST")).toHaveLength(1);
+    });
+
+    it("brain_attach_url keeps them for its thought", async () => {
+      const { call } = await connect([
+        ["GET /api/attachments/", () => []],
+        ["GET /api/thoughts/", () => []],
+        ["POST /api/attachments/", () => said404(`Thought \`${NOBODY}\` not found.`)],
+      ]);
+      const result = await call("brain_attach_url", {
+        brainId: BRAIN,
+        thoughtId: NOBODY,
+        url: "https://example.com/p",
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(`Thought \`${NOBODY}\` not found.${tail}`);
+    });
+
+    it("brain_update_thought names the thought a bare 404 is about", async () => {
+      const { call } = await connect([["PATCH /api/thoughts/", bareNotFound]]);
+      const result = await call("brain_update_thought", {
+        brainId: BRAIN,
+        thoughtId: NOBODY,
+        name: "renamed",
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        `No thought in this brain has the identifier ${NOBODY} ` +
+          `(PATCH /api/thoughts/${BRAIN}/${NOBODY}).${tail}`,
+      );
+    });
+
+    it("brain_get_thought does not call its graph's 403 a matter of access", async () => {
+      // The read of such a thought is a 404; its graph, the API's catch-all.
+      const { call } = await connect([
+        ["GET /graph", catchAll],
+        ["GET /api/notes", () => noNote],
+      ]);
+      const result = await call("brain_get_thought", { brainId: BRAIN, thoughtId: NOBODY });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        "TheBrain answered 403 and named no cause " +
+          `(GET /api/thoughts/${BRAIN}/${NOBODY}/graph). That is its answer when an ` +
+          `identifier in the call names nothing in this brain.${tail}`,
+      );
+    });
+
+    it("a 403 where a kind is read is not taken for a thought nobody has", async () => {
+      // Only the read's own 404 is. Read as one, the 403 would call a type no
+      // type, and let a type through as a parent for the API to set.
+      for (const [tool, args] of [
+        ["brain_update_thought", { thoughtId: THOUGHT, typeId: TYPE }],
+        ["brain_create_thought", { name: "RAG", parentId: PARENT, tagIds: [TAG] }],
+        ["brain_link", { fromId: THOUGHT, toId: TYPE, relation: "parent" }],
+      ] as const) {
+        const { call, calls } = await connect([["GET /api/thoughts/", catchAll]]);
+        const result = await call(tool, { brainId: BRAIN, ...args });
+        expect(result.isError, tool).toBe(true);
+        expect(result.text, tool).toMatch(/^TheBrain answered 403 and named no cause/);
+        expect(result.text, tool).not.toMatch(/is not a t|no thought in this brain/);
+        expect(calls.filter((c) => c.method !== "GET"), tool).toEqual([]);
+      }
+    });
   });
 });
 

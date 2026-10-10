@@ -94,13 +94,26 @@ describe("normalising the five error shapes", () => {
     await expect(client.get("/api/brains")).rejects.toMatchObject({ kind: "auth" });
   });
 
-  it("403 router text for a thought that does not exist", async () => {
+  it("401 that names a brain is about the brain, not the key", async () => {
+    // What every request answers for a brainId that is no brain. The key was accepted.
+    const { client } = clientReturning(
+      JSON.stringify(`Access to brain ${BRAIN} is unauthorized.`),
+      { status: 401 },
+    );
+    await expect(client.get(`/api/thoughts/${BRAIN}/x`)).rejects.toMatchObject({
+      kind: "unknown_brain",
+      status: 401,
+      message: `Access to brain ${BRAIN} is unauthorized.`,
+    });
+  });
+
+  it("403 router text for the graph of a thought that does not exist", async () => {
     const { client } = clientReturning(
       "To use the TheBrain API, make requests to /api (e.g. /api/brains). " +
         "An API key is required via the Authorization header.",
       { status: 403, contentType: "text/plain" },
     );
-    await expect(client.get("/api/thoughts/a/b")).rejects.toMatchObject({
+    await expect(client.get("/api/thoughts/a/b/graph")).rejects.toMatchObject({
       kind: "forbidden",
     });
   });

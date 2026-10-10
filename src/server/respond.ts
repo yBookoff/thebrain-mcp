@@ -29,6 +29,12 @@ export function fail(text: string): ToolResponse {
  *
  * The wording points at the next step rather than just stating the failure:
  * "no such thought" is useless, "check the identifier" is not.
+ *
+ * And at the right identifier. The API's status does not say which: a
+ * `brainId` that is no brain is a 401 like a rejected key's, and an identifier
+ * nobody has is a 404 or a 403 by the request (docs/api-map.md, L3). A
+ * message for one never names the other, and the API's own words are kept
+ * wherever they carry the identifier.
  */
 export function describeError(error: unknown): string {
   if (error instanceof EmbedderUnavailableError) return error.message;
@@ -55,14 +61,29 @@ export function describeError(error: unknown): string {
         );
       case "auth":
         return "TheBrain rejected the key. Check THEBRAIN_API_KEY: find it under Settings > User > Local API Key.";
+      case "unknown_brain":
+        // A 401 like a rejected key's, and not about the key.
+        return (
+          `${sentence(error.message)} The key was accepted: it is brainId that names no ` +
+          "brain open to it. Take brainId from brain_list. The other identifiers in the " +
+          "call were not looked at."
+        );
       case "network":
         return `${error.message} Check that the TheBrain desktop app is running and its local API is enabled.`;
       case "route_miss":
-        return "The identifier was not found or is malformed — the API returned the app page instead of data.";
+        // Never an identifier nobody has: that one gets an answer from the API.
+        return (
+          "An identifier in the request is malformed, or this TheBrain has no such " +
+          "endpoint — the API returned the app page instead of data."
+        );
       case "not_found":
-        return "Resource not found. It may have been deleted, or the identifier belongs to a different brain.";
+        return `${whatWasNotFound(error)} ${GONE} ${TAKE_IDENTIFIERS}`;
       case "forbidden":
-        return "Access denied. On the local API this usually means no object with that identifier exists in this brain.";
+        // The API's catch-all. It says nothing of access, and neither does this.
+        return (
+          `TheBrain answered 403 and named no cause${requestOf(error)}. That is its answer ` +
+          `when an identifier in the call names nothing in this brain. ${GONE} ${TAKE_IDENTIFIERS}`
+        );
       default:
         return error.toToolMessage();
     }
@@ -70,6 +91,37 @@ export function describeError(error: unknown): string {
 
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+const GONE = "It may have been deleted, or be another brain's.";
+const TAKE_IDENTIFIERS = "Take identifiers from brain_search or brain_get_thought.";
+
+/** The path of a thought or a link addressed by its own identifier: brain, then it. */
+const ADDRESSED = /^\/api\/(thought|link)s\/[^/]+\/([0-9a-f-]{36})$/i;
+
+/**
+ * The first sentence for a 404. The API's own text is kept when it has one:
+ * a create names the source thought it did not find, an attachment its
+ * thought. The read and the patch of a thought or a link answer a bare "Not
+ * Found", and what they did not find is the identifier their path ends with.
+ * Any other path is quoted and not interpreted.
+ */
+function whatWasNotFound(error: TheBrainError): string {
+  if (!/^not found\.?$/i.test(error.message.trim())) return sentence(error.message);
+  const [, noun, id] = ADDRESSED.exec(error.path ?? "") ?? [];
+  return noun === undefined
+    ? `Not found${requestOf(error)}.`
+    : `No ${noun} in this brain has the identifier ${id}${requestOf(error)}.`;
+}
+
+function requestOf(error: TheBrainError): string {
+  return error.method && error.path ? ` (${error.method} ${error.path})` : "";
+}
+
+/** The API ends some of its messages with a period and some without. */
+function sentence(message: string): string {
+  const text = message.trim();
+  return /[.!?]$/.test(text) ? text : `${text}.`;
 }
 
 /** Wraps a handler so any exception becomes `isError`. */

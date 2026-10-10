@@ -6,11 +6,24 @@
  */
 
 export type ApiErrorKind =
-  /** 401 — key missing or rejected. */
+  /** 401 in the API's words for the key: missing or rejected. */
   | "auth"
-  /** 403 — forbidden. TheBrain also returns this for a thought that does not exist. */
+  /**
+   * 401 in its words for a brain: `"Access to brain <id> is unauthorized."` The
+   * key was accepted, and no brain with that identifier is open to it. Every
+   * request with a brain in its path answers so, whatever else it names.
+   */
+  | "unknown_brain"
+  /**
+   * 403 — the API's catch-all, in its router's words and with no cause named.
+   * The graph of a thought nobody has gets it, and so does a patch the API
+   * cannot apply. The read and the patch of such a thought are a 404.
+   */
   | "forbidden"
-  /** 404 — resource not found. */
+  /**
+   * 404 — nothing under that identifier. A create and an attachment name the
+   * thought they did not find; a read and a patch answer a bare "Not Found".
+   */
   | "not_found"
   /** 400 — bad request. */
   | "bad_request"
@@ -134,8 +147,12 @@ export function extractErrorMessage(body: string, contentType: string | null): s
   return trimmed.length > 300 ? `${trimmed.slice(0, 300)}…` : trimmed;
 }
 
-export function kindForStatus(status: number): ApiErrorKind {
-  if (status === 401) return "auth";
+/** The 401 that is about the brain in the path, where the others are about the key. */
+const NO_SUCH_BRAIN = /^Access to brain \S+ is unauthorized/;
+
+/** `message` is what `extractErrorMessage` made of the body: one status, two meanings. */
+export function kindForStatus(status: number, message = ""): ApiErrorKind {
+  if (status === 401) return NO_SUCH_BRAIN.test(message) ? "unknown_brain" : "auth";
   if (status === 403) return "forbidden";
   if (status === 404) return "not_found";
   if (status >= 500) return "server";

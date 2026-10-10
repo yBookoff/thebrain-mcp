@@ -91,13 +91,11 @@ async function read(
   try {
     return await client.get<ThoughtDto>(`/api/thoughts/${brainId}/${id}`);
   } catch (error) {
-    // No such thought. This read answers 404; its graph would answer 403.
-    if (
-      error instanceof TheBrainError &&
-      (error.kind === "forbidden" || error.kind === "not_found")
-    ) {
-      return null;
-    }
+    // No such thought: this read answers 404, where its graph would answer
+    // 403. Only the 404 is taken for that. A 403 is the API's catch-all and
+    // names no cause, and a brain that is not there is a 401: neither says
+    // that the brain has no such thought.
+    if (error instanceof TheBrainError && error.kind === "not_found") return null;
     throw error;
   }
 }

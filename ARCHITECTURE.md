@@ -68,9 +68,9 @@ without a protocol harness.
 
 Its whole job is to turn a hostile HTTP surface into typed calls that either
 return data or throw a `TheBrainError` with a machine-readable `kind`
-(`auth | forbidden | not_found | bad_request | server | route_miss |
-invalid_uuid | not_a_type | not_a_tag | not_a_parent | tag_as_parent | zero_id |
-network | malformed`).
+(`auth | unknown_brain | forbidden | not_found | bad_request | server |
+route_miss | invalid_uuid | not_a_type | not_a_tag | not_a_parent |
+tag_as_parent | zero_id | network | malformed`).
 
 "Hostile" is not an exaggeration — see §7 for the catalogue. The two defences
 that matter most:
@@ -428,6 +428,25 @@ Take identifiers from brain_list, brain_search or brain_get_thought — do not i
 `describeError()` maps each `TheBrainError.kind` to that kind of message: an
 `auth` failure points at Settings → User → Local API Key; a `network` failure
 points at the desktop app not running.
+
+**The status is not the meaning.** The API answers a `brainId` that is no
+brain with a 401, the status of a rejected key, in other words. It answers
+the graph of a thought nobody has with a 403 that is about no permission, and
+the other requests that name such a thought with a 404 that sometimes carries
+the identifier and sometimes says only "Not Found". Read by status, a wrong
+`brainId` sent the model to check its key, and a parent
+nobody has was "Resource not found", with the API's sentence and the
+identifier in it dropped. So the client makes two kinds of the 401, `auth`
+and `unknown_brain`, and `describeError()` keeps the API's words wherever
+they name what was wrong, names the thought or the link a bare 404 is about
+from the request's path, and for the 403 says that no cause was given and
+what that most often means. A message never points at an identifier the
+failure was not about: the one for a brain that is not there sends the model
+to `brain_list` and says the other identifiers were not looked at; the ones
+for an identifier nobody has do not mention `brainId`. And a refusal about
+the brain is not turned into an answer: `brain_search` with no index used to
+drop it and report nothing found. What each request answers is in
+`docs/api-map.md`, row L3.
 
 **Degradation is reported, not hidden.** When semantic search falls back to the
 lexical fan-out, the outcome carries `degradedReason` and the tool prints it. An

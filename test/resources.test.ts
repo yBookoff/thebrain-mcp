@@ -326,8 +326,8 @@ describe("a typeId that is not a type", () => {
         "/api/thoughts/",
         (url) => {
           const id = url.pathname.split("/").pop()!;
-          // A thought that does not exist is a 403.
-          if (id !== THOUGHT) return others[id] ?? 403;
+          // A thought that does not exist is a 404 to this read.
+          if (id !== THOUGHT) return others[id] ?? 404;
           if (stale === 0) return thought(THOUGHT, "written to", { typeId });
           stale -= 1;
           return thought(THOUGHT, "written to");
@@ -462,6 +462,63 @@ describe("a typeId that is not a type", () => {
     // Only "no such thought" means "not a type". A rejected key is not that.
     const { api } = apiWith([["/api/thoughts/", () => 401]]);
     await expect(api.thoughts.requireType(BRAIN, TYPE)).rejects.toMatchObject({ kind: "auth" });
+  });
+});
+
+describe("what the read of a kind takes for no such thought", () => {
+  const PLAIN = "eeeeeeee-0000-4000-8000-000000000005";
+
+  /** Every request answered the same way, in the API's own words. */
+  const answering = (status: number, body: string, contentType = "application/json") => {
+    const calls: string[] = [];
+    const fetchImpl = async (
+      _input: Parameters<typeof fetch>[0],
+      init?: Parameters<typeof fetch>[1],
+    ): Promise<Response> => {
+      calls.push(init?.method ?? "GET");
+      return new Response(body, { status, headers: { "content-type": contentType } });
+    };
+    const api = new TheBrainApi({ apiKey: "k", fetchImpl: fetchImpl as unknown as typeof fetch });
+    return { api, calls };
+  };
+  const checks = (api: TheBrainApi): Array<[string, () => Promise<unknown>]> => [
+    ["requireType", () => api.thoughts.requireType(BRAIN, TYPE)],
+    ["requireTag", () => api.links.requireTag(BRAIN, TAG)],
+    ["requireParent", () => api.links.requireParent(BRAIN, PLAIN, "parentId")],
+    // The writes that read first: nothing is sent after a read that settled nothing.
+    ["update", () => api.thoughts.update(BRAIN, THOUGHT, { name: "renamed", typeId: TYPE })],
+    ["link", () => api.links.create(BRAIN, { thoughtIdA: PLAIN, thoughtIdB: THOUGHT })],
+    ["tag", () => api.links.attachTag(BRAIN, THOUGHT, TAG)],
+  ];
+
+  it("a brainId that is no brain is not a thought nobody has", async () => {
+    // Measured: every request with such a brain in its path is this 401, the
+    // read of a thought that exists included.
+    const refusal = `Access to brain ${BRAIN} is unauthorized.`;
+    const { api, calls } = answering(401, JSON.stringify(refusal));
+    for (const [what, check] of checks(api)) {
+      await expect(check(), what).rejects.toMatchObject({
+        kind: "unknown_brain",
+        message: refusal,
+      });
+    }
+    expect(calls.filter((method) => method !== "GET")).toEqual([]);
+  });
+
+  it("nor is the catch-all 403: only the read's own 404 is", async () => {
+    // Measured: the read of a thought nobody has is a 404, and the 403 is what
+    // the API answers when it names no cause. Taken for "no such thought", it
+    // would call a type that is there no type, and let a type through as a parent.
+    const { api, calls } = answering(
+      403,
+      "To use the TheBrain API, make requests to /api (e.g. /api/brains). " +
+        "An API key is required via the Authorization header.",
+      "text/plain",
+    );
+    for (const [what, check] of checks(api)) {
+      await expect(check(), what).rejects.toMatchObject({ kind: "forbidden" });
+    }
+    expect(calls.filter((method) => method !== "GET")).toEqual([]);
   });
 });
 

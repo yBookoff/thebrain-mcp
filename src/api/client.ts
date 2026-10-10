@@ -195,11 +195,13 @@ export class TheBrainClient {
     }
 
     if (!response.ok) {
-      throw new TheBrainError(
-        kindForStatus(response.status),
-        extractErrorMessage(text, contentType),
-        { status: response.status, method, path, body: text.slice(0, 500) },
-      );
+      const message = extractErrorMessage(text, contentType);
+      throw new TheBrainError(kindForStatus(response.status, message), message, {
+        status: response.status,
+        method,
+        path,
+        body: text.slice(0, 500),
+      });
     }
 
     if (text.trim() === "") return undefined as T;
