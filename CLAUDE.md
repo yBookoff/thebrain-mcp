@@ -132,6 +132,18 @@ silent wrong behaviour rather than a loud failure:
   `isError` result that asks for the rest alone. A `tempId` is resolved as a
   `tempId` only: one that reads as a UUID is not an identifier. A create that
   timed out may have landed (`mayHaveLanded()`): say so, never call it failed.
+- **A plan thought is looked for where its relation puts it, in a graph that
+  lags.** A graph lists a thought created as a child under `children`, as a
+  parent under `parents`, as a jump under `jumps`; `ingest()` looked among
+  `children` alone and made the other two again on every run. The same
+  thought is the same name under the same relation to the same thought; one
+  of that name under another relation fails with its identifier, neither
+  reused nor made again. A graph that has been read is answered from a copy,
+  up to 0.2 s behind a create, so `ingest()` returns once the graphs list
+  what it made and counts what they still lack after 2 s in `unlisted`. A
+  read of that graph that fails fails the thought, never "nothing there". A
+  thought with no parent is still made by every run, and a `relation` with no
+  parent is refused before any write.
 - **Search is prefix-based.** This is why `src/semantic/` exists.
 
 ## Semantic layer
