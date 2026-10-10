@@ -270,6 +270,65 @@ suite("resource layer against the live API", () => {
     }).toEqual({ parents: false, children: true, jumps: false, tags: false });
   }, 30_000);
 
+  it("every thought a graph lists or a search finds carries its kind", async () => {
+    // The read tools mark a type or a tag from this, at no request of their
+    // own: a list that came without kinds would pass both off as ordinary.
+    const stamp = `kind${Date.now()}`;
+    const typeId = await make(`${stamp} type`, ThoughtKind.Type);
+    const tagId = await make(`${stamp} tag`, ThoughtKind.Tag);
+    const strayTypeId = await make(`${stamp} stray type`, ThoughtKind.Type);
+    const strayTagId = await make(`${stamp} stray tag`, ThoughtKind.Tag);
+    const parentId = await make(`${stamp} parent`);
+    const id = await api.thoughts.create(brainId, {
+      name: `${PREFIX}${stamp} plain`,
+      sourceThoughtId: parentId,
+      typeId,
+    });
+    created.push(id);
+    await api.links.attachTag(brainId, id, tagId);
+    // Ordinary links both: a type put under a thought, and a jump to a tag.
+    await api.links.create(brainId, {
+      thoughtIdA: parentId,
+      thoughtIdB: strayTypeId,
+      relation: Relation.Child,
+    });
+    await api.links.create(brainId, {
+      thoughtIdA: id,
+      thoughtIdB: strayTagId,
+      relation: Relation.Jump,
+    });
+
+    const kinds = (list: readonly ThoughtDto[]): Record<string, number> =>
+      Object.fromEntries(list.map((t) => [t.id, t.kind]));
+    const graph = await eventually(
+      () => api.thoughts.getGraph(brainId, id, { includeSiblings: true }),
+      (g) => g.tags.length === 1 && g.jumps.length === 1 && g.siblings.length === 1,
+    );
+    expect(graph.thought.kind).toBe(ThoughtKind.Normal);
+    expect(graph.type?.kind).toBe(ThoughtKind.Type);
+    expect(kinds(graph.tags)).toEqual({ [tagId]: ThoughtKind.Tag });
+    expect(kinds(graph.parents)).toEqual({ [parentId]: ThoughtKind.Normal });
+    expect(kinds(graph.jumps)).toEqual({ [strayTagId]: ThoughtKind.Tag });
+    expect(kinds(graph.siblings)).toEqual({ [strayTypeId]: ThoughtKind.Type });
+    const above = await api.thoughts.getGraph(brainId, parentId);
+    expect(kinds(above.children)).toEqual({
+      [id]: ThoughtKind.Normal,
+      [strayTypeId]: ThoughtKind.Type,
+    });
+
+    // TheBrain's own search, which is what brain_search runs on with no index.
+    const wanted = [typeId, tagId, id];
+    const hits = await eventually(
+      () => api.search.inBrain(brainId, PREFIX + stamp, { maxResults: 20 }),
+      (found) => wanted.every((want) => found.some((h) => h.thought.id === want)),
+      { timeoutMs: 25_000, stepMs: 500 },
+    );
+    const found = kinds(hits.map((h) => h.thought));
+    expect(found[typeId]).toBe(ThoughtKind.Type);
+    expect(found[tagId]).toBe(ThoughtKind.Tag);
+    expect(found[id]).toBe(ThoughtKind.Normal);
+  }, 40_000);
+
   it("append creates the note when absent and extends it afterwards", async () => {
     const id = await make("with-note");
 

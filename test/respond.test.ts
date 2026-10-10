@@ -9,6 +9,8 @@ import {
   fail,
   guard,
   join,
+  kindLabel,
+  kindMark,
   ok,
   section,
   table,
@@ -142,6 +144,30 @@ describe("formatting", () => {
 
   it("join drops empty parts", () => {
     expect(join(["first", null, "second"])).toBe("first\n\nsecond");
+  });
+});
+
+describe("what kind of thought a result names", () => {
+  it("an ordinary thought has no label and no mark, so it costs nothing", () => {
+    expect(kindLabel(1)).toBeNull();
+    expect(kindMark(1)).toBe("");
+  });
+
+  it("a type and a tag are named", () => {
+    expect(kindLabel(2)).toBe("type");
+    expect(kindLabel(4)).toBe("tag");
+    expect(kindMark(2)).toBe(" [type]");
+    expect(kindMark(4)).toBe(" [tag]");
+  });
+
+  it("a kind with no name here is shown as the API's number, not passed off as ordinary", () => {
+    expect(kindLabel(3)).toBe("kind 3");
+    expect(kindMark(5)).toBe(" [kind 5]");
+  });
+
+  it("a thought read with no kind at all is taken for an ordinary one", () => {
+    expect(kindMark(undefined as unknown as number)).toBe("");
+    expect(kindMark(null as unknown as number)).toBe("");
   });
 });
 

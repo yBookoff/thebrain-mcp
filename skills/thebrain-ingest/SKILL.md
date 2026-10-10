@@ -202,6 +202,12 @@ under "Links that already existed".
 Take them from `brain_list_types_and_tags`. Do not invent new ones when a suitable
 one exists — five nearly identical types are worse than one general one.
 
+In a traversal and among a thought's neighbours, a type or a tag is marked
+`[type]` or `[tag]` after its identifier, and a search asked to include them
+says which in a `Kind` column. A thought with no mark is an ordinary one.
+`brain_get_thought` shows a thought's own type with its identifier, ready to
+reuse.
+
 Through the API a tag can only be attached by the identifier of an existing tag.
 If you need a new one, first create it as a thought of kind tag, then use it.
 

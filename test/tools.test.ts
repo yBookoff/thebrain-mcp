@@ -9,6 +9,10 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { TheBrainApi } from "../src/api/index.js";
+import { indexModelId } from "../src/semantic/document.js";
+import type { Embedder } from "../src/semantic/embedder.js";
+import { SemanticSearch } from "../src/semantic/search.js";
+import { VectorStore } from "../src/semantic/store.js";
 import type { ServerContext } from "../src/server/context.js";
 import { registerIngestTool } from "../src/server/tools/ingest.js";
 import { registerReadTools } from "../src/server/tools/read.js";
@@ -24,13 +28,17 @@ type Route = [needle: string, respond: (url: URL, body: unknown) => unknown];
 /**
  * Routes match by method and path substring, first match wins. A route
  * answers 200 with what it returns, a bare status for a number, or with the
- * `Response` it builds itself.
+ * `Response` it builds itself. `context` adds to the server context what a
+ * tool needs beside the API.
  *
  * One thing is added to what a route returns: a graph lists the thoughts
  * created next to its thought through this connection, in the list their
  * relation puts them in, as the API's does. `brain_ingest` waits for that.
  */
-async function connect(routes: Route[]) {
+async function connect(
+  routes: Route[],
+  context: (api: TheBrainApi) => Record<string, unknown> = () => ({}),
+) {
   const calls: Array<{ method: string; path: string; body: unknown }> = [];
   const LISTS = { 1: "children", 2: "parents", 3: "jumps" } as const;
   const born: Array<{ id: string; name: string; source: string; list: string }> = [];
@@ -81,7 +89,7 @@ async function connect(routes: Route[]) {
   );
 
   const api = new TheBrainApi({ apiKey: "k", fetchImpl: fetchImpl as unknown as typeof fetch });
-  const ctx = { api } as unknown as ServerContext;
+  const ctx = { api, ...context(api) } as unknown as ServerContext;
   const server = new McpServer({ name: "thebrain-mcp-test", version: "0" });
   registerReadTools(server, ctx);
   registerWriteTools(server, ctx);
@@ -159,6 +167,298 @@ describe("brain_get_thought", () => {
     expect(await view(thought("RAG", { aliases: [] }))).not.toContain("Aliases");
     expect(await view(thought("RAG", { aliases: null }))).not.toContain("Aliases");
     expect(await view(thought("RAG"))).not.toContain("Aliases");
+  });
+});
+
+describe("a thought's kind in what the read tools print", () => {
+  const TYPE = "eeeeeeee-0000-4000-8000-000000000005";
+  const TAG = "ffffffff-0000-4000-8000-000000000006";
+  const OTHER = "abababab-0000-4000-8000-000000000007";
+
+  const at = (id: string, name: string, kind = 1, extra: Record<string, unknown> = {}) =>
+    thought(name, { id, kind, ...extra });
+  const type = at(TYPE, "Pattern", 2);
+  const tag = at(TAG, "gotcha", 4);
+  const plain = at(OTHER, "Embeddings");
+
+  describe("brain_get_thought", () => {
+    const view = async (
+      shown: Record<string, unknown>,
+      args: Record<string, unknown> = {},
+    ): Promise<string> => {
+      const { call } = await connect([
+        ["GET /graph", () => shown],
+        ["GET /api/notes", () => noNote],
+      ]);
+      const result = await call("brain_get_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        ...args,
+      });
+      expect(result.isError).toBe(false);
+      return result.text;
+    };
+
+    it("an ordinary thought among ordinary ones reads as it did, to the character", async () => {
+      const text = await view({
+        ...graph(thought("RAG")),
+        parents: [at(PARENT, "Retrieval")],
+        children: [plain],
+      });
+      expect(text).toBe(
+        `# RAG\n${THOUGHT}\n\n## Parents\n- Retrieval — ${PARENT}\n\n## Children\n- Embeddings — ${OTHER}`,
+      );
+    });
+
+    it("a type and a tag are marked after their identifier", async () => {
+      expect(await view(graph(at(THOUGHT, "Pattern", 2)))).toBe(`# Pattern\n${THOUGHT} [type]`);
+      expect(await view(graph(at(THOUGHT, "gotcha", 4)))).toBe(`# gotcha\n${THOUGHT} [tag]`);
+    });
+
+    it("a type or a tag in any list of neighbours is marked, and the ordinary ones are not", async () => {
+      const text = await view(
+        {
+          ...graph(thought("RAG")),
+          parents: [tag],
+          children: [type, plain],
+          jumps: [tag, type],
+          siblings: [type, plain],
+        },
+        { includeSiblings: true },
+      );
+      expect(text).toContain(`## Parents\n- gotcha — ${TAG} [tag]\n`);
+      expect(text).toContain(`## Children\n- Pattern — ${TYPE} [type]\n- Embeddings — ${OTHER}\n`);
+      expect(text).toContain(`## Jumps\n- gotcha — ${TAG} [tag]\n- Pattern — ${TYPE} [type]\n`);
+      expect(text).toContain(`## Siblings\n- Pattern — ${TYPE} [type]\n- Embeddings — ${OTHER}`);
+    });
+
+    it("a thought's type comes with its identifier, and its tags by name", async () => {
+      const text = await view({
+        ...graph(thought("RAG", { typeId: TYPE })),
+        type,
+        // The API lists the type among the parents as well.
+        parents: [type, at(PARENT, "Retrieval")],
+        tags: [tag, at(OTHER, "measured", 4)],
+      });
+      expect(text).toContain(`## Type\nPattern — ${TYPE}\n`);
+      expect(text).toContain("## Tags\ngotcha, measured\n");
+      expect(text).toContain(`## Parents\n- Retrieval — ${PARENT}`);
+      expect(text).not.toContain("[type]");
+    });
+  });
+
+  describe("brain_search", () => {
+    const hit = (t: { name: string }) => ({
+      sourceThought: t,
+      sourceLink: null,
+      searchResultType: 1,
+      isFromOtherBrain: false,
+      name: t.name,
+      attachmentId: "00000000-0000-0000-0000-000000000000",
+      brainName: null,
+      brainId: "00000000-0000-0000-0000-000000000000",
+      entityType: 2,
+      sourceType: 2,
+    });
+
+    const embedder: Embedder = {
+      id: "fake@v1",
+      dimensions: 2,
+      embedDocuments: async (texts) => texts.map(() => new Float32Array([1, 0])),
+      embedQuery: async () => new Float32Array([1, 0]),
+    };
+
+    /** A search over `store`: an empty one falls back to TheBrain's own search. */
+    const searching = (store: VectorStore) => (api: TheBrainApi) => ({
+      search: () => new SemanticSearch(api, store, embedder),
+    });
+
+    const indexed = (): VectorStore => {
+      const store = new VectorStore(":memory:");
+      store.setMeta({
+        brainId: BRAIN,
+        model: indexModelId(embedder.id),
+        dimensions: embedder.dimensions,
+        syncedThrough: null,
+      });
+      const entry = (thoughtId: string, name: string, kind: number, x: number) => ({
+        thoughtId,
+        name,
+        kind,
+        contentHash: "h",
+        vector: new Float32Array([x, Math.sqrt(1 - x * x)]),
+      });
+      store.upsert([
+        entry(TYPE, "Pattern", 2, 1),
+        entry(OTHER, "Embeddings", 1, 0.8),
+        entry(TAG, "gotcha", 4, 0.6),
+      ]);
+      return store;
+    };
+
+    /** The table's lines, each cut into cells where two or more spaces part them. */
+    const cells = (text: string): string[][] => {
+      const lines = text.split("\n");
+      const header = lines.findIndex((l) => l.startsWith("Score"));
+      const end = lines.findIndex((l, i) => i > header && l === "");
+      return lines
+        .slice(header, end === -1 ? undefined : end)
+        .filter((l) => !l.startsWith("─"))
+        .map((l) => l.split(/\s{2,}/));
+    };
+
+    const lexical = async (args: Record<string, unknown>): Promise<string> => {
+      const { call } = await connect(
+        [["GET /api/search", () => [hit(type), hit(plain), hit(tag)]]],
+        searching(new VectorStore(":memory:")),
+      );
+      const result = await call("brain_search", { brainId: BRAIN, query: "RAG", ...args });
+      expect(result.isError).toBe(false);
+      return result.text;
+    };
+
+    const vector = async (args: Record<string, unknown>): Promise<string> => {
+      const { call, calls } = await connect([], searching(indexed()));
+      const result = await call("brain_search", { brainId: BRAIN, query: "RAG", ...args });
+      expect(result.isError).toBe(false);
+      // The kind is the one the index keeps: no request is made for it.
+      expect(calls).toEqual([]);
+      return result.text;
+    };
+
+    it("without an index, types and tags asked for are told apart in a Kind column", async () => {
+      const text = await lexical({ includeAuxiliary: true });
+      expect(text).toContain("## Found by substring");
+      expect(cells(text)).toEqual([
+        ["Score", "Thought", "Identifier", "Kind", "Matched"],
+        ["1.000", "Pattern", TYPE, "type", "RAG"],
+        ["0.500", "Embeddings", OTHER, "RAG"],
+        ["0.333", "gotcha", TAG, "tag", "RAG"],
+      ]);
+    });
+
+    it("without an index, a result of ordinary thoughts has no such column", async () => {
+      expect(cells(await lexical({}))).toEqual([
+        ["Score", "Thought", "Identifier", "Matched"],
+        ["0.500", "Embeddings", OTHER, "RAG"],
+      ]);
+    });
+
+    it("with an index, the kind comes from the index and fills the same column", async () => {
+      const text = await vector({ includeAuxiliary: true });
+      expect(text).toContain("## Found by meaning");
+      expect(cells(text)).toEqual([
+        ["Score", "Thought", "Identifier", "Kind", "Matched"],
+        ["1.000", "Pattern", TYPE, "type"],
+        ["0.800", "Embeddings", OTHER],
+        ["0.600", "gotcha", TAG, "tag"],
+      ]);
+    });
+
+    it("with an index, a result of ordinary thoughts reads as it did, to the character", async () => {
+      expect(await vector({})).toBe(
+        "## Found by meaning\n" +
+          "Score  Thought     Identifier                            Matched\n" +
+          "─────  ──────────  ────────────────────────────────────  ───────\n" +
+          `0.800  Embeddings  ${OTHER}`,
+      );
+    });
+  });
+
+  describe("brain_traverse", () => {
+    const walk = async (root: Record<string, unknown>): Promise<string> => {
+      const { call } = await connect([["GET /graph", () => root]]);
+      const result = await call("brain_traverse", { brainId: BRAIN, thoughtId: THOUGHT, depth: 1 });
+      expect(result.isError).toBe(false);
+      return result.text;
+    };
+
+    it("a type or a tag met on the way is marked, and an ordinary thought is not", async () => {
+      const text = await walk({
+        ...graph(thought("RAG")),
+        children: [type, plain],
+        jumps: [tag],
+      });
+      expect(text).toBe(
+        "# Neighbourhood of: RAG\n\n" +
+          "## Hop 1\n" +
+          `- Pattern — ${TYPE} [type]  (via RAG)\n` +
+          `- Embeddings — ${OTHER}  (via RAG)\n` +
+          `- gotcha — ${TAG} [tag]  (via RAG)\n\n` +
+          "## Totals\nthoughts 4, links 3",
+      );
+    });
+
+    it("a walk that starts from a type or a tag says so in its heading", async () => {
+      expect(await walk({ ...graph(at(THOUGHT, "Pattern", 2)), children: [plain] })).toContain(
+        "# Neighbourhood of: Pattern [type]\n",
+      );
+      expect(await walk({ ...graph(at(THOUGHT, "gotcha", 4)), children: [plain] })).toContain(
+        "# Neighbourhood of: gotcha [tag]\n",
+      );
+    });
+  });
+
+  describe("brain_recent_changes", () => {
+    const entry = (second: number, fields: Record<string, unknown>) => ({
+      sourceId: THOUGHT,
+      sourceType: 2,
+      extraAId: "00000000-0000-0000-0000-000000000000",
+      extraAType: -1,
+      extraBId: "00000000-0000-0000-0000-000000000000",
+      extraBType: -1,
+      modType: 101,
+      oldValue: null,
+      newValue: null,
+      userId: "00000000-0000-0000-0000-000000000000",
+      brainId: BRAIN,
+      creationDateTime: `2026-10-10T12:00:0${second}`,
+      modificationDateTime: `2026-10-10T12:00:0${second}`,
+      syncUpdateDateTime: null,
+      ...fields,
+    });
+
+    it("a tag attached reads as one, and a type created as a type, at no further request", async () => {
+      const known = [thought("RAG"), type, tag];
+      const { call, calls } = await connect([
+        [
+          "GET /modifications",
+          () => [
+            // A tag attached is logged as a link created, the tag at one end.
+            entry(3, {
+              sourceId: LINK,
+              sourceType: 3,
+              extraAId: TAG,
+              extraAType: 2,
+              extraBId: THOUGHT,
+              extraBType: 2,
+            }),
+            entry(2, { sourceId: TYPE }),
+            entry(1, {}),
+          ],
+        ],
+        ["GET /api/thoughts/", (url) => known.find((t) => url.pathname.endsWith(t.id)) ?? 404],
+      ]);
+      const result = await call("brain_recent_changes", {
+        brainId: BRAIN,
+        since: "2026-10-10T00:00:00Z",
+      });
+
+      expect(result.isError).toBe(false);
+      const rows = result.text.split("\n").filter((l) => l.startsWith("2026-10-10 12:00"));
+      expect(rows.map((l) => l.split(/\s{2,}/).slice(1))).toEqual([
+        ["link created", "gotcha [tag] ↔ RAG"],
+        ["created", "Pattern [type]"],
+        ["created", "RAG"],
+      ]);
+      // One read of the log and one of each thought named, as before.
+      expect(calls.map((c) => c.path.split("/").at(-1))).toEqual([
+        "modifications",
+        TAG,
+        THOUGHT,
+        TYPE,
+      ]);
+    });
   });
 });
 

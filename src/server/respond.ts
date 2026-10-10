@@ -7,6 +7,7 @@
  */
 
 import { TheBrainError } from "../api/index.js";
+import { ThoughtKind } from "../api/types.js";
 import { EmbedderUnavailableError } from "../semantic/embedder.js";
 
 export interface ToolResponse {
@@ -114,4 +115,29 @@ export function section(title: string, body: string | null): string | null {
 
 export function join(parts: ReadonlyArray<string | null>): string {
   return parts.filter((p): p is string => p !== null).join("\n\n");
+}
+
+/**
+ * What a thought is when it is not an ordinary one: `type`, `tag`, or the
+ * API's own number for a kind that has no name here. Null for an ordinary
+ * thought: only the exception is spelled out, so the common row costs nothing.
+ *
+ * The write tools refuse an identifier of the wrong kind, and a read result is
+ * where the model picks identifiers from. A thought read with no kind at all
+ * is taken for an ordinary one.
+ */
+export function kindLabel(kind: number): string | null {
+  if (kind === ThoughtKind.Type) return "type";
+  if (kind === ThoughtKind.Tag) return "tag";
+  return kind === ThoughtKind.Normal || !Number.isInteger(kind) ? null : `kind ${kind}`;
+}
+
+/**
+ * The label as a mark: ` [type]`, ` [tag]`, or nothing for an ordinary
+ * thought. It goes after the identifier wherever a line has one, where it
+ * cannot be read as part of the name.
+ */
+export function kindMark(kind: number): string {
+  const label = kindLabel(kind);
+  return label === null ? "" : ` [${label}]`;
 }

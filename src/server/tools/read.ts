@@ -16,7 +16,7 @@ import { describeChange, isSettingNoise, subjectIds } from "../../operations/cha
 import { traverse } from "../../operations/traverse.js";
 import { mapWithConcurrency } from "../../semantic/indexer.js";
 import type { ServerContext } from "../context.js";
-import { bullet, guard, join, ok, section, table } from "../respond.js";
+import { bullet, guard, join, kindLabel, kindMark, ok, section, table } from "../respond.js";
 
 const brainId = z
   .string()
@@ -96,15 +96,21 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
         ctx.api.notes.get(bid, thoughtId).catch(() => ""),
       ]);
 
-      const names = (list: ReadonlyArray<{ name: string | null; id: string }>): string[] =>
-        list.map((t) => `${t.name ?? "(unnamed)"} — ${t.id}`);
+      // A type or a tag among them is marked: any of these lists can hold one,
+      // and a write refuses it where an ordinary thought was meant.
+      const names = (
+        list: ReadonlyArray<{ name: string | null; id: string; kind: number }>,
+      ): string[] => list.map((t) => `${t.name ?? "(unnamed)"} — ${t.id}${kindMark(t.kind)}`);
 
       return ok(
         join([
-          `# ${graph.thought.name ?? "(unnamed)"}\n${graph.thought.id}`,
+          `# ${graph.thought.name ?? "(unnamed)"}\n${graph.thought.id}${kindMark(graph.thought.kind)}`,
           // One per line: an alias may hold a comma, and the list gets edited by value.
           section("Aliases", bullet(aliasesOf(graph.thought))),
-          graph.type ? section("Type", graph.type.name ?? "") : null,
+          // With its identifier: that is what a typeId takes.
+          graph.type
+            ? section("Type", `${graph.type.name ?? "(unnamed)"} — ${graph.type.id}`)
+            : null,
           graph.tags.length > 0
             ? section("Tags", graph.tags.map((t) => t.name ?? "").join(", "))
             : null,
@@ -162,10 +168,16 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
         ...(includeAuxiliary !== undefined ? { includeAuxiliary } : {}),
       });
 
-      const rows = outcome.matches.map((m) => [
+      // The column is there only when a hit is not an ordinary thought, and a
+      // type or a tag is one only with includeAuxiliary: a result of ordinary
+      // thoughts reads as it did.
+      const kinds = outcome.matches.map((m) => kindLabel(m.kind));
+      const kindColumn = kinds.some((k) => k !== null);
+      const rows = outcome.matches.map((m, i) => [
         m.score.toFixed(3),
         m.name,
         m.thoughtId,
+        ...(kindColumn ? [kinds[i] ?? ""] : []),
         m.matchedVariant ?? "",
       ]);
 
@@ -173,7 +185,10 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
         join([
           section(
             outcome.mode === "vector" ? "Found by meaning" : "Found by substring",
-            table(["Score", "Thought", "Identifier", "Matched"], rows),
+            table(
+              ["Score", "Thought", "Identifier", ...(kindColumn ? ["Kind"] : []), "Matched"],
+              rows,
+            ),
           ),
           outcome.degradedReason === null
             ? null
@@ -223,8 +238,8 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       for (const node of result.nodes) {
         if (node.depth === 0) continue;
         const line = node.path.length > 0
-          ? `${node.name} — ${node.id}  (via ${node.path.join(" -> ")})`
-          : `${node.name} — ${node.id}`;
+          ? `${node.name} — ${node.id}${kindMark(node.kind)}  (via ${node.path.join(" -> ")})`
+          : `${node.name} — ${node.id}${kindMark(node.kind)}`;
         byDepth.set(node.depth, [...(byDepth.get(node.depth) ?? []), line]);
       }
 
@@ -233,7 +248,7 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
 
       return ok(
         join([
-          `# Neighbourhood of: ${root?.name ?? thoughtId}`,
+          `# Neighbourhood of: ${root?.name ?? thoughtId}${root ? kindMark(root.kind) : ""}`,
           ...[...byDepth.entries()]
             .sort(([a], [b]) => a - b)
             .map(([d, items]) => section(`Hop ${d}`, bullet(items))),
@@ -337,7 +352,9 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       const unique = [...new Set(logs.flatMap(subjectIds))].slice(0, MAX_RESOLVED_NAMES);
       const resolved = await mapWithConcurrency(unique, 10, async (id) => {
         const t = await ctx.api.thoughts.get(bid, id).catch(() => null);
-        return [id, t?.name ?? "(unnamed)"] as const;
+        // The read that resolves the name has the kind: a tag attached is
+        // logged as a link created, and reads as one unless the tag is marked.
+        return [id, `${t?.name ?? "(unnamed)"}${t ? kindMark(t.kind) : ""}`] as const;
       });
       const thoughtNames = new Map(resolved);
 

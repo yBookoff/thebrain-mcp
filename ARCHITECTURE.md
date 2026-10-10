@@ -194,6 +194,39 @@ easier for a model to read. `respond.ts` has the primitives (`table`, `bullet`,
 `section`, `join`); empty sections are dropped so the model never has to skim
 past "Tags: (empty)".
 
+**A type or a tag is marked; an ordinary thought is not.** The write tools
+refuse an identifier of the wrong kind (§7, items 15, 17 and 18), and a read
+result is where the model takes identifiers from. So wherever a read tool
+names a thought that is not an ordinary one, it says which. `brain_get_thought`
+and `brain_traverse` put `[type]` or `[tag]` after the identifier, where it
+cannot pass for part of the name: on the thought itself and on every
+neighbour. `brain_recent_changes` prints no identifiers and puts the mark
+after the name, which is what tells a tag attached from a link created.
+`brain_search` gains a `Kind` column, there only when a hit is not ordinary:
+for a type or a tag that takes `includeAuxiliary`. And `brain_get_thought`
+gives a thought's type as name and identifier, the form a `typeId` takes. A
+kind with no name here is shown as the API's number.
+
+Only the exception is spelled out, so the common row costs nothing: a result
+that holds ordinary thoughts alone is what it was, to the character. No
+request is spent either. The kind is on every thought the API returns, in a
+graph's lists and in a search hit (contract test); the index keeps it beside
+the name; and `brain_recent_changes` already reads each thought it names.
+Measured on a brain of two types, two tags and five thoughts: a mark is 7 or
+6 characters, the type's identifier 39, the column 6 a row. A thought with a
+type and two tags went from 339 characters to 378, a search that asked for
+types and tags from 1078 to 1138, a traversal that met three of them from 845
+to 865. The descriptions say nothing of the marks, so `tools/list` is the
+size it was.
+
+Left as they were: a thought's tags are names still, because an identifier
+each on every read of a tagged thought is paid far more often than a tag is
+taken off, and `brain_list_types_and_tags` has them; and the active thought of
+`brain_list`, whose kind would take a request of its own. In vector mode the
+kind is the one the index recorded. A thought turned into a tag afterwards
+keeps its old kind there through a sync and a rebuild, since its document has
+not changed, and a default search goes on returning it.
+
 ### `brain_ingest` — the tool the product is built around
 
 Input is a plan: thoughts with `tempId`s that reference each other and existing
