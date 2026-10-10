@@ -73,7 +73,10 @@ silent wrong behaviour rather than a loud failure:
 - **`null` clears nothing through `replace`.** On a label it is a 403, on a
   colour a 400, and on `typeId` a 200 that leaves the type in place. Clear
   through `thoughts.update()`: it sends `remove`, and for a type deletes the
-  link from the type and waits for the thought to read back without one.
+  link from the type and waits for the thought to read back without one. On a
+  link's name it is a 200 that leaves the name, on its colour a 400;
+  `links.update()` sends `remove` for both. A link's thickness reads back a
+  hundred times what was written, and nothing clears it.
 - **`typeId` takes any thought, with a 200.** A tag gets attached, an ordinary
   thought becomes a parent, and the type stays as it was. `thoughts.update()`
   and `create()` read the kind first and throw `not_a_type`; keep new writes

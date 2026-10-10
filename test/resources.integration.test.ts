@@ -36,6 +36,7 @@ import {
   logTime,
   replayThoughtIds,
   type CleanGraph,
+  type LinkDto,
   type ModificationLogDto,
   type ThoughtDto,
 } from "../src/api/index.js";
@@ -1675,6 +1676,212 @@ suite("resource layer against the live API", () => {
         expect((await api.thoughts.get(brainId, id)).typeId, id).toBeNull();
         expect((await api.links.between(brainId, id, typeId))?.meaning).toBe(LinkMeaning.Normal);
       }
+    });
+  });
+
+  /**
+   * What a patch does to a link, path by path. Measured on TheBrain 15.0.640;
+   * the spec says "Updates a link using JSON Patch" and no more. No tool sends
+   * anything but a name, so this pins what `links.update()` may promise.
+   */
+  describe("patching a link", () => {
+    type Op = { op: "add" | "replace" | "remove"; path: string; value?: unknown };
+    /** A jump between two new thoughts, from `a` to `b`. */
+    const linked = async (
+      name: string,
+      label?: string,
+    ): Promise<{ id: string; a: string; b: string }> => {
+      const a = await make(`${name}-A`);
+      const b = await make(`${name}-B`);
+      const id = await api.links.create(brainId, {
+        thoughtIdA: a,
+        thoughtIdB: b,
+        relation: Relation.Jump,
+        ...(label !== undefined ? { name: label } : {}),
+      });
+      return { id, a, b };
+    };
+    const patch = (id: string, ...ops: Op[]): Promise<unknown> =>
+      api.client.patch(`/api/links/${brainId}/${id}`, { jsonPatch: ops });
+    /** The error a patch is refused with, or null when it is accepted. */
+    const refusal = (id: string, ...ops: Op[]): Promise<TheBrainError | null> =>
+      patch(id, ...ops).then(
+        () => null,
+        (error: unknown) => error as TheBrainError,
+      );
+    const read = (id: string, ok: (l: LinkDto) => boolean): Promise<LinkDto> =>
+      eventually(() => api.links.get(brainId, id), ok);
+
+    it("a name is cleared by remove or by an empty string, to \"\"; replace with null is a 200 that changes nothing", async () => {
+      const { id } = await linked("link-name", "probe");
+
+      // Accepted, and that is the trap: the name stays.
+      expect(await refusal(id, { op: "replace", path: "/name", value: null })).toBeNull();
+      await settle();
+      expect((await api.links.get(brainId, id)).name).toBe("probe");
+
+      await patch(id, { op: "remove", path: "/name" });
+      expect((await read(id, (l) => l.name !== "probe")).name).toBe("");
+      // Removing what is not there is accepted.
+      expect(await refusal(id, { op: "remove", path: "/name" })).toBeNull();
+
+      await api.links.update(brainId, id, { name: "again" });
+      await read(id, (l) => l.name === "again");
+      await patch(id, { op: "replace", path: "/name", value: "" });
+      expect((await read(id, (l) => l.name !== "again")).name).toBe("");
+
+      // The flat facade.
+      await api.links.update(brainId, id, { name: "once more" });
+      await read(id, (l) => l.name === "once more");
+      await api.links.update(brainId, id, { name: null });
+      expect((await read(id, (l) => l.name !== "once more")).name).toBe("");
+
+      // A link never named reads null, and cleared it reads "" like the rest.
+      const bare = await linked("link-unnamed");
+      expect((await api.links.get(brainId, bare.id)).name).toBeNull();
+      await api.links.update(brainId, bare.id, { name: null });
+      expect((await read(bare.id, (l) => l.name !== null)).name).toBe("");
+    }, 30_000);
+
+    it("a colour is cleared by remove alone; null, an empty string and anything but #rrggbb are a 400", async () => {
+      const { id } = await linked("link-colour");
+      await api.links.update(brainId, id, { color: "#ff7145" });
+      // It reads back in capitals.
+      expect((await read(id, (l) => l.color !== null)).color).toBe("#FF7145");
+
+      for (const value of [null, "", "ff7145", "#f71", "red"]) {
+        const refused = await refusal(id, { op: "replace", path: "/color", value });
+        expect(refused?.kind, JSON.stringify(value)).toBe("bad_request");
+        expect(refused?.message).toMatch(/malformed/i);
+      }
+      await settle();
+      expect((await api.links.get(brainId, id)).color).toBe("#FF7145");
+
+      await api.links.update(brainId, id, { color: null });
+      expect((await read(id, (l) => l.color === null)).color).toBeNull();
+      // Removing what is not there is accepted.
+      await api.links.update(brainId, id, { color: null });
+    });
+
+    it("thickness takes replace with a whole number alone, reads back a hundred times it, and never returns to the -1 of a new link", async () => {
+      const { id } = await linked("link-thickness");
+      expect((await api.links.get(brainId, id)).thickness).toBe(-1);
+
+      const refusals: Array<[Op, string, RegExp]> = [
+        [{ op: "replace", path: "/thickness", value: null }, "bad_request", /not specified/],
+        [{ op: "replace", path: "/thickness", value: "" }, "bad_request", /not specified/],
+        [{ op: "remove", path: "/thickness" }, "bad_request", /only 'replace'/i],
+        [{ op: "add", path: "/thickness", value: 2 }, "bad_request", /only 'replace'/i],
+        // The 403 a thought that does not exist gets, not a 400.
+        [{ op: "replace", path: "/thickness", value: 1.5 }, "forbidden", /./],
+      ];
+      for (const [op, kind, message] of refusals) {
+        const refused = await refusal(id, op);
+        expect(refused?.kind, JSON.stringify(op)).toBe(kind);
+        expect(refused?.message, JSON.stringify(op)).toMatch(message);
+      }
+      await settle();
+      expect((await api.links.get(brainId, id)).thickness).toBe(-1);
+
+      await api.links.update(brainId, id, { thickness: 3 });
+      expect((await read(id, (l) => l.thickness !== -1)).thickness).toBe(300);
+
+      // What looks like the way back is not: -1 is one more width, and so is 0.
+      await api.links.update(brainId, id, { thickness: -1 });
+      expect((await read(id, (l) => l.thickness !== 300)).thickness).toBe(-100);
+      await api.links.update(brainId, id, { thickness: 0 });
+      expect((await read(id, (l) => l.thickness !== -100)).thickness).toBe(0);
+
+      // So the facade offers no null, and refuses one before it sends the name.
+      for (const thickness of [null as unknown as number, 1.5]) {
+        await expect(
+          api.links.update(brainId, id, { name: "never written", thickness }),
+        ).rejects.toMatchObject({ kind: "bad_request" });
+      }
+      await settle();
+      const after = await api.links.get(brainId, id);
+      expect([after.name, after.thickness]).toEqual([null, 0]);
+    }, 30_000);
+
+    it("direction takes 0 to 7 and not the -1 of a new link; relation 4 changes nothing, and 2 swaps the ends each time", async () => {
+      const { id, a, b } = await linked("link-ends");
+      const ends = (l: LinkDto): unknown[] => [l.relation, l.thoughtIdA, l.thoughtIdB];
+      const fresh = await api.links.get(brainId, id);
+      expect(fresh.direction).toBe(-1);
+      expect(ends(fresh)).toEqual([Relation.Jump, a, b]);
+
+      for (const direction of [7, 0]) {
+        await api.links.update(brainId, id, { direction });
+        expect((await read(id, (l) => l.direction === direction)).direction).toBe(direction);
+      }
+      for (const value of [-1, 8]) {
+        const refused = await refusal(id, { op: "replace", path: "/direction", value });
+        expect(refused?.kind, `direction ${value}`).toBe("bad_request");
+        expect(refused?.message).toMatch(/invalid 'direction'/i);
+      }
+
+      // Accepted, with nothing to show for it.
+      await api.links.update(brainId, id, { relation: Relation.Sibling });
+      await settle();
+      const still = await api.links.get(brainId, id);
+      expect(still.direction).toBe(0);
+      expect(ends(still)).toEqual([Relation.Jump, a, b]);
+
+      await api.links.update(brainId, id, { relation: Relation.Child });
+      expect(ends(await read(id, (l) => l.relation === Relation.Child))).toEqual([
+        Relation.Child,
+        a,
+        b,
+      ]);
+      // A parent is stored as a child link the other way round, so the same
+      // patch sent again puts the ends back.
+      await api.links.update(brainId, id, { relation: Relation.Parent });
+      expect(ends(await read(id, (l) => l.thoughtIdA === b))).toEqual([Relation.Child, b, a]);
+      await api.links.update(brainId, id, { relation: Relation.Parent });
+      expect(ends(await read(id, (l) => l.thoughtIdA === a))).toEqual([Relation.Child, a, b]);
+      // And the sibling that changed a jump into nothing does as much for a child.
+      await api.links.update(brainId, id, { relation: Relation.Sibling });
+      await settle();
+      expect(ends(await api.links.get(brainId, id))).toEqual([Relation.Child, a, b]);
+
+      await api.links.update(brainId, id, { relation: Relation.Jump });
+      expect(ends(await read(id, (l) => l.relation === Relation.Jump))).toEqual([
+        Relation.Jump,
+        a,
+        b,
+      ]);
+    }, 30_000);
+
+    it("a read straight after a link is patched still returns the old value", async () => {
+      // Measured over 360 patches, thirty each of twelve kinds: a name, a
+      // colour, a thickness, a direction and a relation, set or cleared. Not one
+      // was there on the first read. They showed 6–205 ms later, about 100 ms
+      // at the median.
+      const { id } = await linked("link-lag");
+      let stale = 0;
+      for (let i = 0; i < 5; i++) {
+        const name = `lag ${i}`;
+        await api.links.update(brainId, id, { name });
+        if ((await api.links.get(brainId, id)).name !== name) stale += 1;
+        expect((await read(id, (l) => l.name === name)).name).toBe(name);
+      }
+      expect(stale).toBeGreaterThan(0);
+    });
+
+    it("a refused patch keeps what it wrote before the operation it refused", async () => {
+      // So an update that throws may have landed in part, as for a thought.
+      const { id } = await linked("link-partial", "probe");
+      const refused = await refusal(
+        id,
+        { op: "replace", path: "/name", value: "renamed" },
+        { op: "replace", path: "/color", value: null },
+        { op: "replace", path: "/thickness", value: 2 },
+      );
+      expect(refused?.kind).toBe("bad_request");
+
+      expect((await read(id, (l) => l.name === "renamed")).name).toBe("renamed");
+      await settle();
+      expect((await api.links.get(brainId, id)).thickness).toBe(-1);
     });
   });
 

@@ -803,6 +803,49 @@ describe("tags", () => {
   });
 });
 
+describe("updating a link: flat fields become JSON Patch", () => {
+  const LINK = "eeeeeeee-0000-4000-8000-000000000005";
+
+  it("builds operations only from the fields provided", async () => {
+    const { api, calls } = apiWith([["PATCH /api/links", () => 200]]);
+    await api.links.update(BRAIN, LINK, { name: "supports", color: undefined, thickness: 3 });
+    expect(calls[0]!.body).toEqual([
+      { op: "replace", path: "/name", value: "supports" },
+      { op: "replace", path: "/thickness", value: 3 },
+    ]);
+  });
+
+  it("null clears a name or a colour with remove", async () => {
+    // Measured: `replace` with null is a 400 for a colour, and for a name a 200
+    // that leaves the name where it was.
+    const { api, calls } = apiWith([["PATCH /api/links", () => 200]]);
+    await api.links.update(BRAIN, LINK, { direction: 1, name: null, color: null });
+    expect(calls[0]!.body).toEqual([
+      { op: "replace", path: "/direction", value: 1 },
+      { op: "remove", path: "/name" },
+      { op: "remove", path: "/color" },
+    ]);
+  });
+
+  it("a thickness that is not a whole number is refused before any request, null too", async () => {
+    // A fraction is a 403 and null a 400, and by then the fields ahead of the
+    // thickness are written. Nothing clears a thickness, so the type offers no null.
+    const { api, fetchImpl } = apiWith([["PATCH /api/links", () => 200]]);
+    for (const thickness of [1.5, Number.NaN, null as unknown as number]) {
+      await expect(
+        api.links.update(BRAIN, LINK, { name: "never written", thickness }),
+      ).rejects.toMatchObject({ kind: "bad_request", message: /whole number/ });
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("an empty change set issues no request", async () => {
+    const { api, fetchImpl } = apiWith([["PATCH /api/links", () => 200]]);
+    await api.links.update(BRAIN, LINK, { name: undefined });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
 describe("search", () => {
   it("takes brainId from sourceThought — the root value is zeroes", async () => {
     const { api } = apiWith([

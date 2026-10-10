@@ -1,4 +1,4 @@
-import { assertUuid, type TheBrainClient } from "../client.js";
+import { assertUuid, type JsonPatchOp, type TheBrainClient } from "../client.js";
 import { TheBrainError } from "../errors.js";
 import {
   type AttachmentDto,
@@ -15,12 +15,32 @@ export interface CreateLinkInput {
   name?: string;
 }
 
-/** Flat facade over JSON Patch. `kind` and `meaning` are read-only. */
+/**
+ * Flat facade over JSON Patch. `kind` and `meaning` are read-only.
+ *
+ * An absent field is left alone; `null` clears a name or a colour, the two
+ * fields that can be cleared.
+ */
 export interface UpdateLinkInput {
+  /** Cleared, a name reads back as `""`, not as the `null` of a link never named. */
   name?: string | null | undefined;
+  /** `#rrggbb`; it reads back in capitals. */
   color?: string | null | undefined;
-  thickness?: number | null | undefined;
+  /**
+   * A whole number. The API stores a hundred times it and a read returns that:
+   * 3 reads back as 300.
+   *
+   * No `null`: a new link reads -1, and no patch puts that back. `remove` and
+   * `replace` with null are a 400, and -1 is stored as -100.
+   */
+  thickness?: number | undefined;
+  /** 0 to 7. A new link reads -1, which is a 400 to write. */
   direction?: number | undefined;
+  /**
+   * 1 makes `thoughtIdB` the child and 3 makes a jump, the ends staying as
+   * they are. 2 swaps the ends every time it is sent, and 4 answers 200 and
+   * changes nothing: neither is guarded here.
+   */
   relation?: number | undefined;
 }
 
@@ -68,6 +88,15 @@ export class LinksResource {
     return created.id;
   }
 
+  /**
+   * Takes flat fields and assembles the JSON Patch internally.
+   *
+   * A name or a colour is cleared with `remove`. `replace` with null is a 400
+   * for a colour, and for a name a 200 that leaves the name where it was.
+   *
+   * The API applies a patch one operation at a time and keeps what it wrote
+   * before the one it refuses: an update that throws may have landed in part.
+   */
   async update(
     brainId: string,
     linkId: string,
@@ -75,9 +104,22 @@ export class LinksResource {
   ): Promise<void> {
     assertUuid(brainId, "brainId");
     assertUuid(linkId, "linkId");
-    const ops = Object.entries(changes)
-      .filter(([, v]) => v !== undefined)
-      .map(([key, value]) => ({ op: "replace" as const, path: `/${key}`, value }));
+    // Ahead of the request: a fraction is a 403 and null a 400, and by then
+    // the fields before the thickness are written.
+    if (changes.thickness !== undefined && !Number.isInteger(changes.thickness)) {
+      throw new TheBrainError(
+        "bad_request",
+        `thickness must be a whole number, got ${String(changes.thickness)}. It cannot be ` +
+          "cleared either: no patch returns a link to the thickness it was created with",
+      );
+    }
+    const ops: JsonPatchOp[] = Object.entries(changes)
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) =>
+        value === null
+          ? { op: "remove", path: `/${key}` }
+          : { op: "replace", path: `/${key}`, value },
+      );
     if (ops.length === 0) return;
     await this.client.patch(`/api/links/${brainId}/${linkId}`, { jsonPatch: ops });
   }

@@ -314,7 +314,9 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     cleared with `remove`. A type is not cleared by any patch: `replace /typeId`
     with null answers 200 and leaves the type where it was, so `thoughts.update()`
     deletes the link from the type instead, and reads the thought back before it
-    calls the type removed.
+    calls the type removed. A link's name and colour go the same way, and on a
+    name `replace` with null is another 200 that changes nothing. A link's
+    thickness cannot be cleared, and reads back a hundred times what was written.
 15. **`typeId` takes any thought, with a 200.** It is a link from whatever it
     names: a type becomes the type, a tag is attached, an ordinary thought
     becomes one more parent, and the last two leave the type as it was. So
@@ -334,6 +336,7 @@ Measured against a live API by polling until the result appeared:
 | clear a label or a colour → `get(id)` | up to 0.2 s |
 | delete a type's link → `get(id)` without `typeId` | 20–210 ms |
 | set a type by `PATCH` → `get(id)` | ~0.1 s, 107 ms at the most |
+| `PATCH` a link → `get(link)` | ~0.1 s, 0.2 s at the most |
 | `create` with a type → `get(id)` shows it | instant |
 | the first `PATCH` after a burst of creates → `get(id)` | 0.6–0.8 s after 150, 2.6 s after 300 with a type |
 | `set note` → `get note` | ~0.2 s |

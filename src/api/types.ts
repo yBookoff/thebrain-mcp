@@ -258,6 +258,10 @@ export interface LinkDto {
   typeId: string | null;
   kind: number;
   color: string | null;
+  /**
+   * A hundred times what a patch was given, and -1 on a link whose thickness
+   * was never set. See `UpdateLinkInput.thickness`.
+   */
   thickness: number | null;
   thoughtIdA: string;
   thoughtIdB: string;
