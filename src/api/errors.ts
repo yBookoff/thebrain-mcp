@@ -27,6 +27,13 @@ export type ApiErrorKind =
    * write, so nothing was written.
    */
   | "not_a_type"
+  /**
+   * An identifier given for a tag that names a thought of another kind,
+   * nothing, or the thought the tag is for. No such error in the API either:
+   * the request that attaches a tag answers 200 to a type and to an ordinary
+   * thought, and sets the type or adds a parent. Raised ahead of the write.
+   */
+  | "not_a_tag"
   /** Connection failed or dropped. */
   | "network"
   /** A response arrived but could not be parsed. */

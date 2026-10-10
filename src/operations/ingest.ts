@@ -33,6 +33,7 @@ export interface IngestThought {
   name: string;
   note?: string | undefined;
   typeId?: string | undefined;
+  /** UUIDs of tags the brain has: a plan makes none, and takes no `tempId` here. */
   tagIds?: readonly string[] | undefined;
   label?: string | undefined;
   /**
@@ -186,6 +187,13 @@ export async function ingest(
   // parent. `create` reads its type again: 200 such reads took 37 ms.
   const typeIds = new Set(plan.thoughts.flatMap((t) => (t.typeId === undefined ? [] : [t.typeId])));
   await mapWithConcurrency([...typeIds], 6, (typeId) => api.thoughts.requireType(brainId, typeId));
+
+  // And tags: the request that attaches one makes a type or a parent of
+  // anything else, and it goes out after the thoughts are written. A plan
+  // cannot make a tag, so each one it names is there to be read now.
+  // `attachTag` reads its tag again, as `create` does its type.
+  const tagIds = new Set(plan.thoughts.flatMap((t) => t.tagIds ?? []));
+  await mapWithConcurrency([...tagIds], 6, (tagId) => api.links.requireTag(brainId, tagId));
 
   const outcome: IngestOutcome = {
     created: [],

@@ -60,6 +60,15 @@ describe("error explanations point at the next step", () => {
     expect(text).toMatch(/brain_list_types_and_tags/);
   });
 
+  it("an identifier that is not a tag points at the list of tags, and says nothing was written", () => {
+    const text = describeError(
+      new TheBrainError("not_a_tag", 'tagId 1f0e is not a tag: it is the type "Pattern"'),
+    );
+    expect(text).toMatch(/is not a tag: it is the type "Pattern"\./);
+    expect(text).toMatch(/Nothing was written/);
+    expect(text).toMatch(/Take tag identifiers from brain_list_types_and_tags/);
+  });
+
   it("a key problem says where to find the key", () => {
     expect(describeError(new TheBrainError("auth", "Invalid API Key"))).toMatch(
       /Settings > User > Local API Key/,

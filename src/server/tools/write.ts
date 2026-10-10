@@ -81,6 +81,10 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       const { brainId: bid, name, parentId, relation, note, typeId, tagIds, label } = args;
       const aliases = normalizeAliases(args.aliases ?? []);
 
+      // Before the thought exists: refused after it, a tag that is no tag
+      // would leave the thought behind for a retry to make again.
+      for (const tagId of tagIds ?? []) await ctx.api.links.requireTag(bid, tagId);
+
       const thoughtId = await ctx.api.thoughts.create(bid, {
         name,
         ...(parentId !== undefined ? { sourceThoughtId: parentId } : {}),
@@ -298,6 +302,11 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
     guard(async ({ brainId: bid, thoughtId, add, remove }) => {
       if ((add ?? []).length === 0 && (remove ?? []).length === 0) {
         return fail("no tags were given to add or remove");
+      }
+      // All of them before the first write: one that is no tag must not leave
+      // the tags ahead of it attached or removed.
+      for (const tagId of [...(add ?? []), ...(remove ?? [])]) {
+        await ctx.api.links.requireTag(bid, tagId, thoughtId);
       }
       const done: string[] = [];
       for (const tagId of add ?? []) {

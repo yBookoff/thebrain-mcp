@@ -38,6 +38,8 @@ export function describeError(error: unknown): string {
         return `${error.message}. Take identifiers from brain_list, brain_search or brain_get_thought — do not invent them.`;
       case "not_a_type":
         return `${error.message}. Nothing was written. Take type identifiers from brain_list_types_and_tags.`;
+      case "not_a_tag":
+        return `${error.message}. Nothing was written. Take tag identifiers from brain_list_types_and_tags.`;
       case "auth":
         return "TheBrain rejected the key. Check THEBRAIN_API_KEY: find it under Settings > User > Local API Key.";
       case "network":

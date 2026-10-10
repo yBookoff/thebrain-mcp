@@ -52,7 +52,10 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
                 ),
               relation: relation.optional(),
               typeId: z.string().optional().describe("Type from brain_list_types_and_tags."),
-              tagIds: z.array(z.string()).optional().describe("Tags by identifier."),
+              tagIds: z
+                .array(z.string())
+                .optional()
+                .describe("Tag identifiers from brain_list_types_and_tags, not tempIds."),
               label: z.string().optional(),
               aliases: z
                 .array(z.string())

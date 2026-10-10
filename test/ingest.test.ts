@@ -10,6 +10,7 @@ import {
 
 const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
 const ROOT = "bbbbbbbb-0000-4000-8000-000000000002";
+const TAG = "eeeeeeee-0000-4000-8000-000000000005";
 
 /** In-memory fake brain: keeps what was created and can list children. */
 function fakeBrain(
@@ -43,6 +44,9 @@ function fakeBrain(
   /** The brain's types, and each read that asked whether something is one. */
   const types = new Set<string>();
   const typeReads: string[] = [];
+  /** The same for tags. TAG is one from the start. */
+  const tags = new Set<string>([TAG]);
+  const tagReads: string[] = [];
 
   const api = {
     thoughts: {
@@ -143,6 +147,14 @@ function fakeBrain(
       async update() {
         return undefined;
       },
+      // As the real method: throws unless the identifier names a tag.
+      async requireTag(_b: string, tagId: string) {
+        tagReads.push(tagId);
+        if (!tags.has(tagId)) {
+          throw new TheBrainError("not_a_tag", `tagId ${tagId} is not a tag`);
+        }
+        return { id: tagId, kind: 4 };
+      },
       async attachTag(_b: string, thoughtId: string, tagId: string) {
         thoughts.get(thoughtId)?.tags.push(tagId);
         return "tag-link";
@@ -157,6 +169,8 @@ function fakeBrain(
     failOn,
     types,
     typeReads,
+    tags,
+    tagReads,
     aliasWrites,
     build,
     settle,
@@ -241,7 +255,7 @@ describe("writing a batch", () => {
     thoughts: [
       { tempId: "root", name: "Article", parent: ROOT, note: "summary" },
       { tempId: "a", name: "Idea A", parent: "root", note: "first" },
-      { tempId: "b", name: "Idea B", parent: "root", tagIds: ["tag-1"] },
+      { tempId: "b", name: "Idea B", parent: "root", tagIds: [TAG] },
     ],
     links: [{ from: "a", to: "b", name: "contradicts" }],
   };
@@ -486,6 +500,50 @@ describe("types in a batch", () => {
     const { api, typeReads } = fakeBrain([{ id: ROOT, name: "root" }]);
     await ingest(api, BRAIN, { thoughts: [{ tempId: "a", name: "A", parent: ROOT }] });
     expect(typeReads).toEqual([]);
+  });
+});
+
+describe("tags in a batch", () => {
+  const OTHER = "dddddddd-0000-4000-8000-000000000004";
+  const plan = (leafTag: string): IngestPlan => ({
+    thoughts: [
+      { tempId: "top", name: "Retrieval", parent: ROOT, tagIds: [TAG], note: "summary" },
+      { tempId: "mid", name: "RAG", parent: "top", tagIds: [TAG] },
+      { tempId: "leaf", name: "Chunking", parent: "mid", tagIds: [TAG, leafTag] },
+    ],
+  });
+
+  it("a tagId that is not a tag rejects the plan before any write", async () => {
+    // The API would take it, with a 200, and make a type or a parent of it.
+    // Tags go on after the thoughts: refused at its own turn, this one would
+    // find all three written.
+    const { api, thoughts } = fakeBrain([{ id: ROOT, name: "root" }]);
+    await expect(ingest(api, BRAIN, plan(OTHER))).rejects.toMatchObject({
+      kind: "not_a_tag",
+      message: expect.stringContaining(OTHER),
+    });
+    expect([...thoughts.keys()]).toEqual([ROOT]);
+  });
+
+  it("ahead of the writes each tag is read once, however many thoughts carry it", async () => {
+    const { api, thoughts, tags, tagReads } = fakeBrain([{ id: ROOT, name: "root" }]);
+    tags.add(OTHER);
+    const outcome = await ingest(api, BRAIN, plan(OTHER));
+
+    expect(tagReads.sort()).toEqual([OTHER, TAG].sort());
+    expect(outcome.failures).toEqual([]);
+    expect(outcome.tagsAttached).toBe(4);
+    expect(outcome.created.map((c) => thoughts.get(c.thoughtId)?.tags)).toEqual([
+      [TAG],
+      [TAG],
+      [TAG, OTHER],
+    ]);
+  });
+
+  it("a plan without tags reads none", async () => {
+    const { api, tagReads } = fakeBrain([{ id: ROOT, name: "root" }]);
+    await ingest(api, BRAIN, { thoughts: [{ tempId: "a", name: "A", parent: ROOT }] });
+    expect(tagReads).toEqual([]);
   });
 });
 

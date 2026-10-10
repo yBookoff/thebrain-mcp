@@ -523,6 +523,225 @@ describe("a typeId that is not a type", () => {
   });
 });
 
+describe("an identifier that is not a tag", () => {
+  const TYPE = "eeeeeeee-0000-4000-8000-000000000005";
+  const TAG = "ffffffff-0000-4000-8000-000000000006";
+  const NOBODY = "99999999-0000-4000-8000-000000000009";
+
+  /**
+   * A brain where PARENT is an ordinary thought, TAG a tag and TYPE a type,
+   * and `link` is what joins THOUGHT to whichever of them is asked about. As
+   * on the live API, a link posted towards any of them is a 200, and a delete
+   * takes any link it is given.
+   */
+  const routes = (link: Record<string, unknown> | null = null): Route[] => {
+    const others: Record<string, { name: string; kind: number }> = {
+      [PARENT]: { name: "Constraints", kind: 1 },
+      [TAG]: { name: "gotcha", kind: 4 },
+      [TYPE]: { name: "Pattern", kind: 2 },
+    };
+    return [
+      ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
+      ["GET /graph", () => graph(thought("parent"))],
+      [
+        "GET /api/thoughts/",
+        (url) => {
+          const id = url.pathname.split("/").pop()!;
+          // A thought that does not exist is a 404 to this read.
+          return id in others ? { ...thought("", { aliases: [] }), id, ...others[id] } : 404;
+        },
+      ],
+      ["POST /api/thoughts/", () => ({ id: THOUGHT })],
+      ["POST /api/notes/", () => 200],
+      ["POST /api/links/", () => ({ id: LINK })],
+      ["GET /api/links/", () => (link === null ? 404 : { id: LINK, ...link })],
+      ["DELETE /api/links/", () => 200],
+    ];
+  };
+  const typeLink = { thoughtIdA: TYPE, thoughtIdB: THOUGHT, relation: 1, meaning: 2 };
+  const parentLink = { thoughtIdA: PARENT, thoughtIdB: THOUGHT, relation: 1, meaning: 1 };
+  const tagLink = { thoughtIdA: TAG, thoughtIdB: THOUGHT, relation: 1, meaning: 5 };
+  const refused = [
+    [TYPE, 'it is the type "Pattern"', typeLink],
+    [PARENT, 'it is the thought "Constraints"', parentLink],
+    [NOBODY, "no thought in this brain has that identifier", null],
+  ] as const;
+
+  /** A refusal the model can act on, and not one request that writes. */
+  const expectRefused = (
+    result: { text: string; isError: boolean },
+    calls: Array<{ method: string }>,
+    tagId: string,
+    what: string,
+  ): void => {
+    expect(result.isError, what).toBe(true);
+    expect(result.text).toContain(`tagId ${tagId} is not a tag: ${what}`);
+    expect(result.text).toContain("Nothing was written");
+    expect(result.text).toContain("brain_list_types_and_tags");
+    expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+  };
+
+  it("brain_tag attaches nothing, the tag listed ahead of it included", async () => {
+    // It used to answer "attached". The API takes the request with a 200, and
+    // sets the thought's type or gives it one more parent.
+    for (const [tagId, what] of refused) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_tag", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        add: [TAG, tagId],
+      });
+      expectRefused(result, calls, tagId, what);
+    }
+  });
+
+  it("brain_tag removes nothing: a type's link and a parent's stay", async () => {
+    // It used to delete whatever link it found between the two, and answer
+    // "removed".
+    for (const [tagId, what, link] of refused) {
+      const { call, calls } = await connect(routes(link));
+      const result = await call("brain_tag", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        add: [TAG],
+        remove: [tagId],
+      });
+      expectRefused(result, calls, tagId, what);
+    }
+  });
+
+  it("brain_tag leaves a link to a tag that does not carry the tag", async () => {
+    // A jump between the thought and a tag: the tag is not on the thought.
+    const jump = { thoughtIdA: THOUGHT, thoughtIdB: TAG, relation: 3, meaning: 1 };
+    const { call, calls } = await connect(routes(jump));
+    const result = await call("brain_tag", { brainId: BRAIN, thoughtId: THOUGHT, remove: [TAG] });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain(`tag ${TAG} was not on the thought`);
+    expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+  });
+
+  it("brain_tag refuses a thought named as its own tag without a request", async () => {
+    // A 200 with an identifier of zeros and no link, a tag included, which
+    // the check of its kind would let through.
+    for (const id of [THOUGHT, TAG]) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_tag", { brainId: BRAIN, thoughtId: id, add: [id] });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("a thought cannot be its own tag");
+      expect(result.text).toContain("Nothing was written");
+      expect(calls).toEqual([]);
+    }
+  });
+
+  it("brain_create_thought creates nothing", async () => {
+    // Refused after the create, the thought would exist already, and a model
+    // told of an error would create it again.
+    for (const [tagId, what] of refused) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        parentId: PARENT,
+        note: "body",
+        tagIds: [TAG, tagId],
+      });
+      expectRefused(result, calls, tagId, what);
+    }
+  });
+
+  it("brain_ingest writes no part of a plan that has one, or a tempId for a tag", async () => {
+    for (const [tagId, what] of refused) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_ingest", {
+        brainId: BRAIN,
+        thoughts: [
+          { tempId: "top", name: "Retrieval", parent: PARENT, tagIds: [TAG], note: "body" },
+          { tempId: "rag", name: "RAG", parent: "top", tagIds: [tagId] },
+        ],
+      });
+      expectRefused(result, calls, tagId, what);
+    }
+
+    // A plan cannot make a tag, so a tag is never one of its own thoughts.
+    const { call, calls } = await connect(routes());
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [
+        { tempId: "top", name: "Retrieval", parent: PARENT },
+        { tempId: "rag", name: "RAG", parent: "top", tagIds: ["top"] },
+      ],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('tagId must be a UUID, got "top"');
+    expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+  });
+
+  it("a tag is attached and removed, and reported as before", async () => {
+    const { call, calls, sent } = await connect(routes(tagLink));
+    const result = await call("brain_tag", {
+      brainId: BRAIN,
+      thoughtId: THOUGHT,
+      add: [TAG],
+      remove: [TAG],
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain(`attached ${TAG}`);
+    expect(result.text).toContain(`removed ${TAG}`);
+    expect(sent("POST")).toEqual([{ thoughtIdA: THOUGHT, thoughtIdB: TAG, relation: 2 }]);
+    // Each tag is read ahead of the first write, and `attachTag` reads its own
+    // once more.
+    const tag = `GET /api/thoughts/${BRAIN}/${TAG}`;
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      tag,
+      tag,
+      tag,
+      `POST /api/links/${BRAIN}`,
+      `GET /api/links/${BRAIN}/${THOUGHT}/${TAG}`,
+      `DELETE /api/links/${BRAIN}/${LINK}`,
+    ]);
+
+    for (const [tool, args] of [
+      ["brain_create_thought", { name: "RAG", parentId: PARENT, tagIds: [TAG] }],
+      [
+        "brain_ingest",
+        { thoughts: [{ tempId: "rag", name: "RAG", parent: PARENT, tagIds: [TAG] }] },
+      ],
+    ] as const) {
+      const fresh = await connect(routes());
+      const made = await fresh.call(tool, { brainId: BRAIN, ...args });
+      expect(made.isError, tool).toBe(false);
+      expect(made.text, tool).toContain("tags attached: 1");
+      expect(fresh.sent("POST").at(-1), tool).toEqual({
+        thoughtIdA: THOUGHT,
+        thoughtIdB: TAG,
+        relation: 2,
+      });
+    }
+  });
+
+  it("every argument that takes tags says where their identifiers come from", async () => {
+    const { client } = await connect([]);
+    const { tools } = await client.listTools();
+    const tool = (name: string) => tools.find((t) => t.name === name)!;
+    const properties = (name: string): Record<string, { description?: string }> =>
+      tool(name).inputSchema.properties as Record<string, { description?: string }>;
+    const item = (
+      properties("brain_ingest")["thoughts"] as unknown as {
+        items: { properties: Record<string, { description?: string }> };
+      }
+    ).items.properties;
+
+    for (const text of [
+      properties("brain_create_thought")["tagIds"]?.description,
+      item["tagIds"]?.description,
+      // Its two lists share the sentence in the tool's own description.
+      tool("brain_tag").description,
+    ]) {
+      expect(text).toContain("brain_list_types_and_tags");
+    }
+  });
+});
+
 describe("what an alias costs", () => {
   it("is stated on every argument that can write one", async () => {
     // Per TheBrain's spec the first alias raises the version a brain requires

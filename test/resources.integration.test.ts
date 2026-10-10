@@ -30,6 +30,7 @@ import {
   ThoughtKind,
   aliasesOf,
   compareLogTime,
+  isTagLink,
   isTypeLink,
   isUuid,
   logEntryKey,
@@ -41,6 +42,7 @@ import {
   type ThoughtDto,
 } from "../src/api/index.js";
 import { describeChange, subjectIds } from "../src/operations/changes.js";
+import { ingest } from "../src/operations/ingest.js";
 import type { Embedder } from "../src/semantic/embedder.js";
 import {
   SemanticIndexer,
@@ -1121,7 +1123,7 @@ suite("resource layer against the live API", () => {
    * of its place, as "a run of note changes in the log" pins. Neither caller
    * writes while it reads.
    */
-  const sameEntries =(paged: ModificationLogDto[], whole: ModificationLogDto[]): void => {
+  const sameEntries = (paged: ModificationLogDto[], whole: ModificationLogDto[]): void => {
     expect(paged.map(logEntryKey).sort()).toEqual(whole.map(logEntryKey).sort());
     for (let i = 1; i < paged.length; i++) {
       const order = compareLogTime(logTime(paged[i - 1]!), logTime(paged[i]!));
@@ -1994,6 +1996,269 @@ suite("resource layer against the live API", () => {
         expect((await api.thoughts.get(brainId, id)).typeId, id).toBeNull();
         expect((await api.links.between(brainId, id, typeId))?.meaning).toBe(LinkMeaning.Normal);
       }
+    });
+  });
+
+  /**
+   * What the request that attaches a tag does when it names no tag, which
+   * links a thought and a tag can share, and what `attachTag`, `detachTag` and
+   * ingest do about it. Measured on TheBrain 15.0.640; the spec has none of it.
+   */
+  describe("an identifier that is not a tag", () => {
+    /** The request `attachTag` sends, with none of its checks. */
+    const rawAttach = (thoughtId: string, other: string): Promise<{ id: string }> =>
+      api.client.post<{ id: string }>(`/api/links/${brainId}`, {
+        json: { thoughtIdA: thoughtId, thoughtIdB: other, relation: Relation.Parent },
+      });
+    const makeUnder = async (
+      name: string,
+      extra: { sourceThoughtId?: string; typeId?: string },
+    ): Promise<string> => {
+      const id = await api.thoughts.create(brainId, { name: PREFIX + name, ...extra });
+      created.push(id);
+      return id;
+    };
+    const graphOf = (id: string, ok: (g: CleanGraph) => boolean): Promise<CleanGraph> =>
+      eventually(() => api.thoughts.getGraph(brainId, id), ok);
+    const ids = (thoughts: readonly ThoughtDto[]): string[] => thoughts.map((t) => t.id);
+    /** A link as [the thought at its head, relation, meaning]. */
+    const shape = (link: LinkDto | null): unknown[] => [
+      link?.thoughtIdA,
+      link?.relation,
+      link?.meaning,
+    ];
+
+    it("the request that attaches a tag makes a parent of an ordinary thought, and is a 400 for an identifier nobody has", async () => {
+      // Named a type it sets the thought's type: "a parent link towards a type
+      // sets the type" above is this request.
+      const plain = await make("nt-plain");
+      const id = await make("nt-raw");
+
+      // Accepted, and that is the trap.
+      const { id: linkId } = await rawAttach(id, plain);
+      const graph = await graphOf(id, (g) => ids(g.parents).includes(plain));
+      expect(ids(graph.parents)).toEqual([plain]);
+      expect(graph.tags).toEqual([]);
+      const parentLink = await api.links.between(brainId, id, plain);
+      expect(parentLink?.id).toBe(linkId);
+      expect(shape(parentLink)).toEqual([plain, Relation.Child, LinkMeaning.Normal]);
+
+      const nobody = crypto.randomUUID();
+      const refused = await rawAttach(id, nobody).then(
+        () => null,
+        (error: unknown) => error as TheBrainError,
+      );
+      expect(refused?.kind).toBe("bad_request");
+      expect(refused?.message).toBe(`Could not get target thought ${nobody}`);
+      await settle();
+      expect((await api.thoughts.getGraph(brainId, id)).links).toHaveLength(1);
+
+      // The read `requireTag` makes is a 404 for that identifier, where its
+      // graph is a 403.
+      await expect(api.thoughts.get(brainId, nobody)).rejects.toMatchObject({ kind: "not_found" });
+      await expect(api.thoughts.getGraph(brainId, nobody)).rejects.toMatchObject({
+        kind: "forbidden",
+      });
+    });
+
+    it("a thought named as its own tag is a 200 with an identifier of zeros, and no link is made", async () => {
+      for (const kind of [ThoughtKind.Normal, ThoughtKind.Tag, ThoughtKind.Type]) {
+        const id = await make(`nt-self-${kind}`, kind);
+        expect((await rawAttach(id, id)).id, `kind ${kind}`).toBe(
+          "00000000-0000-0000-0000-000000000000",
+        );
+        await settle(600);
+        expect((await api.thoughts.getGraph(brainId, id)).links, `kind ${kind}`).toEqual([]);
+        expect(await api.links.between(brainId, id, id)).toBeNull();
+      }
+    });
+
+    it("a tag attached to a tag is a link of meaning 7, and stands among the tag's parents as well as its tags", async () => {
+      const upper = await make("nt-upper-tag", ThoughtKind.Tag);
+      const lower = await make("nt-lower-tag", ThoughtKind.Tag);
+
+      const linkId = await api.links.attachTag(brainId, lower, upper);
+      const graph = await graphOf(lower, (g) => ids(g.tags).includes(upper));
+      expect(ids(graph.tags)).toEqual([upper]);
+      expect(ids(graph.parents)).toEqual([upper]);
+      const above = await graphOf(upper, (g) => ids(g.children).includes(lower));
+      expect(ids(above.children)).toEqual([lower]);
+      const link = await api.links.between(brainId, lower, upper);
+      expect(shape(link)).toEqual([upper, Relation.Child, LinkMeaning.SubTag]);
+      expect(isTagLink(link!)).toBe(true);
+
+      // Asked the wrong way round, the link stays: the lower tag is not on the
+      // upper one.
+      expect(await api.links.detachTag(brainId, upper, lower)).toBe(false);
+      await settle(600);
+      expect((await api.links.between(brainId, lower, upper))?.id).toBe(linkId);
+
+      expect(await api.links.detachTag(brainId, lower, upper)).toBe(true);
+      const bare = await graphOf(lower, (g) => g.tags.length === 0);
+      expect(bare.tags).toEqual([]);
+      expect(bare.parents).toEqual([]);
+
+      // Posted from the upper tag's side it is the same link again.
+      await api.links.create(brainId, {
+        thoughtIdA: upper,
+        thoughtIdB: lower,
+        relation: Relation.Child,
+      });
+      const again = await eventually(
+        () => api.links.between(brainId, lower, upper),
+        (found) => found !== null,
+      );
+      expect(shape(again)).toEqual([upper, Relation.Child, LinkMeaning.SubTag]);
+
+      // The log has the name of that meaning: turned into an ordinary thought,
+      // the lower tag keeps the link, which becomes the one a tag has to a thought.
+      await api.thoughts.update(brainId, lower, { kind: ThoughtKind.Normal });
+      const changed = await eventually(
+        async () =>
+          (await api.brains.modifications(brainId, { maxLogs: 50 })).find(
+            (l) => l.modType === ModType.LinkMeaningChanged && l.sourceId === again!.id,
+          ),
+        (entry) => entry !== undefined,
+      );
+      expect([changed?.oldValue, changed?.newValue]).toEqual(["SubTagOf", "HasTag"]);
+      const demoted = await eventually(
+        () => api.links.between(brainId, lower, upper),
+        (found) => found?.meaning === LinkMeaning.Tag,
+      );
+      expect(shape(demoted)).toEqual([upper, Relation.Child, LinkMeaning.Tag]);
+    }, 30_000);
+
+    it("a thought and a tag can be linked with the tag not on it, and attaching the tag rewrites that link", async () => {
+      const jumpTag = await make("nt-jump-tag", ThoughtKind.Tag);
+      const childTag = await make("nt-child-tag", ThoughtKind.Tag);
+      const id = await make("nt-linked-to-tags");
+      const jump = await api.links.create(brainId, {
+        thoughtIdA: id,
+        thoughtIdB: jumpTag,
+        relation: Relation.Jump,
+      });
+      const child = await api.links.create(brainId, {
+        thoughtIdA: id,
+        thoughtIdB: childTag,
+        relation: Relation.Child,
+      });
+
+      const graph = await graphOf(
+        id,
+        (g) => ids(g.jumps).includes(jumpTag) && ids(g.children).includes(childTag),
+      );
+      expect(graph.tags).toEqual([]);
+      expect(ids(graph.jumps)).toEqual([jumpTag]);
+      expect(ids(graph.children)).toEqual([childTag]);
+      expect(shape(await api.links.between(brainId, id, jumpTag))).toEqual([
+        id,
+        Relation.Jump,
+        LinkMeaning.Normal,
+      ]);
+      expect(shape(await api.links.between(brainId, id, childTag))).toEqual([
+        id,
+        Relation.Child,
+        LinkMeaning.Normal,
+      ]);
+
+      // Neither is the tag's link, so neither is deleted.
+      expect(await api.links.detachTag(brainId, id, jumpTag)).toBe(false);
+      expect(await api.links.detachTag(brainId, id, childTag)).toBe(false);
+      await settle(600);
+      expect((await api.thoughts.getGraph(brainId, id)).links).toHaveLength(2);
+
+      // One link per pair: attaching the tag turns either into the tag's link.
+      expect(await api.links.attachTag(brainId, id, jumpTag)).toBe(jump);
+      expect(await api.links.attachTag(brainId, id, childTag)).toBe(child);
+      const tagged = await graphOf(id, (g) => g.tags.length === 2);
+      expect(ids(tagged.tags).sort()).toEqual([jumpTag, childTag].sort());
+      expect(tagged.jumps).toEqual([]);
+      expect(tagged.children).toEqual([]);
+      for (const tagId of [jumpTag, childTag]) {
+        expect(shape(await api.links.between(brainId, id, tagId))).toEqual([
+          tagId,
+          Relation.Child,
+          LinkMeaning.Tag,
+        ]);
+      }
+    }, 30_000);
+
+    it("attachTag refuses a type, an ordinary thought, an identifier nobody has and the thought itself, and links nothing", async () => {
+      const kept = await make("nt-kept-type", ThoughtKind.Type);
+      const other = await make("nt-other-type", ThoughtKind.Type);
+      const plain = await make("nt-refused-plain");
+      const bare = await make("nt-refused-bare");
+      const typed = await makeUnder("nt-refused-typed", { typeId: kept });
+
+      for (const id of [bare, typed]) {
+        for (const [tagId, message] of [
+          [other, new RegExp(`it is the type "${PREFIX}nt-other-type"`)],
+          [plain, new RegExp(`it is the thought "${PREFIX}nt-refused-plain"`)],
+          [crypto.randomUUID(), /no thought in this brain has that identifier/],
+          [id, /a thought cannot be its own tag/],
+        ] as const) {
+          await expect(api.links.attachTag(brainId, id, tagId)).rejects.toMatchObject({
+            kind: "not_a_tag",
+            message: expect.stringMatching(message),
+          });
+        }
+      }
+
+      await settle();
+      expect((await api.thoughts.getGraph(brainId, bare)).links).toEqual([]);
+      // The type it had, and not the one it was offered for a tag.
+      const graph = await api.thoughts.getGraph(brainId, typed);
+      expect(graph.type?.id).toBe(kept);
+      expect(graph.links).toHaveLength(1);
+    });
+
+    it("detachTag leaves a thought's type, parent, child and jump where they are", async () => {
+      // It used to delete whichever of them it was given for a tag: `between`
+      // returns the one link a pair of thoughts has, whatever it is.
+      const typeId = await make("nt-own-type", ThoughtKind.Type);
+      const parent = await make("nt-own-parent");
+      const side = await make("nt-own-jump");
+      const id = await makeUnder("nt-keeps-links", { sourceThoughtId: parent, typeId });
+      const child = await makeUnder("nt-own-child", { sourceThoughtId: id });
+      await api.links.create(brainId, {
+        thoughtIdA: id,
+        thoughtIdB: side,
+        relation: Relation.Jump,
+      });
+      await graphOf(id, (g) => g.links.length === 4);
+
+      for (const other of [typeId, parent, child, side]) {
+        expect(await api.links.detachTag(brainId, id, other), other).toBe(false);
+      }
+
+      await settle();
+      const graph = await api.thoughts.getGraph(brainId, id);
+      expect(graph.type?.id).toBe(typeId);
+      expect(ids(graph.parents)).toEqual([parent]);
+      expect(ids(graph.children)).toEqual([child]);
+      expect(ids(graph.jumps)).toEqual([side]);
+      expect(graph.links).toHaveLength(4);
+    }, 30_000);
+
+    it("ingest writes no thought of a plan that names a tag which is not one", async () => {
+      const tagId = await make("nt-plan-tag", ThoughtKind.Tag);
+      const typeId = await make("nt-plan-type", ThoughtKind.Type);
+      const root = await make("nt-plan-root");
+
+      await expect(
+        ingest(api, brainId, {
+          thoughts: [
+            { tempId: "top", name: `${PREFIX}nt-plan-top`, parent: root, tagIds: [tagId] },
+            { tempId: "leaf", name: `${PREFIX}nt-plan-leaf`, parent: "top", tagIds: [typeId] },
+          ],
+        }),
+      ).rejects.toMatchObject({
+        kind: "not_a_tag",
+        message: expect.stringMatching(new RegExp(`it is the type "${PREFIX}nt-plan-type"`)),
+      });
+
+      await settle();
+      expect((await api.thoughts.getGraph(brainId, root)).children).toEqual([]);
     });
   });
 

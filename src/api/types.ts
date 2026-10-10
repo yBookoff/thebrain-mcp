@@ -41,6 +41,11 @@ export const LinkMeaning = {
   Type: 2,
   /** Tag attachment. Created by `relation: Parent` towards a `kind: Tag` thought. */
   Tag: 5,
+  /**
+   * A tag attached to a tag: what that same request makes when the thought it
+   * is sent for is a tag too. The log calls it `SubTagOf`.
+   */
+  SubTag: 7,
 } as const;
 export type LinkMeaning = (typeof LinkMeaning)[keyof typeof LinkMeaning];
 

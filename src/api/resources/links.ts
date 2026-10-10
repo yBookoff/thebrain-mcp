@@ -5,8 +5,10 @@ import {
   type LinkDto,
   LinkMeaning,
   Relation,
+  type ThoughtDto,
   ThoughtKind,
 } from "../types.js";
+import { requireKind } from "./kind.js";
 
 export interface CreateLinkInput {
   thoughtIdA: string;
@@ -146,6 +148,9 @@ export class LinksResource {
    * `relation: Child, meaning: Tag`. `meaning` cannot be set directly:
    * `PATCH /meaning` is silently ignored.
    *
+   * The tag is read first (`requireTag`), and nothing is sent unless it is
+   * one: the server infers the same way from any other kind.
+   *
    * Returns the identifier of the created link.
    */
   async attachTag(
@@ -153,6 +158,7 @@ export class LinksResource {
     thoughtId: string,
     tagThoughtId: string,
   ): Promise<string> {
+    await this.requireTag(brainId, tagThoughtId, thoughtId);
     return this.create(brainId, {
       thoughtIdA: thoughtId,
       thoughtIdB: tagThoughtId,
@@ -160,14 +166,47 @@ export class LinksResource {
     });
   }
 
-  /** Removes a tag by finding the thought-to-tag link and deleting it. */
+  /**
+   * The tag that `tagId` names. Throws `not_a_tag` when it names a thought of
+   * another kind, or nothing, or `thoughtId`: the thought the tag is for.
+   *
+   * The API does not ask. The request that attaches a tag links the thought
+   * under whatever it names, with a 200: under a type that is the thought's
+   * type, set or replaced, and under an ordinary thought one more parent. A
+   * thought named as its own tag is a 200 as well, with an identifier of
+   * zeros for a link that was not made. So the kind is read here, ahead of
+   * the write, and by a caller that writes something else first, ahead of
+   * that.
+   */
+  async requireTag(brainId: string, tagId: string, thoughtId?: string): Promise<ThoughtDto> {
+    // Case aside: the API reads a UUID in capitals too.
+    if (thoughtId !== undefined && sameId(tagId, thoughtId)) {
+      throw new TheBrainError(
+        "not_a_tag",
+        `a thought cannot be its own tag: tagId ${tagId} is the thought itself`,
+      );
+    }
+    return requireKind(this.client, brainId, tagId, ThoughtKind.Tag);
+  }
+
+  /**
+   * Removes a tag by finding the tag's link to the thought and deleting it.
+   * False when the tag is not on the thought.
+   *
+   * Two thoughts share one link, and `between` returns it whatever it is: a
+   * thought's type, parent, child or jump, named here for a tag, used to lose
+   * that link. Only the link that carries the tag is deleted: a tag's, with
+   * the tag at its head. A tag linked to the thought some other way stays.
+   */
   async detachTag(
     brainId: string,
     thoughtId: string,
     tagThoughtId: string,
   ): Promise<boolean> {
     const link = await this.between(brainId, thoughtId, tagThoughtId);
-    if (link === null) return false;
+    if (link === null || !isTagLink(link) || !sameId(link.thoughtIdA, tagThoughtId)) {
+      return false;
+    }
     await this.delete(brainId, link.id);
     return true;
   }
@@ -191,9 +230,12 @@ export class LinksResource {
   }
 }
 
-/** A tag attachment rather than an ordinary link between thoughts. */
+/**
+ * A tag attachment rather than an ordinary link between thoughts: a tag on a
+ * thought, or on another tag. `thoughtIdA` is the tag attached.
+ */
 export function isTagLink(link: LinkDto): boolean {
-  return link.meaning === LinkMeaning.Tag;
+  return link.meaning === LinkMeaning.Tag || link.meaning === LinkMeaning.SubTag;
 }
 
 /** A type attachment: arrives in the graph alongside parent links. */
@@ -204,6 +246,10 @@ export function isTypeLink(link: LinkDto): boolean {
 /** An ordinary link — the kind worth showing as graph structure. */
 export function isStructuralLink(link: LinkDto): boolean {
   return link.meaning === LinkMeaning.Normal;
+}
+
+function sameId(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
 }
 
 export { ThoughtKind };

@@ -787,19 +787,129 @@ describe("markdown fenced-code warning", () => {
 });
 
 describe("tags", () => {
-  it("are attached via relation=2 rather than directly", async () => {
-    const { api, calls } = apiWith([["POST /api/links", () => ({ id: "link-1" })]]);
+  const PLAIN = "eeeeeeee-0000-4000-8000-000000000005";
+  const NOBODY = "ffffffff-0000-4000-8000-000000000006";
+  const LINK = "99999999-0000-4000-8000-000000000009";
+
+  /**
+   * A brain with a tag, a type and an ordinary thought in it, and THOUGHT to
+   * tag. `link` is the one link between THOUGHT and whichever of them is asked
+   * about. As on the live API, a link is posted with a 200 whatever it names,
+   * and a delete takes any link it is given.
+   */
+  const brain = (
+    link: { a: string; b: string; relation: number; meaning: number } | null = null,
+  ) => {
+    const others: Record<string, ThoughtDto> = {
+      [TAG]: thought(TAG, "gotcha", { kind: 4 }),
+      [TYPE]: thought(TYPE, "Constraint", { kind: 2 }),
+      [PLAIN]: thought(PLAIN, "API constraints"),
+    };
+    return apiWith([
+      // A thought that does not exist is a 404 to this read.
+      ["/api/thoughts/", (url) => others[url.pathname.split("/").pop()!] ?? 404],
+      ["POST /api/links", () => ({ id: LINK })],
+      [
+        "/api/links/",
+        () =>
+          link === null
+            ? 404
+            : {
+                id: LINK,
+                thoughtIdA: link.a,
+                thoughtIdB: link.b,
+                relation: link.relation,
+                meaning: link.meaning,
+              },
+      ],
+      ["DELETE /api/links/", () => 200],
+    ]);
+  };
+  const sent = (calls: Array<{ method: string; url: URL }>): string[] =>
+    calls.map((c) => `${c.method} ${c.url.pathname}`);
+  const writes = (calls: Array<{ method: string }>): string[] =>
+    calls.filter((c) => c.method !== "GET").map((c) => c.method);
+
+  it("are attached via relation=2 rather than directly, once the tag is read", async () => {
+    const { api, calls } = brain();
     await api.links.attachTag(BRAIN, THOUGHT, TAG);
-    expect(calls[0]!.body).toEqual({
+    expect(sent(calls)).toEqual([
+      `GET /api/thoughts/${BRAIN}/${TAG}`,
+      `POST /api/links/${BRAIN}`,
+    ]);
+    expect(calls[1]!.body).toEqual({
       thoughtIdA: THOUGHT,
       thoughtIdB: TAG,
       relation: 2,
     });
   });
 
+  it("attaching refuses a type, an ordinary thought and an identifier nobody has, and sends nothing", async () => {
+    // Measured: the API answers 200 to the first two, and sets the thought's
+    // type or gives it one more parent.
+    for (const [tagId, message] of [
+      [TYPE, /tagId \S+ is not a tag: it is the type "Constraint"/],
+      [PLAIN, /is not a tag: it is the thought "API constraints"/],
+      [NOBODY, /is not a tag: no thought in this brain has that identifier/],
+    ] as const) {
+      const { api, calls } = brain();
+      await expect(api.links.attachTag(BRAIN, THOUGHT, tagId)).rejects.toMatchObject({
+        kind: "not_a_tag",
+        message: expect.stringMatching(message),
+      });
+      expect(writes(calls)).toEqual([]);
+    }
+  });
+
+  it("a thought named as its own tag is refused before any request, a tag too", async () => {
+    // Measured: a 200 with an identifier of zeros, for a link that is not
+    // made. A tag passes the check of its kind.
+    for (const id of [THOUGHT, TAG]) {
+      const { api, fetchImpl } = brain();
+      await expect(api.links.attachTag(BRAIN, id, id.toUpperCase())).rejects.toMatchObject({
+        kind: "not_a_tag",
+        message: expect.stringMatching(/a thought cannot be its own tag/),
+      });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a failure to read the tag stays what it was", async () => {
+    // Only "no such thought" means "not a tag". A rejected key is not that.
+    const { api } = apiWith([["/api/thoughts/", () => 401]]);
+    await expect(api.links.requireTag(BRAIN, TAG)).rejects.toMatchObject({ kind: "auth" });
+  });
+
   it("removing an absent tag returns false instead of throwing", async () => {
     const { api } = apiWith([["GET /api/links", () => 404]]);
     await expect(api.links.detachTag(BRAIN, THOUGHT, TAG)).resolves.toBe(false);
+  });
+
+  it("removing deletes the tag's link to the thought, a tag's link to a tag too", async () => {
+    // Meaning 5 on a thought, 7 on another tag; the tag is `thoughtIdA` in both.
+    for (const meaning of [5, 7]) {
+      const { api, calls } = brain({ a: TAG, b: THOUGHT, relation: 1, meaning });
+      await expect(api.links.detachTag(BRAIN, THOUGHT, TAG.toUpperCase())).resolves.toBe(true);
+      expect(sent(calls).at(-1)).toBe(`DELETE /api/links/${BRAIN}/${LINK}`);
+    }
+  });
+
+  it("removing leaves any other link between the two where it is", async () => {
+    // Two thoughts share one link, and the lookup returns it whatever it is.
+    // Each of these used to be deleted, and reported as a tag removed.
+    for (const [what, other, link] of [
+      ["the thought's type", TYPE, { a: TYPE, b: THOUGHT, relation: 1, meaning: 2 }],
+      ["a parent", PLAIN, { a: PLAIN, b: THOUGHT, relation: 1, meaning: 1 }],
+      ["a child", PLAIN, { a: THOUGHT, b: PLAIN, relation: 1, meaning: 1 }],
+      ["a jump to a tag", TAG, { a: THOUGHT, b: TAG, relation: 3, meaning: 1 }],
+      ["a tag made the thought's child", TAG, { a: THOUGHT, b: TAG, relation: 1, meaning: 1 }],
+      ["a tag this one is attached to", TAG, { a: THOUGHT, b: TAG, relation: 1, meaning: 7 }],
+      ["a thought this one is a tag of", PLAIN, { a: THOUGHT, b: PLAIN, relation: 1, meaning: 5 }],
+    ] as const) {
+      const { api, calls } = brain(link);
+      await expect(api.links.detachTag(BRAIN, THOUGHT, other), what).resolves.toBe(false);
+      expect(writes(calls), what).toEqual([]);
+    }
   });
 });
 

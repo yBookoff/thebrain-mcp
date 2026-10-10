@@ -18,6 +18,7 @@ import {
   type ThoughtGraphDto,
   ThoughtKind,
 } from "../types.js";
+import { requireKind } from "./kind.js";
 import type { LinksResource } from "./links.js";
 
 export interface CreateThoughtInput {
@@ -319,29 +320,7 @@ export class ThoughtsResource {
    * `typeId` as it was. So the kind is read here, ahead of the write.
    */
   async requireType(brainId: string, typeId: string): Promise<ThoughtDto> {
-    assertUuid(typeId, "typeId");
-    let named: ThoughtDto;
-    try {
-      named = await this.get(brainId, typeId);
-    } catch (error) {
-      // A thought that does not exist is a 403.
-      if (
-        error instanceof TheBrainError &&
-        (error.kind === "forbidden" || error.kind === "not_found")
-      ) {
-        throw new TheBrainError(
-          "not_a_type",
-          `typeId ${typeId} is not a type: no thought in this brain has that identifier`,
-        );
-      }
-      throw error;
-    }
-    if (named.kind === ThoughtKind.Type) return named;
-    throw new TheBrainError(
-      "not_a_type",
-      `typeId ${typeId} is not a type: it is the ` +
-        `${named.kind === ThoughtKind.Tag ? "tag" : "thought"} "${named.name ?? "(unnamed)"}"`,
-    );
+    return requireKind(this.client, brainId, typeId, ThoughtKind.Type);
   }
 
   /**

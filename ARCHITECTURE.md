@@ -69,7 +69,7 @@ without a protocol harness.
 Its whole job is to turn a hostile HTTP surface into typed calls that either
 return data or throw a `TheBrainError` with a machine-readable `kind`
 (`auth | forbidden | not_found | bad_request | server | route_miss |
-invalid_uuid | not_a_type | network | malformed`).
+invalid_uuid | not_a_type | not_a_tag | network | malformed`).
 
 "Hostile" is not an exaggeration — see §7 for the catalogue. The two defences
 that matter most:
@@ -326,6 +326,13 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     while that entry is the newest TheBrain has logged, in any brain, the next
     change files it again under the new time. Only the newest entry ever moves
     — see *Reading the whole log* below.
+17. **A tag's identifier is not checked to be a tag either.** The request that
+    attaches a tag sets the thought's type when it names a type and adds a
+    parent when it names an ordinary thought, each with a 200; and the lookup
+    that finds a tag's link returns whatever link two thoughts share. So
+    `attachTag()` reads the kind first, `detachTag()` deletes only the link
+    that carries the tag, and a tool reads every tag it was given before its
+    first write.
 
 ### Write visibility
 
@@ -374,7 +381,12 @@ the target thought.
 | List | `GET /api/thoughts/{brainId}/tags` (400 if empty, see #1) |
 
 `relation: 2` against an ordinary thought (`kind=1`) produces an ordinary parent.
-It is the target's `kind=4` that flips the behaviour.
+It is the target's `kind=4` that flips the behaviour. Against a type the same
+request sets the thought's type, and between two tags it makes a link of
+meaning **7**, which puts the upper tag among the lower one's tags and its
+parents. `attachTag()` therefore reads the target and refuses anything but a
+tag, and `detachTag()` deletes a link only when it is the tag's: meaning 5 or
+7, from the tag (§7, item 17).
 
 `statistics.links` does not count tags — links with `meaning=5` are excluded.
 
