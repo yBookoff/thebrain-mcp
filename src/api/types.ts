@@ -26,6 +26,8 @@ export type AccessType = (typeof AccessType)[keyof typeof AccessType];
  *
  * Note: when creating a link towards a thought with `kind = Tag`, the server
  * rewrites `Parent` into a tag attachment (`relation = Child`, `meaning = Tag`).
+ * Towards a `kind = Type` it makes the type's link, setting or replacing the
+ * thought's type; `links.create` and `thoughts.create` refuse that.
  */
 export const Relation = { Child: 1, Parent: 2, Jump: 3, Sibling: 4 } as const;
 export type Relation = (typeof Relation)[keyof typeof Relation];

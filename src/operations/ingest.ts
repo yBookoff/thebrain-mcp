@@ -195,6 +195,15 @@ export async function ingest(
   const tagIds = new Set(plan.thoughts.flatMap((t) => t.tagIds ?? []));
   await mapWithConcurrency([...tagIds], 6, (tagId) => api.links.requireTag(brainId, tagId));
 
+  // And whatever a thought or a link of the plan names as a parent: under a
+  // type a thought is given that type, with a 200, and loses the one it had.
+  // Only a UUID can name a type, since a plan makes ordinary thoughts. A
+  // `tempId` is checked at its own turn, by `create` and `links.create`: it
+  // can land on a type its parent holds as an ordinary child.
+  await mapWithConcurrency([...parentEnds(plan)], 6, ([id, field]) =>
+    api.links.requireParent(brainId, id, field),
+  );
+
   const outcome: IngestOutcome = {
     created: [],
     reused: [],
@@ -412,6 +421,28 @@ export async function ingest(
   });
 
   return outcome;
+}
+
+/**
+ * The existing thoughts a plan puts something under, each with the field that
+ * names it: the `parent` of a thought made as its child, and the upper end of
+ * a child or parent link. A jump has no upper end, and a `tempId` is not an
+ * existing thought.
+ */
+function parentEnds(plan: IngestPlan): Map<string, string> {
+  const tempIds = new Set(plan.thoughts.map((t) => t.tempId));
+  const ends = new Map<string, string>();
+  const add = (ref: string, field: string): void => {
+    if (!tempIds.has(ref) && !ends.has(ref)) ends.set(ref, field);
+  };
+  for (const t of plan.thoughts) {
+    if (t.parent !== undefined && (t.relation ?? "child") === "child") add(t.parent, "parent");
+  }
+  for (const link of plan.links ?? []) {
+    if (link.relation === "child") add(link.from, "from");
+    if (link.relation === "parent") add(link.to, "to");
+  }
+  return ends;
 }
 
 /** The aliases a plan item asks for, blanks and repeats dropped. */

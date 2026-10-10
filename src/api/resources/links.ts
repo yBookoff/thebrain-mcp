@@ -8,7 +8,7 @@ import {
   type ThoughtDto,
   ThoughtKind,
 } from "../types.js";
-import { requireKind } from "./kind.js";
+import { requireKind, requireParent } from "./kind.js";
 
 export interface CreateLinkInput {
   thoughtIdA: string;
@@ -74,7 +74,31 @@ export class LinksResource {
     }
   }
 
+  /**
+   * Links two thoughts. `relation` is what `thoughtIdB` is to `thoughtIdA`.
+   *
+   * A parent/child link with a type for its upper end is refused before the
+   * request (`requireParent`): the API would answer 200 and make it the lower
+   * thought's type. A jump to a type, and a type as the lower end, are
+   * ordinary links.
+   */
   async create(brainId: string, input: CreateLinkInput): Promise<string> {
+    // Here as well as in `#post`: a malformed end sends nothing, a read included.
+    assertUuid(brainId, "brainId");
+    assertUuid(input.thoughtIdA, "thoughtIdA");
+    assertUuid(input.thoughtIdB, "thoughtIdB");
+    const relation = input.relation ?? Relation.Child;
+    if (relation === Relation.Child) {
+      await this.requireParent(brainId, input.thoughtIdA, "thoughtIdA");
+    }
+    if (relation === Relation.Parent) {
+      await this.requireParent(brainId, input.thoughtIdB, "thoughtIdB");
+    }
+    return this.#post(brainId, input);
+  }
+
+  /** The request itself, with none of the reading `create` does ahead of it. */
+  async #post(brainId: string, input: CreateLinkInput): Promise<string> {
     assertUuid(brainId, "brainId");
     assertUuid(input.thoughtIdA, "thoughtIdA");
     assertUuid(input.thoughtIdB, "thoughtIdB");
@@ -159,11 +183,26 @@ export class LinksResource {
     tagThoughtId: string,
   ): Promise<string> {
     await this.requireTag(brainId, tagThoughtId, thoughtId);
-    return this.create(brainId, {
+    // Not through `create`: what it would read again is known to be a tag.
+    return this.#post(brainId, {
       thoughtIdA: thoughtId,
       thoughtIdB: tagThoughtId,
       relation: Relation.Parent,
     });
+  }
+
+  /**
+   * Refuses a type named as a parent, with `not_a_parent`: the upper end of a
+   * parent/child link, or the thought a new one is created under. `field` is
+   * the caller's name for the identifier.
+   *
+   * `create` here and `ThoughtsResource.create` both call it. A caller that
+   * writes something else first calls it ahead of that. See `requireParent`
+   * in `kind.ts` for what the API does with a type there, and for what is
+   * let through.
+   */
+  async requireParent(brainId: string, id: string, field: string): Promise<void> {
+    return requireParent(this.client, brainId, id, field);
   }
 
   /**

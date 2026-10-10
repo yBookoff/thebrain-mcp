@@ -48,7 +48,7 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
                 .optional()
                 .describe(
                   "A tempId from this batch or the UUID of an existing thought. " +
-                    "Without it the thought is left unlinked.",
+                    "Without it the thought is left unlinked. Not a type: that goes in typeId.",
                 ),
               relation: relation.optional(),
               typeId: z.string().optional().describe("Type from brain_list_types_and_tags."),
@@ -85,7 +85,8 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
           .optional()
           .describe(
             "Extra links on top of the hierarchy. These are what turn a set of thoughts " +
-              "into a graph — use them freely and label them.",
+              "into a graph — use them freely and label them. A type cannot be the parent " +
+              "end of a child or parent link: set a type with typeId.",
           ),
         deduplicate: z
           .boolean()

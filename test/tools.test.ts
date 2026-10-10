@@ -742,6 +742,244 @@ describe("an identifier that is not a tag", () => {
   });
 });
 
+describe("a type named as a parent", () => {
+  const TYPE = "eeeeeeee-0000-4000-8000-000000000005";
+  const TAG = "ffffffff-0000-4000-8000-000000000006";
+
+  /**
+   * A brain where PARENT and THOUGHT are ordinary thoughts, TAG a tag and
+   * TYPE a type, and `link` is what joins the two thoughts a call names. As
+   * on the live API, a thought created under any of them and a link posted
+   * towards any of them is a 200: under the type that is the type, set or
+   * replaced.
+   */
+  const routes = (link: Record<string, unknown> | null = null): Route[] => {
+    const others: Record<string, { name: string; kind: number }> = {
+      [PARENT]: { name: "Constraints", kind: 1 },
+      [THOUGHT]: { name: "RAG", kind: 1 },
+      [TAG]: { name: "gotcha", kind: 4 },
+      [TYPE]: { name: "Pattern", kind: 2 },
+    };
+    return [
+      ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
+      ["GET /graph", () => graph(thought("parent"))],
+      [
+        "GET /api/thoughts/",
+        (url) => {
+          const id = url.pathname.split("/").pop()!;
+          return id in others ? { ...thought("", { aliases: [] }), id, ...others[id] } : 404;
+        },
+      ],
+      ["POST /api/thoughts/", () => ({ id: THOUGHT })],
+      ["POST /api/notes/", () => 200],
+      ["POST /api/links/", () => ({ id: LINK })],
+      ["GET /api/links/", () => (link === null ? 404 : { id: LINK, ...link })],
+      ["PATCH /api/links/", () => 200],
+    ];
+  };
+  const typeLink = { thoughtIdA: TYPE, thoughtIdB: THOUGHT, relation: 1, meaning: 2 };
+  const read = (id: string): string => `GET /api/thoughts/${BRAIN}/${id}`;
+  const sequence = (calls: Array<{ method: string; path: string }>): string[] =>
+    calls.map((c) => `${c.method} ${c.path}`);
+
+  /** A refusal the model can act on, and not one request that writes. */
+  const expectRefused = (
+    result: { text: string; isError: boolean },
+    calls: Array<{ method: string }>,
+    field: string,
+  ): void => {
+    expect(result.isError, field).toBe(true);
+    expect(result.text).toContain(`${field} ${TYPE} cannot be a parent: it is the type "Pattern"`);
+    expect(result.text).toContain("Nothing was written");
+    // Both ways out: the argument that sets a type, and a parent that is one.
+    expect(result.text).toMatch(/typeId to brain_update_thought or brain_create_thought/);
+    expect(result.text).toContain("an ordinary thought");
+    expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+  };
+
+  it("brain_link refuses a parent or child link with a type above, at the cost of one read", async () => {
+    // It used to answer "link created". The API takes the request with a 200
+    // and makes the type the thought's own, in place of the one it had.
+    for (const [args, field] of [
+      [{ fromId: THOUGHT, toId: TYPE, relation: "parent" }, "toId"],
+      [{ fromId: TYPE, toId: THOUGHT, relation: "child" }, "fromId"],
+    ] as const) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_link", { brainId: BRAIN, ...args, name: "is a" });
+      expectRefused(result, calls, field);
+      expect(sequence(calls)).toEqual([read(TYPE)]);
+    }
+  });
+
+  it("brain_link refuses it whatever is between the two already, and labels nothing", async () => {
+    // The answer does not depend on what the brain holds: the type's own
+    // link used to be given the label and reported as a link that existed.
+    const { call, calls } = await connect(routes(typeLink));
+    const result = await call("brain_link", {
+      brainId: BRAIN,
+      fromId: THOUGHT,
+      toId: TYPE,
+      relation: "parent",
+      name: "is a",
+    });
+    expectRefused(result, calls, "toId");
+  });
+
+  it("brain_link still jumps to a type and puts a type under a thought", async () => {
+    // Measured: both are ordinary links, and neither touches a type.
+    for (const [args, relation, reads] of [
+      [{ fromId: THOUGHT, toId: TYPE }, 3, []],
+      [{ fromId: THOUGHT, toId: TYPE, relation: "jump" }, 3, []],
+      [{ fromId: THOUGHT, toId: TYPE, relation: "child" }, 1, [THOUGHT]],
+      [{ fromId: TYPE, toId: THOUGHT, relation: "parent" }, 2, [THOUGHT]],
+    ] as const) {
+      const { call, calls, sent } = await connect(routes());
+      const result = await call("brain_link", { brainId: BRAIN, ...args });
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain(`link created — ${LINK}`);
+      expect(sent("POST")).toEqual([
+        { thoughtIdA: args.fromId, thoughtIdB: args.toId, relation },
+      ]);
+      expect(calls.filter((c) => c.path.includes("/api/thoughts/")).map((c) => c.path)).toEqual(
+        // Once by the tool, once more by `links.create`.
+        reads.flatMap((id) => [`/api/thoughts/${BRAIN}/${id}`, `/api/thoughts/${BRAIN}/${id}`]),
+      );
+    }
+  });
+
+  it("brain_link under an ordinary thought links as before, two reads dearer", async () => {
+    const { call, calls } = await connect(routes());
+    const result = await call("brain_link", {
+      brainId: BRAIN,
+      fromId: THOUGHT,
+      toId: PARENT,
+      relation: "parent",
+    });
+    expect(result.isError).toBe(false);
+    expect(sequence(calls)).toEqual([
+      read(PARENT),
+      `GET /api/links/${BRAIN}/${THOUGHT}/${PARENT}`,
+      read(PARENT),
+      `POST /api/links/${BRAIN}`,
+    ]);
+  });
+
+  it("brain_create_thought creates nothing under a type", async () => {
+    // It used to report a thought created. The API makes it one of that type
+    // with no parent, and with another typeId beside it gives it both types.
+    for (const extra of [
+      {},
+      { relation: "child" },
+      { typeId: TYPE, note: "body", tagIds: [TAG] },
+    ] as const) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        parentId: TYPE,
+        ...extra,
+      });
+      expectRefused(result, calls, "parentId");
+    }
+  });
+
+  it("brain_create_thought still makes a thought above a type or beside it", async () => {
+    for (const [relation, sentAs] of [
+      ["parent", 2],
+      ["jump", 3],
+    ] as const) {
+      const { call, calls, sent } = await connect(routes());
+      const result = await call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        parentId: TYPE,
+        relation,
+      });
+      expect(result.isError, relation).toBe(false);
+      expect(sent("POST")).toEqual([
+        expect.objectContaining({ sourceThoughtId: TYPE, relation: sentAs }),
+      ]);
+      expect(sequence(calls)).toEqual([`POST /api/thoughts/${BRAIN}`]);
+    }
+  });
+
+  it("brain_create_thought under an ordinary thought creates as before, two reads dearer", async () => {
+    const { call, calls } = await connect(routes());
+    const result = await call("brain_create_thought", {
+      brainId: BRAIN,
+      name: "RAG",
+      parentId: PARENT,
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain(`created thought "RAG" — ${THOUGHT}`);
+    // Once by the tool, under its own name for the argument, once by `create`.
+    expect(sequence(calls)).toEqual([read(PARENT), read(PARENT), `POST /api/thoughts/${BRAIN}`]);
+  });
+
+  it("brain_ingest writes no part of a plan that names a type as a parent", async () => {
+    // A thought under it used to be reported as created, and a link towards
+    // it as a link: each set a type, and the link replaced the one there was.
+    for (const [plan, field] of [
+      [{ thoughts: [{ tempId: "rag", name: "RAG", parent: TYPE }] }, "parent"],
+      [{ links: [{ from: "top", to: TYPE, relation: "parent" }] }, "to"],
+      [{ links: [{ from: TYPE, to: "top", relation: "child" }] }, "from"],
+      [{ links: [{ from: THOUGHT, to: TYPE, relation: "parent" }] }, "to"],
+    ] as const) {
+      const { call, calls } = await connect(routes());
+      const result = await call("brain_ingest", {
+        brainId: BRAIN,
+        thoughts: [
+          { tempId: "top", name: "Retrieval", parent: PARENT, note: "body" },
+          ...("thoughts" in plan ? plan.thoughts : []),
+        ],
+        ...("links" in plan ? { links: plan.links } : {}),
+      });
+      expectRefused(result, calls, field);
+    }
+  });
+
+  it("brain_ingest still jumps to a type from a plan", async () => {
+    const { call, sent } = await connect(routes());
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [{ tempId: "top", name: "Retrieval", parent: PARENT }],
+      links: [{ from: "top", to: TYPE, name: "an example of" }],
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("links created: 1");
+    expect(sent("POST").at(-1)).toEqual({
+      thoughtIdA: THOUGHT,
+      thoughtIdB: TYPE,
+      relation: 3,
+      name: "an example of",
+    });
+  });
+
+  it("every argument that can put a thought under another says where a type goes", async () => {
+    const { client } = await connect([]);
+    const { tools } = await client.listTools();
+    const properties = (name: string): Record<string, { description?: string }> =>
+      tools.find((t) => t.name === name)!.inputSchema.properties as Record<
+        string,
+        { description?: string }
+      >;
+    const item = (
+      properties("brain_ingest")["thoughts"] as unknown as {
+        items: { properties: Record<string, { description?: string }> };
+      }
+    ).items.properties;
+
+    for (const argument of [
+      properties("brain_create_thought")["parentId"],
+      properties("brain_link")["relation"],
+      item["parent"],
+      properties("brain_ingest")["links"],
+    ]) {
+      expect(argument?.description).toMatch(/type.*typeId/s);
+    }
+  });
+});
+
 describe("what an alias costs", () => {
   it("is stated on every argument that can write one", async () => {
     // Per TheBrain's spec the first alias raises the version a brain requires

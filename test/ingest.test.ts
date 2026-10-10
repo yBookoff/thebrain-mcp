@@ -47,6 +47,14 @@ function fakeBrain(
   /** The same for tags. TAG is one from the start. */
   const tags = new Set<string>([TAG]);
   const tagReads: string[] = [];
+  /** Each read that asked whether something named as a parent is a type. */
+  const parentReads: string[] = [];
+  // As the real check: a type is no parent, and anything else passes.
+  const refuseTypeAsParent = (id: string, field: string): void => {
+    if (types.has(id)) {
+      throw new TheBrainError("not_a_parent", `${field} ${id} cannot be a parent: it is a type`);
+    }
+  };
 
   const api = {
     thoughts: {
@@ -55,11 +63,16 @@ function fakeBrain(
         input: {
           name: string;
           sourceThoughtId?: string;
+          relation?: number;
           aliases?: readonly string[];
           typeId?: string;
         },
       ) {
         if (failOn.has(input.name)) throw new Error("server refused");
+        // As the real method: a thought is not made the child of a type.
+        if (input.sourceThoughtId !== undefined && (input.relation ?? 1) === 1) {
+          refuseTypeAsParent(input.sourceThoughtId, "sourceThoughtId");
+        }
         counter += 1;
         const id = `new-${counter}`;
         thoughts.set(id, {
@@ -136,6 +149,9 @@ function fakeBrain(
         _b: string,
         input: { thoughtIdA: string; thoughtIdB: string; relation: number; name?: string },
       ) {
+        // As the real method: no parent/child link with a type for its upper end.
+        if (input.relation === 1) refuseTypeAsParent(input.thoughtIdA, "thoughtIdA");
+        if (input.relation === 2) refuseTypeAsParent(input.thoughtIdB, "thoughtIdB");
         links.push({
           a: input.thoughtIdA,
           b: input.thoughtIdB,
@@ -159,6 +175,10 @@ function fakeBrain(
         thoughts.get(thoughtId)?.tags.push(tagId);
         return "tag-link";
       },
+      async requireParent(_b: string, id: string, field: string) {
+        parentReads.push(id);
+        refuseTypeAsParent(id, field);
+      },
     },
   };
   const settle = (): void => unsettled.clear();
@@ -171,6 +191,7 @@ function fakeBrain(
     typeReads,
     tags,
     tagReads,
+    parentReads,
     aliasWrites,
     build,
     settle,
@@ -544,6 +565,147 @@ describe("tags in a batch", () => {
     const { api, tagReads } = fakeBrain([{ id: ROOT, name: "root" }]);
     await ingest(api, BRAIN, { thoughts: [{ tempId: "a", name: "A", parent: ROOT }] });
     expect(tagReads).toEqual([]);
+  });
+});
+
+describe("a type named as a parent in a batch", () => {
+  const TYPE = "cccccccc-0000-4000-8000-000000000003";
+  const OTHER = "dddddddd-0000-4000-8000-000000000004";
+  const brain = () => {
+    const fake = fakeBrain([
+      { id: ROOT, name: "root" },
+      { id: OTHER, name: "Existing", parent: ROOT },
+    ]);
+    fake.types.add(TYPE);
+    return fake;
+  };
+  const refusal = (field: string) => ({
+    kind: "not_a_parent",
+    message: expect.stringContaining(`${field} ${TYPE} cannot be a parent`),
+  });
+
+  it("a type as a thought's parent rejects the plan before any write", async () => {
+    // The API would take it, with a 200, and make the thought one of that
+    // type with no parent. It used to be reported as created under it.
+    const { api, thoughts, links } = brain();
+    await expect(
+      ingest(api, BRAIN, {
+        thoughts: [
+          { tempId: "top", name: "Retrieval", parent: ROOT, note: "summary" },
+          { tempId: "leaf", name: "RAG", parent: TYPE },
+        ],
+      }),
+    ).rejects.toMatchObject(refusal("parent"));
+    expect([...thoughts.keys()]).toEqual([ROOT, OTHER]);
+    expect(links).toEqual([]);
+  });
+
+  it("a type at the upper end of a link rejects the plan, whichever way the link is written", async () => {
+    // Either would set the type of the thought at the other end, and replace
+    // the one it had. It used to count as a link created.
+    for (const [link, field] of [
+      [{ from: "a", to: TYPE, relation: "parent" }, "to"],
+      [{ from: TYPE, to: "a", relation: "child" }, "from"],
+      [{ from: OTHER, to: TYPE, relation: "parent" }, "to"],
+      [{ from: TYPE, to: OTHER, relation: "child" }, "from"],
+    ] as const) {
+      const { api, thoughts, links } = brain();
+      await expect(
+        ingest(api, BRAIN, {
+          thoughts: [{ tempId: "a", name: "A", parent: ROOT, note: "body" }],
+          links: [{ from: "a", to: OTHER, name: "related" }, link],
+        }),
+      ).rejects.toMatchObject(refusal(field));
+      expect([...thoughts.keys()], field).toEqual([ROOT, OTHER]);
+      expect(links, field).toEqual([]);
+    }
+  });
+
+  it("a jump to a type, and a type put under a thought, are written as before", async () => {
+    // Both are ordinary links on the live API, and neither is read for.
+    const { api, links, parentReads } = brain();
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [
+        { tempId: "a", name: "A", parent: ROOT },
+        { tempId: "above", name: "Above", parent: TYPE, relation: "parent" },
+        { tempId: "beside", name: "Beside", parent: TYPE, relation: "jump" },
+      ],
+      links: [
+        { from: "a", to: TYPE },
+        { from: OTHER, to: TYPE, relation: "jump" },
+        { from: OTHER, to: TYPE, relation: "child" },
+        { from: TYPE, to: "above", relation: "parent" },
+      ],
+    });
+
+    expect(outcome.failures).toEqual([]);
+    expect(outcome.created).toHaveLength(3);
+    const a = outcome.created.find((c) => c.tempId === "a")!.thoughtId;
+    expect(links).toContainEqual({ a, b: TYPE, relation: 3 });
+    expect(links).toContainEqual({ a: OTHER, b: TYPE, relation: 1 });
+    // ROOT for the thought under it, OTHER for the link it is the upper end of.
+    expect(parentReads.sort()).toEqual([ROOT, OTHER].sort());
+  });
+
+  it("ahead of the writes each parent is read once, and a tempId never", async () => {
+    const { api, parentReads } = brain();
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [
+        { tempId: "top", name: "Top", parent: ROOT },
+        { tempId: "mid", name: "Mid", parent: "top" },
+        { tempId: "side", name: "Side", parent: ROOT },
+      ],
+      links: [
+        { from: "top", to: "side", relation: "child" },
+        { from: "mid", to: OTHER, relation: "parent" },
+        { from: OTHER, to: "side", relation: "child" },
+        { from: "side", to: ROOT, relation: "parent" },
+      ],
+    });
+
+    expect(outcome.failures).toEqual([]);
+    expect(parentReads.sort()).toEqual([ROOT, OTHER].sort());
+  });
+
+  it("a plan without parents reads none", async () => {
+    const { api, parentReads } = brain();
+    await ingest(api, BRAIN, {
+      thoughts: [{ tempId: "a", name: "A" }],
+      links: [{ from: "a", to: OTHER }],
+    });
+    expect(parentReads).toEqual([]);
+  });
+
+  it("a plan thought that lands on a type gets nothing put under it", async () => {
+    // A type can be an ordinary child of a thought, and deduplication then
+    // takes it for the plan's thought of that name. Nothing ahead of the
+    // writes can see that; `create` and `links.create` refuse at their turn.
+    const { api, thoughts, links, types } = fakeBrain([
+      { id: ROOT, name: "root" },
+      { id: TYPE, name: "Pattern", parent: ROOT },
+      { id: OTHER, name: "Existing", parent: ROOT },
+    ]);
+    types.add(TYPE);
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [
+        { tempId: "x", name: "Pattern", parent: ROOT },
+        { tempId: "leaf", name: "RAG", parent: "x" },
+      ],
+      links: [{ from: OTHER, to: "x", relation: "parent" }],
+    });
+
+    expect(outcome.reused).toEqual([{ tempId: "x", thoughtId: TYPE, name: "Pattern" }]);
+    expect(outcome.created).toEqual([]);
+    expect(outcome.linksCreated).toBe(0);
+    expect(outcome.failures.map((f) => f.what)).toEqual([
+      'thought "RAG" (leaf)',
+      `link ${OTHER} -> x`,
+    ]);
+    for (const failure of outcome.failures) {
+      expect(failure.reason).toContain(`${TYPE} cannot be a parent`);
+    }
+    expect([...thoughts.keys()]).toEqual([ROOT, TYPE, OTHER]);
+    expect(links).toEqual([]);
   });
 });
 

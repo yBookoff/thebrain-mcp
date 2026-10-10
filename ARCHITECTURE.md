@@ -69,7 +69,7 @@ without a protocol harness.
 Its whole job is to turn a hostile HTTP surface into typed calls that either
 return data or throw a `TheBrainError` with a machine-readable `kind`
 (`auth | forbidden | not_found | bad_request | server | route_miss |
-invalid_uuid | not_a_type | not_a_tag | network | malformed`).
+invalid_uuid | not_a_type | not_a_tag | not_a_parent | network | malformed`).
 
 "Hostile" is not an exaggeration — see §7 for the catalogue. The two defences
 that matter most:
@@ -333,6 +333,16 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     `attachTag()` reads the kind first, `detachTag()` deletes only the link
     that carries the tag, and a tool reads every tag it was given before its
     first write.
+18. **A type is never a parent.** A parent or child link with a type above is
+    the lower thought's type, set or replaced with a 200, and a thought created
+    under a type has that type and no parent. `brain_link`,
+    `brain_create_thought` and `brain_ingest` reported each as a link or a
+    child. So `links.create()` and `thoughts.create()` read the upper end
+    first and refuse a type with `not_a_parent`, and a tool reads what it was
+    given for a parent before anything else it does. It is refused, not done
+    and reported: the call asked for a link, the API can only set a type
+    there, and `typeId` is the argument that asks for one. A jump to a type
+    stays an ordinary link.
 
 ### Write visibility
 

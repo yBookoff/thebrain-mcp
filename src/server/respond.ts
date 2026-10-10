@@ -40,6 +40,12 @@ export function describeError(error: unknown): string {
         return `${error.message}. Nothing was written. Take type identifiers from brain_list_types_and_tags.`;
       case "not_a_tag":
         return `${error.message}. Nothing was written. Take tag identifiers from brain_list_types_and_tags.`;
+      case "not_a_parent":
+        return (
+          `${error.message}. Nothing was written. A thought linked under a type is given ` +
+          "that type in place of the one it had. To set a type pass it as typeId to " +
+          "brain_update_thought or brain_create_thought; for a parent name an ordinary thought."
+        );
       case "auth":
         return "TheBrain rejected the key. Check THEBRAIN_API_KEY: find it under Settings > User > Local API Key.";
       case "network":

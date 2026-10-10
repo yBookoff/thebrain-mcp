@@ -34,6 +34,13 @@ export type ApiErrorKind =
    * thought, and sets the type or adds a parent. Raised ahead of the write.
    */
   | "not_a_tag"
+  /**
+   * A type named as a parent: as the upper end of a parent/child link, or as
+   * the thought a new one is created under. No such error in the API either:
+   * it answers 200 and gives the thought below that type, in place of the one
+   * it had. Raised ahead of the write.
+   */
+  | "not_a_parent"
   /** Connection failed or dropped. */
   | "network"
   /** A response arrived but could not be parsed. */

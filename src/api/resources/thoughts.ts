@@ -13,7 +13,7 @@ import {
   type BrainDto,
   type LinkDto,
   type ModificationLogDto,
-  type Relation,
+  Relation,
   type ThoughtDto,
   type ThoughtGraphDto,
   ThoughtKind,
@@ -23,7 +23,10 @@ import type { LinksResource } from "./links.js";
 
 export interface CreateThoughtInput {
   name: string;
-  /** Which thought to attach to. Without it the thought is created orphaned. */
+  /**
+   * Which thought to attach to. Without it the thought is created orphaned.
+   * Not a type when the new thought is to be its child: see `requireParent`.
+   */
   sourceThoughtId?: string;
   /** How the new thought relates to the source. Defaults to child. */
   relation?: Relation;
@@ -212,7 +215,15 @@ export class ThoughtsResource {
     if (input.sourceThoughtId !== undefined) {
       assertUuid(input.sourceThoughtId, "sourceThoughtId");
     }
-    // Ahead of the request: one made with a tag or an ordinary thought for a
+    // Ahead of the request: a thought made under a type is one of that type,
+    // with no parent, and with another `typeId` beside it carries both types.
+    if (
+      input.sourceThoughtId !== undefined &&
+      (input.relation ?? Relation.Child) === Relation.Child
+    ) {
+      await this.links.requireParent(brainId, input.sourceThoughtId, "sourceThoughtId");
+    }
+    // The same for the type: one made with a tag or an ordinary thought for a
     // type would leave a thought behind, tagged or with one parent too many.
     if (input.typeId !== undefined) await this.requireType(brainId, input.typeId);
     const aliases = input.aliases ?? [];

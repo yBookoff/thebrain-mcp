@@ -913,6 +913,136 @@ describe("tags", () => {
   });
 });
 
+describe("a type named as a parent", () => {
+  const PLAIN = "eeeeeeee-0000-4000-8000-000000000005";
+  const NOBODY = "ffffffff-0000-4000-8000-000000000006";
+  const LINK = "99999999-0000-4000-8000-000000000009";
+
+  /**
+   * A brain with a type, a tag and an ordinary thought in it. As on the live
+   * API, a link is posted and a thought created with a 200 whatever they name.
+   */
+  const brain = () => {
+    const others: Record<string, ThoughtDto> = {
+      [TYPE]: thought(TYPE, "Constraint", { kind: 2 }),
+      [TAG]: thought(TAG, "gotcha", { kind: 4 }),
+      [PLAIN]: thought(PLAIN, "API constraints"),
+      [THOUGHT]: thought(THOUGHT, "linked"),
+    };
+    return apiWith([
+      // A thought that does not exist is a 404 to this read.
+      ["/api/thoughts/", (url) => others[url.pathname.split("/").pop()!] ?? 404],
+      ["POST /api/thoughts/", () => ({ id: THOUGHT })],
+      ["POST /api/links", () => ({ id: LINK })],
+    ]);
+  };
+  const sent = (calls: Array<{ method: string; url: URL }>): string[] =>
+    calls.map((c) => `${c.method} ${c.url.pathname}`);
+  const read = (id: string): string => `GET /api/thoughts/${BRAIN}/${id}`;
+  const postLink = `POST /api/links/${BRAIN}`;
+  const postThought = `POST /api/thoughts/${BRAIN}`;
+
+  it("a parent/child link with a type above is refused, and nothing is sent", async () => {
+    // Measured: the API answers 200 and makes the type the lower thought's
+    // type, in place of the one it had.
+    for (const [input, field] of [
+      [{ thoughtIdA: THOUGHT, thoughtIdB: TYPE, relation: 2 }, "thoughtIdB"],
+      [{ thoughtIdA: TYPE, thoughtIdB: THOUGHT, relation: 1 }, "thoughtIdA"],
+      // A child link is what `create` sends when no relation is given.
+      [{ thoughtIdA: TYPE, thoughtIdB: THOUGHT }, "thoughtIdA"],
+    ] as const) {
+      const { api, calls } = brain();
+      await expect(api.links.create(BRAIN, input)).rejects.toMatchObject({
+        kind: "not_a_parent",
+        message: `${field} ${TYPE} cannot be a parent: it is the type "Constraint"`,
+      });
+      expect(sent(calls), field).toEqual([read(TYPE)]);
+    }
+  });
+
+  it("a link reads its upper end alone, and a jump reads nothing", async () => {
+    for (const [what, input, reads] of [
+      ["under a thought", { thoughtIdA: THOUGHT, thoughtIdB: PLAIN, relation: 2 }, [PLAIN]],
+      ["a thought above", { thoughtIdA: PLAIN, thoughtIdB: THOUGHT, relation: 1 }, [PLAIN]],
+      // Measured: both of these are ordinary links.
+      ["a jump to a type", { thoughtIdA: THOUGHT, thoughtIdB: TYPE, relation: 3 }, []],
+      ["a type below", { thoughtIdA: THOUGHT, thoughtIdB: TYPE, relation: 1 }, [THOUGHT]],
+      ["a type below", { thoughtIdA: TYPE, thoughtIdB: THOUGHT, relation: 2 }, [THOUGHT]],
+    ] as const) {
+      const { api, calls } = brain();
+      await expect(api.links.create(BRAIN, input), what).resolves.toBe(LINK);
+      expect(sent(calls), what).toEqual([...reads.map(read), postLink]);
+      expect(calls.at(-1)!.body, what).toEqual(input);
+    }
+  });
+
+  it("only a type is refused: a tag above, and an identifier nobody has, go to the API", async () => {
+    // Under a tag the thought is tagged, which takes nothing from it. The API
+    // answers for the identifier, with a 400.
+    for (const upper of [TAG, NOBODY]) {
+      const { api, calls } = brain();
+      await api.links.create(BRAIN, { thoughtIdA: THOUGHT, thoughtIdB: upper, relation: 2 });
+      expect(sent(calls)).toEqual([read(upper), postLink]);
+      await api.thoughts.create(BRAIN, { name: "new", sourceThoughtId: upper });
+      expect(sent(calls).slice(2)).toEqual([read(upper), postThought]);
+    }
+  });
+
+  it("attaching a tag does not read it again for a parent", async () => {
+    const { api, calls } = brain();
+    await api.links.attachTag(BRAIN, THOUGHT, TAG);
+    expect(sent(calls)).toEqual([read(TAG), postLink]);
+  });
+
+  it("a thought is not created under a type, with a typeId or without", async () => {
+    // Measured: the API creates it as one of that type, with no parent, and
+    // with another type for its typeId as a thought that carries both.
+    for (const extra of [{}, { relation: 1 }, { typeId: TYPE }, { typeId: PLAIN }] as const) {
+      const { api, calls } = brain();
+      await expect(
+        api.thoughts.create(BRAIN, { name: "new", sourceThoughtId: TYPE, ...extra }),
+      ).rejects.toMatchObject({
+        kind: "not_a_parent",
+        message: `sourceThoughtId ${TYPE} cannot be a parent: it is the type "Constraint"`,
+      });
+      expect(sent(calls)).toEqual([read(TYPE)]);
+    }
+  });
+
+  it("a thought created under another is read for first; one made above a type or beside it is not", async () => {
+    for (const [what, input, reads] of [
+      ["under a thought", { sourceThoughtId: PLAIN }, [PLAIN]],
+      ["above a type", { sourceThoughtId: TYPE, relation: 2 }, []],
+      ["beside a type", { sourceThoughtId: TYPE, relation: 3 }, []],
+      ["on its own", {}, []],
+    ] as const) {
+      const { api, calls } = brain();
+      await api.thoughts.create(BRAIN, { name: "new", ...input });
+      expect(sent(calls), what).toEqual([...reads.map(read), postThought]);
+    }
+  });
+
+  it("a malformed end is refused before any request, a read included", async () => {
+    const { api, fetchImpl } = brain();
+    await expect(
+      api.links.create(BRAIN, { thoughtIdA: TYPE, thoughtIdB: "not-a-uuid", relation: 1 }),
+    ).rejects.toMatchObject({ kind: "invalid_uuid" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("a failure to read the parent stays what it was", async () => {
+    // Only "no such thought" is left to the write. A rejected key is not that.
+    const { api, calls } = apiWith([["/api/thoughts/", () => 401]]);
+    await expect(api.links.requireParent(BRAIN, PLAIN, "parentId")).rejects.toMatchObject({
+      kind: "auth",
+    });
+    await expect(
+      api.links.create(BRAIN, { thoughtIdA: THOUGHT, thoughtIdB: PLAIN, relation: 2 }),
+    ).rejects.toMatchObject({ kind: "auth" });
+    expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+  });
+});
+
 describe("updating a link: flat fields become JSON Patch", () => {
   const LINK = "eeeeeeee-0000-4000-8000-000000000005";
 

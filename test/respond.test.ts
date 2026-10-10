@@ -69,6 +69,17 @@ describe("error explanations point at the next step", () => {
     expect(text).toMatch(/Take tag identifiers from brain_list_types_and_tags/);
   });
 
+  it("a type named as a parent says what that link would do, and both ways out", () => {
+    const text = describeError(
+      new TheBrainError("not_a_parent", 'toId 1f0e cannot be a parent: it is the type "Pattern"'),
+    );
+    expect(text).toMatch(/cannot be a parent: it is the type "Pattern"\./);
+    expect(text).toMatch(/Nothing was written/);
+    expect(text).toMatch(/given that type in place of the one it had/);
+    expect(text).toMatch(/typeId to brain_update_thought or brain_create_thought/);
+    expect(text).toMatch(/for a parent name an ordinary thought/);
+  });
+
   it("a key problem says where to find the key", () => {
     expect(describeError(new TheBrainError("auth", "Invalid API Key"))).toMatch(
       /Settings > User > Local API Key/,

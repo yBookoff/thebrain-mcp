@@ -1863,6 +1863,23 @@ suite("resource layer against the live API", () => {
     const graphOf = (id: string, ok: (g: CleanGraph) => boolean): Promise<CleanGraph> =>
       eventually(() => api.thoughts.getGraph(brainId, id), ok);
     const ids = (thoughts: readonly ThoughtDto[]): string[] => thoughts.map((t) => t.id);
+    /** A link as the API takes it: `links.create` refuses a type above. */
+    const rawLink = (
+      thoughtIdA: string,
+      thoughtIdB: string,
+      relation: number,
+    ): Promise<{ id: string }> =>
+      api.client.post<{ id: string }>(`/api/links/${brainId}`, {
+        json: { thoughtIdA, thoughtIdB, relation },
+      });
+    /** And a thought created under whatever it names, a type included. */
+    const rawUnder = async (name: string, extra: Record<string, unknown>): Promise<string> => {
+      const { id } = await api.client.post<{ id: string }>(`/api/thoughts/${brainId}`, {
+        json: { name: PREFIX + name, kind: ThoughtKind.Normal, acType: 0, relation: 1, ...extra },
+      });
+      created.push(id);
+      return id;
+    };
 
     it("a second link posted between two thoughts rewrites the first and returns its identifier", async () => {
       const parent = await make("one-link-parent");
@@ -1948,22 +1965,14 @@ suite("resource layer against the live API", () => {
         );
 
       // The request `attachTag` sends for a tag.
-      await api.links.create(brainId, {
-        thoughtIdA: id,
-        thoughtIdB: first,
-        relation: Relation.Parent,
-      });
+      await rawLink(id, first, Relation.Parent);
       expect((await typed(first)).typeId).toBe(first);
       const link = await api.links.between(brainId, id, first);
       expect([link?.thoughtIdA, link?.relation]).toEqual([first, Relation.Child]);
       expect(isTypeLink(link!)).toBe(true);
 
       // Named from the type's side it is the same request. The old type goes.
-      await api.links.create(brainId, {
-        thoughtIdA: second,
-        thoughtIdB: id,
-        relation: Relation.Child,
-      });
+      await rawLink(second, id, Relation.Child);
       expect((await typed(second)).typeId).toBe(second);
       const old = await eventually(
         () => api.links.between(brainId, first, id),
@@ -1975,9 +1984,13 @@ suite("resource layer against the live API", () => {
 
     it("a thought created under a type has that type; a jump to a type, or the type as a child, is an ordinary link", async () => {
       const typeId = await make("parent-type", ThoughtKind.Type);
-      const born = await makeUnder("born-under-type", { sourceThoughtId: typeId });
+      const born = await rawUnder("born-under-type", { sourceThoughtId: typeId });
       expect((await api.thoughts.get(brainId, born)).typeId).toBe(typeId);
       expect(isTypeLink((await api.links.between(brainId, typeId, born))!)).toBe(true);
+      // The type is all it has: no parent came of the request.
+      const graph = await graphOf(born, (g) => g.type !== null);
+      expect(graph.parents).toEqual([]);
+      expect(graph.links).toHaveLength(1);
 
       const jumper = await make("jumps-to-type");
       const holder = await make("holds-type-as-child");
@@ -1996,6 +2009,205 @@ suite("resource layer against the live API", () => {
         expect((await api.thoughts.get(brainId, id)).typeId, id).toBeNull();
         expect((await api.links.between(brainId, id, typeId))?.meaning).toBe(LinkMeaning.Normal);
       }
+    });
+
+    it("a thought created under one type with another for its typeId carries both, and its graph can name the wrong one", async () => {
+      const older = await make("both-types-older", ThoughtKind.Type);
+      const newer = await make("both-types-newer", ThoughtKind.Type);
+      const graphTypes: Array<string | undefined> = [];
+
+      for (const [under, typeId] of [
+        [older, newer],
+        [newer, older],
+      ] as const) {
+        const id = await rawUnder("both-types", { sourceThoughtId: under, typeId });
+        // `typeId` is the one the request called so, from the first read on.
+        expect((await api.thoughts.get(brainId, id)).typeId).toBe(typeId);
+        const graph = await graphOf(id, (g) => g.links.length === 2);
+        expect(graph.links.map((l) => [l.thoughtIdA, l.meaning]).sort()).toEqual(
+          [
+            [under, LinkMeaning.Type],
+            [typeId, LinkMeaning.Type],
+          ].sort(),
+        );
+        // The other type is left among the parents: only `typeId` is filtered.
+        expect(ids(graph.parents)).toEqual([under]);
+        graphTypes.push(graph.type?.id);
+
+        // Taking the type away, as `removeType` does, leaves the other one's
+        // link and a thought that reads as having no type.
+        expect(await api.links.detachType(brainId, id, typeId)).toBe(true);
+        const bare = await eventually(
+          () => api.thoughts.get(brainId, id),
+          (t) => t.typeId === null,
+        );
+        expect(bare.typeId).toBeNull();
+        expect(isTypeLink((await api.links.between(brainId, under, id))!)).toBe(true);
+      }
+
+      // `graph.type` named the same type both times, so once it was not the
+      // thought's `typeId`.
+      expect(graphTypes[0]).toBe(graphTypes[1]);
+      expect([older, newer]).toContain(graphTypes[0]);
+    }, 30_000);
+
+    it("a tag linked under a type is a 200 with an identifier of zeros, and no link is made", async () => {
+      const typeId = await make("type-over-tag", ThoughtKind.Type);
+      const tagId = await make("tag-under-type", ThoughtKind.Tag);
+
+      for (const answer of [
+        await rawLink(tagId, typeId, Relation.Parent),
+        await rawLink(typeId, tagId, Relation.Child),
+      ]) {
+        expect(answer.id).toBe("00000000-0000-0000-0000-000000000000");
+      }
+      await settle(600);
+      expect(await api.links.between(brainId, tagId, typeId)).toBeNull();
+      expect((await api.thoughts.get(brainId, tagId)).typeId).toBeNull();
+    });
+  });
+
+  /**
+   * What `links.create`, `thoughts.create` and ingest do about a type named as
+   * a parent, and what they let through. The API facts are in the block above.
+   */
+  describe("a type named as a parent", () => {
+    const graphOf = (id: string, ok: (g: CleanGraph) => boolean): Promise<CleanGraph> =>
+      eventually(() => api.thoughts.getGraph(brainId, id), ok);
+    const ids = (thoughts: readonly ThoughtDto[]): string[] => thoughts.map((t) => t.id);
+    const refusal = (field: string, type: string) => ({
+      kind: "not_a_parent",
+      message: expect.stringMatching(
+        new RegExp(`^${field} \\S+ cannot be a parent: it is the type "${PREFIX}${type}"$`),
+      ),
+    });
+
+    it("links.create and create refuse a type above, and write nothing", async () => {
+      const kept = await make("np-kept-type", ThoughtKind.Type);
+      const other = await make("np-other-type", ThoughtKind.Type);
+      const bare = await make("np-bare");
+      const typed = await api.thoughts.create(brainId, { name: `${PREFIX}np-typed`, typeId: kept });
+      created.push(typed);
+
+      for (const id of [bare, typed]) {
+        await expect(
+          api.links.create(brainId, { thoughtIdA: id, thoughtIdB: other, relation: Relation.Parent }),
+        ).rejects.toMatchObject(refusal("thoughtIdB", "np-other-type"));
+        await expect(
+          api.links.create(brainId, { thoughtIdA: other, thoughtIdB: id, relation: Relation.Child }),
+        ).rejects.toMatchObject(refusal("thoughtIdA", "np-other-type"));
+      }
+      for (const extra of [{}, { typeId: kept }, { typeId: other }]) {
+        await expect(
+          api.thoughts.create(brainId, {
+            name: `${PREFIX}np-never-made`,
+            sourceThoughtId: other,
+            ...extra,
+          }),
+        ).rejects.toMatchObject(refusal("sourceThoughtId", "np-other-type"));
+      }
+
+      await settle();
+      expect((await api.thoughts.getGraph(brainId, bare)).links).toEqual([]);
+      // The type it had, and not the one it was to be linked under.
+      const graph = await api.thoughts.getGraph(brainId, typed);
+      expect(graph.type?.id).toBe(kept);
+      expect(graph.links).toHaveLength(1);
+      // No thought was made: a type's graph lists its instances as children.
+      expect((await api.thoughts.getGraph(brainId, other)).children).toEqual([]);
+    });
+
+    it("only a type is refused: under a tag a thought is created tagged, and nobody's identifier is the API's to answer", async () => {
+      const tagId = await make("np-tag", ThoughtKind.Tag);
+      const id = await api.thoughts.create(brainId, {
+        name: `${PREFIX}np-under-tag`,
+        sourceThoughtId: tagId,
+      });
+      created.push(id);
+
+      const graph = await graphOf(id, (g) => g.tags.length === 1);
+      expect(ids(graph.tags)).toEqual([tagId]);
+      expect(graph.parents).toEqual([]);
+      expect(isTagLink((await api.links.between(brainId, id, tagId))!)).toBe(true);
+
+      // An identifier nobody has is left to the write, which answers for it.
+      const nobody = crypto.randomUUID();
+      await expect(
+        api.thoughts.create(brainId, { name: `${PREFIX}np-never-made`, sourceThoughtId: nobody }),
+      ).rejects.toMatchObject({
+        kind: "not_found",
+        message: `Source Thought ${nobody} could not be located`,
+      });
+      await expect(
+        api.links.create(brainId, { thoughtIdA: id, thoughtIdB: nobody, relation: Relation.Parent }),
+      ).rejects.toMatchObject({
+        kind: "bad_request",
+        message: `Could not get target thought ${nobody}`,
+      });
+    });
+
+    it("ingest writes no part of a plan that names a type as a parent, by a thought or by a link", async () => {
+      const kept = await make("np-plan-kept", ThoughtKind.Type);
+      const other = await make("np-plan-type", ThoughtKind.Type);
+      const root = await make("np-plan-root");
+      const typed = await api.thoughts.create(brainId, {
+        name: `${PREFIX}np-plan-typed`,
+        typeId: kept,
+      });
+      created.push(typed);
+      const top = { tempId: "top", name: `${PREFIX}np-plan-top`, parent: root };
+
+      await expect(
+        ingest(api, brainId, {
+          thoughts: [top, { tempId: "leaf", name: `${PREFIX}np-plan-leaf`, parent: other }],
+        }),
+      ).rejects.toMatchObject(refusal("parent", "np-plan-type"));
+      await expect(
+        ingest(api, brainId, {
+          thoughts: [top],
+          links: [{ from: typed, to: other, relation: "parent" }],
+        }),
+      ).rejects.toMatchObject(refusal("to", "np-plan-type"));
+      await expect(
+        ingest(api, brainId, {
+          thoughts: [top],
+          links: [{ from: other, to: "top", relation: "child" }],
+        }),
+      ).rejects.toMatchObject(refusal("from", "np-plan-type"));
+
+      await settle();
+      expect((await api.thoughts.getGraph(brainId, root)).children).toEqual([]);
+      expect((await api.thoughts.getGraph(brainId, other)).children).toEqual([]);
+      expect((await api.thoughts.get(brainId, typed)).typeId).toBe(kept);
+    });
+
+    it("a plan thought that lands on a type its parent holds gets nothing put under it", async () => {
+      // A type can be an ordinary child of a thought, and deduplication takes
+      // it for the plan's thought of that name. The thought under it used to
+      // be created as one of that type and reported as created.
+      const root = await make("np-holder");
+      const held = await make("np-held-type", ThoughtKind.Type);
+      await api.links.create(brainId, {
+        thoughtIdA: root,
+        thoughtIdB: held,
+        relation: Relation.Child,
+      });
+      await graphOf(root, (g) => ids(g.children).includes(held));
+
+      const outcome = await ingest(api, brainId, {
+        thoughts: [
+          { tempId: "x", name: `${PREFIX}np-held-type`, parent: root },
+          { tempId: "leaf", name: `${PREFIX}np-held-leaf`, parent: "x" },
+        ],
+      });
+      for (const c of outcome.created) created.push(c.thoughtId);
+
+      expect(outcome.reused.map((r) => r.thoughtId)).toEqual([held]);
+      expect(outcome.created).toEqual([]);
+      expect(outcome.failures).toHaveLength(1);
+      expect(outcome.failures[0]!.reason).toMatch(/^sourceThoughtId \S+ cannot be a parent: it is the type/);
+      await settle();
+      expect((await api.thoughts.getGraph(brainId, held)).children).toEqual([]);
     });
   });
 

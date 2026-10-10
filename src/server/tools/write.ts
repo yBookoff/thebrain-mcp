@@ -55,7 +55,11 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         parentId: z
           .string()
           .optional()
-          .describe("What to attach it to. Without this the thought is left orphaned."),
+          .describe(
+            "What to attach it to. Without this the thought is left orphaned. " +
+              "Not a type: a thought made under one would get that type and no parent, " +
+              "so a type goes in typeId.",
+          ),
         relation: z
           .enum(["child", "parent", "jump", "sibling"])
           .optional()
@@ -84,6 +88,11 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       // Before the thought exists: refused after it, a tag that is no tag
       // would leave the thought behind for a retry to make again.
       for (const tagId of tagIds ?? []) await ctx.api.links.requireTag(bid, tagId);
+      // A type for a parent is no parent: the thought would be one of that
+      // type. `create` refuses it too, under the name the API has for it.
+      if (parentId !== undefined && (relation ?? "child") === "child") {
+        await ctx.api.links.requireParent(bid, parentId, "parentId");
+      }
 
       const thoughtId = await ctx.api.thoughts.create(bid, {
         name,
@@ -259,12 +268,17 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
           .optional()
           .describe(
             "How the target relates to the source. Defaults to jump — a sideways link " +
-              "that leaves the hierarchy alone.",
+              "that leaves the hierarchy alone. A type cannot be the parent: that link " +
+              "would set the child's type, which is what typeId of brain_update_thought is for.",
           ),
         name: z.string().optional().describe("Link label: how exactly one relates to the other."),
       },
     },
     guard(async ({ brainId: bid, fromId, toId, relation, name }) => {
+      // Ahead of everything, the label of a link already there included: under
+      // a type a thought is given that type, and loses the one it had.
+      if (relation === "child") await ctx.api.links.requireParent(bid, fromId, "fromId");
+      if (relation === "parent") await ctx.api.links.requireParent(bid, toId, "toId");
       const existing = await ctx.api.links.between(bid, fromId, toId);
       if (existing !== null) {
         if (name !== undefined) await ctx.api.links.update(bid, existing.id, { name });
