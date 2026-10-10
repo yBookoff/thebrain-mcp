@@ -129,6 +129,24 @@ export class LinksResource {
     await this.delete(brainId, link.id);
     return true;
   }
+
+  /**
+   * Takes a type off a thought by deleting the link that carries it. False
+   * when there is no such link.
+   *
+   * `PATCH /typeId` cannot do this, see `ThoughtsResource.removeType`. A link
+   * between the two that is not the type link is left alone.
+   */
+  async detachType(
+    brainId: string,
+    thoughtId: string,
+    typeThoughtId: string,
+  ): Promise<boolean> {
+    const link = await this.between(brainId, typeThoughtId, thoughtId);
+    if (link === null || !isTypeLink(link)) return false;
+    await this.delete(brainId, link.id);
+    return true;
+  }
 }
 
 /** A tag attachment rather than an ordinary link between thoughts. */

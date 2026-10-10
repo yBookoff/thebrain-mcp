@@ -5,6 +5,7 @@ import type { ModificationLogDto } from "../src/api/types.js";
 import type { Embedder } from "../src/semantic/embedder.js";
 import {
   SemanticIndexer,
+  linkEndIds,
   logThoughtId,
   mapWithConcurrency,
 } from "../src/semantic/indexer.js";
@@ -45,7 +46,11 @@ interface FakeThought {
   id: string;
   name: string;
   kind?: number;
+  label?: string;
   typeName?: string;
+  /** A type that is a thought of this fake brain, so renaming it shows here. */
+  typeId?: string;
+  /** Tag names, or ids of tags that are thoughts of this fake brain. */
   tags?: string[];
   note?: string;
   /**
@@ -96,6 +101,26 @@ const noteLog = (
   extraAType: 2,
 });
 
+/**
+ * A link event, shaped the way the live API records it: the source is the link
+ * and its two thoughts sit in extraA and extraB. For a tag link that is the tag
+ * and the thought it marks, for a type link the type and its instance, for an
+ * ordinary link parent and child. Nothing else in the entry tells them apart.
+ */
+const linkLog = (
+  a: string,
+  b: string,
+  modType: number,
+  at: string,
+  linkId = `link-${a}-${b}`,
+): ModificationLogDto => ({
+  ...log(linkId, modType, at, 3),
+  extraAId: a,
+  extraAType: 2,
+  extraBId: b,
+  extraBType: 2,
+});
+
 /** Minimal fake API: only what the indexer and search actually touch. */
 function fakeApi(
   thoughts: Map<string, FakeThought>,
@@ -114,7 +139,7 @@ function fakeApi(
       async allModifications(_brainId: string, options?: { since?: string }) {
         calls.modifications += 1;
         if (options?.since === undefined) return logs;
-        return logs.filter((l) => l.creationDateTime >= options.since!);
+        return logs.filter((l) => l.modificationDateTime >= options.since!);
       },
     },
     thoughts: {
@@ -128,7 +153,7 @@ function fakeApi(
             id: t.id,
             name: t.name,
             kind: t.kind ?? 1,
-            label: null,
+            label: t.label ?? null,
             ...(t.aliases !== undefined ? { aliases: t.aliases } : {}),
           },
           parents: (t.parents ?? []).map(ref),
@@ -136,10 +161,17 @@ function fakeApi(
           jumps: (t.jumps ?? []).map(ref),
           siblings: [],
           links: [],
-          // Tags and types are thoughts of their own; these ids point nowhere,
-          // like a tag the walk may try once and find gone.
-          type: t.typeName ? { id: `type-${t.typeName}`, name: t.typeName } : null,
-          tags: (t.tags ?? []).map((name) => ({ id: `tag-${name}`, name })),
+          // Tags and types are thoughts of their own. Given by name, their ids
+          // point nowhere, like a tag the walk may try once and find gone.
+          type:
+            t.typeId !== undefined
+              ? ref(t.typeId)
+              : t.typeName
+                ? { id: `type-${t.typeName}`, name: t.typeName }
+                : null,
+          tags: (t.tags ?? []).map((tag) =>
+            thoughts.has(tag) ? ref(tag) : { id: `tag-${tag}`, name: tag },
+          ),
           // The real API reports a note as an attachment flagged `isNotes`.
           // Omitting it here is what let the note-indexing bug through.
           attachments: t.note ? [{ id: `att-${t.id}`, isNotes: true, type: 1 }] : [],
@@ -186,6 +218,21 @@ describe("helpers", () => {
     expect(logThoughtId(log("some-link", 101, "t1", 3))).toBeNull();
     // An attachment event that is not a note: a URL attachment, say.
     expect(logThoughtId({ ...noteLog("t", 501, "t1") })).toBeNull();
+  });
+
+  it("linkEndIds names both ends of a link that was created, deleted, moved or re-meant", () => {
+    for (const modType of [101, 102, 402, 404]) {
+      expect(linkEndIds(linkLog("tag", "thought", modType, "t1"))).toEqual(["tag", "thought"]);
+    }
+  });
+
+  it("linkEndIds is empty for a link event that keeps its ends, and for other entities", () => {
+    // Renamed, thickness, direction, relation.
+    for (const modType of [103, 401, 403, 405]) {
+      expect(linkEndIds(linkLog("a", "b", modType, "t1"))).toEqual([]);
+    }
+    expect(linkEndIds(log("a", 101, "t1"))).toEqual([]);
+    expect(linkEndIds(noteLog("a", 801, "t1"))).toEqual([]);
   });
 
   it("mapWithConcurrency preserves result order", async () => {
@@ -585,6 +632,243 @@ describe("incremental sync", () => {
     expect(result.indexed).toBe(1);
     expect(embedder.documents.at(-1)).toContain("after the edit");
     store.close();
+  });
+
+  describe("label, type and tags", () => {
+    // What the live API logs for each of these is contract-tested in
+    // test/resources.integration.test.ts; the entries here have the same shape.
+    const LATER = "2099-01-01T00:00:00";
+
+    async function indexed(thoughts: Map<string, FakeThought>) {
+      const logs = [...thoughts.keys()].map((id, i) => log(id, 101, `2026-08-11T09:00:0${i}`));
+      const { api, calls } = fakeApi(thoughts, logs);
+      const store = new VectorStore(":memory:");
+      const embedder = new FakeEmbedder();
+      const indexer = new SemanticIndexer(api, store, embedder);
+      await indexer.rebuild(BRAIN);
+      return { logs, calls, store, embedder, indexer };
+    }
+
+    it("a label change triggers recomputation", async () => {
+      const thoughts = new Map<string, FakeThought>([
+        ["a", { id: "a", name: "Unity" }],
+        ["b", { id: "b", name: "untouched" }],
+      ]);
+      const { logs, store, embedder, indexer } = await indexed(thoughts);
+
+      thoughts.set("a", { id: "a", name: "Unity", label: "game engine" });
+      logs.push(log("a", 202, LATER));
+      const result = await indexer.sync(BRAIN);
+
+      expect(result).toMatchObject({ indexed: 1, skipped: 0 });
+      expect(embedder.documents.at(-1)).toBe("Unity\ngame engine");
+      store.close();
+    });
+
+    it("a type change triggers recomputation", async () => {
+      const thoughts = new Map<string, FakeThought>([
+        ["a", { id: "a", name: "Unity", typeId: "y" }],
+        ["y", { id: "y", name: "Tool", kind: 2, children: ["a"] }],
+        ["z", { id: "z", name: "Engine", kind: 2 }],
+      ]);
+      const { logs, store, embedder, indexer } = await indexed(thoughts);
+
+      thoughts.set("a", { id: "a", name: "Unity", typeId: "z" });
+      thoughts.set("y", { id: "y", name: "Tool", kind: 2 });
+      thoughts.set("z", { id: "z", name: "Engine", kind: 2, children: ["a"] });
+      // The old type's link goes and the new one's comes, each with its own 203.
+      logs.push(
+        linkLog("y", "a", 102, LATER),
+        log("a", 203, LATER),
+        linkLog("z", "a", 101, LATER),
+        log("a", 203, LATER),
+      );
+      const result = await indexer.sync(BRAIN);
+
+      expect(result.indexed).toBe(1);
+      expect(embedder.documents.at(-1)).toBe("Unity\ntype: Engine");
+      store.close();
+    });
+
+    it("attaching a tag re-embeds the thought, which the log names only as a link's end", async () => {
+      const thoughts = new Map<string, FakeThought>([
+        ["a", { id: "a", name: "vector databases" }],
+        ["b", { id: "b", name: "untouched" }],
+        ["g", { id: "g", name: "data", kind: 4 }],
+      ]);
+      const { logs, store, embedder, indexer } = await indexed(thoughts);
+
+      thoughts.set("a", { id: "a", name: "vector databases", tags: ["g"] });
+      thoughts.set("g", { id: "g", name: "data", kind: 4, children: ["a"] });
+      logs.push(linkLog("g", "a", 101, LATER));
+      const result = await indexer.sync(BRAIN);
+
+      // The tag is the link's other end: read again, and skipped by hash.
+      expect(result).toMatchObject({ indexed: 1, skipped: 1 });
+      expect(embedder.documents.at(-1)).toBe("vector databases\ntags: data");
+      store.close();
+    });
+
+    it("detaching a tag re-embeds the thought", async () => {
+      const thoughts = new Map<string, FakeThought>([
+        ["a", { id: "a", name: "vector databases", tags: ["g"] }],
+        ["g", { id: "g", name: "data", kind: 4, children: ["a"] }],
+      ]);
+      const { logs, store, embedder, indexer } = await indexed(thoughts);
+
+      thoughts.set("a", { id: "a", name: "vector databases" });
+      thoughts.set("g", { id: "g", name: "data", kind: 4 });
+      logs.push(linkLog("g", "a", 102, LATER));
+      const result = await indexer.sync(BRAIN);
+
+      expect(result.indexed).toBe(1);
+      expect(embedder.documents.at(-1)).toBe("vector databases");
+      store.close();
+    });
+
+    it("a tag the graph did not show yet is picked up by the next sync", async () => {
+      // A write is in the log at once and in the graph a moment later. On the
+      // live API a sync straight after attaching a tag read the old graph one
+      // time in four, and used to move its watermark past the entry.
+      const thoughts = new Map<string, FakeThought>([
+        ["a", { id: "a", name: "vector databases" }],
+        ["g", { id: "g", name: "data", kind: 4 }],
+      ]);
+      const { logs, store, embedder, indexer } = await indexed(thoughts);
+
+      // Stamped now and without an offset, as the log writes it.
+      logs.push(linkLog("g", "a", 101, new Date().toISOString().slice(0, -1)));
+      const early = await indexer.sync(BRAIN);
+      expect(early).toMatchObject({ indexed: 0, skipped: 2 });
+
+      thoughts.set("a", { id: "a", name: "vector databases", tags: ["g"] });
+      const late = await indexer.sync(BRAIN);
+      expect(late.indexed).toBe(1);
+      expect(embedder.documents.at(-1)).toBe("vector databases\ntags: data");
+      store.close();
+    });
+
+    it("a deletion read again by the next sync is not counted twice", async () => {
+      const thoughts = new Map<string, FakeThought>([
+        ["a", { id: "a", name: "kept" }],
+        ["b", { id: "b", name: "doomed" }],
+      ]);
+      const { logs, store, indexer } = await indexed(thoughts);
+
+      thoughts.delete("b");
+      logs.push(log("b", 102, new Date().toISOString().slice(0, -1)));
+      expect((await indexer.sync(BRAIN)).removed).toBe(1);
+      expect((await indexer.sync(BRAIN)).removed).toBe(0);
+      store.close();
+    });
+
+    it.each(["oldest first", "newest first"])(
+      "a deleted tag leaves the index and the thought it marked is re-embedded (log %s)",
+      async (order) => {
+        const thoughts = new Map<string, FakeThought>([
+          ["a", { id: "a", name: "vector databases", tags: ["g"] }],
+          ["g", { id: "g", name: "data", kind: 4, children: ["a"] }],
+        ]);
+        const { logs, calls, store, embedder, indexer } = await indexed(thoughts);
+        const graphBefore = calls.graph;
+
+        thoughts.delete("g");
+        thoughts.set("a", { id: "a", name: "vector databases" });
+        // The tag's links are logged as deleted, then the tag itself.
+        const entries = [linkLog("g", "a", 102, LATER), log("g", 102, "2099-01-01T00:00:01")];
+        logs.push(...(order === "newest first" ? entries.reverse() : entries));
+        const result = await indexer.sync(BRAIN);
+
+        expect(result).toMatchObject({ indexed: 1, removed: 1 });
+        expect(embedder.documents.at(-1)).toBe("vector databases");
+        expect(store.size()).toBe(1);
+        expect(calls.graphIds.slice(graphBefore)).toEqual(["a"]);
+        store.close();
+      },
+    );
+
+    it("an ordinary link costs a graph request per end and no embedding", async () => {
+      const thoughts = new Map<string, FakeThought>([
+        ["a", { id: "a", name: "parent" }],
+        ["b", { id: "b", name: "child" }],
+        ["c", { id: "c", name: "bystander" }],
+      ]);
+      const { logs, calls, store, embedder, indexer } = await indexed(thoughts);
+      const graphBefore = calls.graph;
+      const embeddedBefore = embedder.calls;
+
+      thoughts.set("a", { id: "a", name: "parent", children: ["b"] });
+      thoughts.set("b", { id: "b", name: "child", parents: ["a"] });
+      logs.push(linkLog("a", "b", 101, LATER));
+      const result = await indexer.sync(BRAIN);
+
+      expect(result).toMatchObject({ indexed: 0, skipped: 2 });
+      expect(calls.graphIds.slice(graphBefore).sort()).toEqual(["a", "b"]);
+      expect(embedder.calls).toBe(embeddedBefore);
+      store.close();
+    });
+
+    it("a link's own rename marks nothing", async () => {
+      const thoughts = new Map<string, FakeThought>([
+        ["a", { id: "a", name: "parent", children: ["b"] }],
+        ["b", { id: "b", name: "child", parents: ["a"] }],
+      ]);
+      const { logs, calls, store, indexer } = await indexed(thoughts);
+      const graphBefore = calls.graph;
+
+      logs.push(linkLog("a", "b", 103, LATER));
+      await indexer.sync(BRAIN);
+
+      expect(calls.graph).toBe(graphBefore);
+      store.close();
+    });
+
+    it.each([
+      { what: "tag", kind: 4, carry: { tags: ["x"] }, line: "tags: datasets" },
+      { what: "type", kind: 2, carry: { typeId: "x" }, line: "type: datasets" },
+    ])("renaming a $what re-embeds every thought that carries it", async ({ kind, carry, line }) => {
+      const thoughts = new Map<string, FakeThought>([
+        ["x", { id: "x", name: "data", kind, children: ["a", "b"] }],
+        ["a", { id: "a", name: "vector databases", ...carry }],
+        ["b", { id: "b", name: "warehouses", ...carry }],
+        ["c", { id: "c", name: "bystander" }],
+      ]);
+      const { logs, calls, store, embedder, indexer } = await indexed(thoughts);
+      const graphBefore = calls.graph;
+      const embeddedBefore = embedder.documents.length;
+
+      thoughts.set("x", { id: "x", name: "datasets", kind, children: ["a", "b"] });
+      // The only entry: the log does not name the thoughts that carry it.
+      logs.push(log("x", 103, LATER));
+      const result = await indexer.sync(BRAIN);
+
+      expect(result.indexed).toBe(3);
+      expect(embedder.documents.slice(embeddedBefore).sort()).toEqual([
+        "datasets",
+        `vector databases\n${line}`,
+        `warehouses\n${line}`,
+      ]);
+      // One request each, the renamed one included: its graph is reused.
+      expect(calls.graphIds.slice(graphBefore).sort()).toEqual(["a", "b", "x"]);
+      store.close();
+    });
+
+    it("renaming an ordinary thought leaves its children alone", async () => {
+      const thoughts = new Map<string, FakeThought>([
+        ["a", { id: "a", name: "parent", children: ["b"] }],
+        ["b", { id: "b", name: "child", parents: ["a"] }],
+      ]);
+      const { logs, calls, store, indexer } = await indexed(thoughts);
+      const graphBefore = calls.graph;
+
+      thoughts.set("a", { id: "a", name: "renamed parent", children: ["b"] });
+      logs.push(log("a", 103, LATER));
+      const result = await indexer.sync(BRAIN);
+
+      expect(result.indexed).toBe(1);
+      expect(calls.graphIds.slice(graphBefore)).toEqual(["a"]);
+      store.close();
+    });
   });
 });
 

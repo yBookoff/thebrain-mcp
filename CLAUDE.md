@@ -58,6 +58,11 @@ silent wrong behaviour rather than a loud failure:
 - **The log keeps only the newest `maxLogs` entries, even with `startTime`.**
   Read it through `brains.allModifications()` / `modificationPages()`. Log
   timestamps carry microseconds; never round-trip one through `Date`.
+- **The log is ordered and filtered by `modificationDateTime`, not
+  `creationDateTime`.** They are the same string 49 times in 50, then a
+  microsecond apart, or milliseconds for a changed note. A bound taken from
+  `creationDateTime` leaves its own entry out. Take an entry's time from
+  `logTime()`.
 - **A thought's type also appears in `parents`.** Filter it in traversal.
 - **Aliases only replace as a whole list, and a read straight after the write
   usually returns the old one.** Add and remove through
@@ -65,9 +70,25 @@ silent wrong behaviour rather than a loud failure:
   read-modify-writes in a row left only the second alias. Saving a brain's first
   alias raises the TheBrain version that brain requires, so `ALIAS_COST` stays
   on every tool argument that can write one.
+- **`null` clears nothing through `replace`.** On a label it is a 403, on a
+  colour a 400, and on `typeId` a 200 that leaves the type in place. Clear
+  through `thoughts.update()`: it sends `remove`, and for a type deletes the
+  link from the type and waits for the thought to read back without one.
 - **Markdown round-trip eats the closing ` ``` `.** Warn; suggest indented code.
+- **`by-location` compares the host by case, and a URL is stored as given.**
+  `Example.com/p` does not find `example.com/p`. Attach through
+  `attachments.attachUrl()`, which also checks the thought's own list with the
+  host case set aside. That list is ~0.1 s behind a write; `by-location` is not.
 - **Tags attach via `POST /api/links` with `relation: 2` against a `kind=4`
   thought.** The server rewrites it to `relation=1, meaning=5`.
+- **In the log a tag is only a link.** Attaching one logs nothing against the
+  thought: the link's `101` has the tag in `extraAId` and the thought in
+  `extraBId`, the same as an ordinary parent link's. Renaming a tag or a type
+  logs its own `103` and nothing about the thoughts that carry it. Sync reads
+  both ends of a link event and the `children` of a renamed tag or type.
+- **A write is in the log before it is in `graph`**, a tag by 0.1–0.5 s. Sync
+  leaves its watermark `SYNC_OVERLAP_MS` behind so the next run reads that tail
+  again; a watermark at the run's own start lost one tag in four.
 - **Search is prefix-based.** This is why `src/semantic/` exists.
 
 ## Semantic layer

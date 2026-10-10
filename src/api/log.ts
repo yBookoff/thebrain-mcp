@@ -1,7 +1,7 @@
 /**
  * Modification-log timestamps and entry identity.
  *
- * Measured on a live TheBrain 15: `creationDateTime` is UTC with no offset and
+ * Measured on a live TheBrain 15: a log timestamp is UTC with no offset and
  * up to microsecond precision, trailing zeros trimmed —
  * `2026-09-30T13:48:59.61898`. `Date` keeps milliseconds only, so parsing one
  * merges entries that are microseconds apart. Order and page boundaries
@@ -9,6 +9,21 @@
  */
 
 import type { ModificationLogDto } from "./types.js";
+
+/**
+ * When a log entry happened, as the API reckons it.
+ *
+ * An entry carries two timestamps. The API orders the log by
+ * `modificationDateTime` and compares `startTime` and `endTime` against it.
+ * `creationDateTime` is never later and usually equal, but about one entry in
+ * fifty was created a microsecond earlier, and a changed note up to a few
+ * milliseconds earlier. A range ending at such an entry's creation leaves the
+ * entry out, so everything that orders entries or sends a time back as a bound
+ * reads it here.
+ */
+export function logTime(log: ModificationLogDto): string {
+  return log.modificationDateTime;
+}
 
 /** Pads the fraction so that plain string order is time order. */
 function sortable(time: string): string {

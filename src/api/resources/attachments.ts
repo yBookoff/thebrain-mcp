@@ -29,11 +29,13 @@ export class AttachmentsResource {
   }
 
   /**
-   * Finds attachments by location.
+   * Finds attachments by location, across the whole brain.
    *
-   * URL matching ignores the http/https scheme and a trailing slash; the rest
-   * must match exactly, case included. Ready-made deduplication for a web
-   * clipper.
+   * URL matching ignores the http/https scheme and trailing slashes; the rest
+   * must match exactly, case included, and that takes in the host: measured,
+   * `Example.com/p` does not find `example.com/p`. A location is stored as it
+   * was given, so neither spelling leads to the other. A new attachment is
+   * found at once.
    */
   async byLocation(
     brainId: string,
@@ -51,7 +53,15 @@ export class AttachmentsResource {
    * Attaches a URL. An empty name means "take it from the page title".
    *
    * With `deduplicate` it first checks whether the URL is already attached and
-   * returns the existing attachment instead of creating a duplicate.
+   * returns the existing attachment instead of creating a duplicate. The API
+   * itself attaches a second copy without complaint.
+   *
+   * The check reads twice, because neither read is enough alone. `byLocation`
+   * finds an attachment the moment it is created, but takes `Example.com` and
+   * `example.com` for two addresses. The thought's own list can be compared
+   * with the host case set aside (`urlKey`), but shows a new attachment only
+   * about 0.1 s later. Lower-casing the host before the lookup would not do
+   * instead: the copy already stored may be the one in capitals.
    */
   async attachUrl(
     brainId: string,
@@ -63,9 +73,16 @@ export class AttachmentsResource {
     assertUuid(thoughtId, "thoughtId");
 
     if (options.deduplicate !== false) {
-      const found = await this.byLocation(brainId, url);
-      const onThisThought = found.find((a) => a.sourceId === thoughtId);
-      if (onThisThought) return { created: false, existing: onThisThought };
+      const sameSpelling = await this.byLocation(brainId, url);
+      const existing =
+        sameSpelling.find((a) => a.sourceId === thoughtId) ??
+        (await this.ofThought(brainId, thoughtId)).find(
+          (a) =>
+            a.type === AttachmentType.ExternalUrl &&
+            a.location !== null &&
+            urlKey(a.location) === urlKey(url),
+        );
+      if (existing) return { created: false, existing };
     }
 
     await this.client.post(`/api/attachments/${brainId}/${thoughtId}/url`, {
@@ -79,4 +96,26 @@ export class AttachmentsResource {
     assertUuid(attachmentId, "attachmentId");
     await this.client.delete(`/api/attachments/${brainId}/${attachmentId}`);
   }
+}
+
+/**
+ * What every spelling of one web address has in common: two URLs with the same
+ * key are the same address.
+ *
+ * It is the form `by-location` compares, without the http/https scheme and the
+ * trailing slashes, and with the host in lower case as well. A host has no
+ * letter case (RFC 3986 §3.2.2); the path, the query and the fragment do, and
+ * keep it. Anything that is not http(s) comes back untouched: in
+ * `x-devonthink-item://4F2A` an identifier stands where the host would be.
+ */
+export function urlKey(location: string): string {
+  const web = /^https?:\/\/([^/?#]*)(.*)$/i.exec(location);
+  if (web === null) return location;
+  const [, authority = "", rest = ""] = web;
+  // In `user:Pass@Host:8080` only the host is case-insensitive.
+  const host = authority.lastIndexOf("@") + 1;
+  return (authority.slice(0, host) + authority.slice(host).toLowerCase() + rest).replace(
+    /\/+$/,
+    "",
+  );
 }

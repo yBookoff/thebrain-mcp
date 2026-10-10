@@ -28,8 +28,8 @@ export class TheBrainApi {
       options instanceof TheBrainClient ? options : new TheBrainClient(options);
     this.app = new AppResource(this.client);
     this.brains = new BrainsResource(this.client);
-    this.thoughts = new ThoughtsResource(this.client);
     this.links = new LinksResource(this.client);
+    this.thoughts = new ThoughtsResource(this.client, this.links);
     this.notes = new NotesResource(this.client);
     this.attachments = new AttachmentsResource(this.client);
     this.search = new SearchResource(this.client);
@@ -38,7 +38,7 @@ export class TheBrainApi {
 
 export { TheBrainClient, assertUuid, isUuid, emptyOn400 } from "./client.js";
 export { TheBrainError, type ApiErrorKind } from "./errors.js";
-export { compareLogTime, logEntryKey } from "./log.js";
+export { compareLogTime, logEntryKey, logTime } from "./log.js";
 export { LOG_PAGE_SIZE } from "./resources/brains.js";
 export * from "./types.js";
 export {
@@ -60,4 +60,5 @@ export {
   type UpdateLinkInput,
 } from "./resources/links.js";
 export { warnIfFencedCode } from "./resources/notes.js";
+export { urlKey } from "./resources/attachments.js";
 export type { SearchHit } from "./resources/search.js";

@@ -17,6 +17,7 @@ import { ALIAS_COST, registerWriteTools } from "../src/server/tools/write.js";
 const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
 const THOUGHT = "bbbbbbbb-0000-4000-8000-000000000002";
 const PARENT = "cccccccc-0000-4000-8000-000000000003";
+const LINK = "dddddddd-0000-4000-8000-000000000004";
 
 type Route = [needle: string, respond: (url: URL, body: unknown) => unknown];
 
@@ -199,6 +200,72 @@ describe("brain_update_thought", () => {
     });
     expect(result.isError).toBe(true);
     expect(calls).toEqual([]);
+  });
+
+  /** A thought of type PARENT; deleting the link between them takes the type away. */
+  const typedRoutes = (link: { meaning: number }): Route[] => {
+    let typeId: string | null = PARENT;
+    return [
+      ["GET /api/thoughts/", () => thought("RAG", { typeId })],
+      ["PATCH /api/thoughts/", () => 200],
+      ["GET /api/links/", () => ({ id: LINK, thoughtIdA: PARENT, thoughtIdB: THOUGHT, ...link })],
+      ["DELETE /api/links/", () => ((typeId = null), 200)],
+    ];
+  };
+
+  it("null clears a caption and a colour with remove, and a type by deleting its link", async () => {
+    const { call, calls, sent } = await connect(typedRoutes({ meaning: 2 }));
+    const result = await call("brain_update_thought", {
+      brainId: BRAIN,
+      thoughtId: THOUGHT,
+      label: null,
+      backgroundColor: null,
+      typeId: null,
+    });
+
+    expect(result.isError).toBe(false);
+    expect(sent("PATCH")).toEqual([
+      [
+        { op: "remove", path: "/label" },
+        { op: "remove", path: "/backgroundColor" },
+      ],
+    ]);
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.path)).toEqual([
+      `/api/links/${BRAIN}/${LINK}`,
+    ]);
+    expect(result.text).toContain("typeId = null");
+  });
+
+  it("reports an error, not success, when the type is still there afterwards", async () => {
+    // What `replace /typeId null` used to do: the API said 200, the type
+    // stayed, and the tool listed `typeId = null` under Done.
+    vi.useFakeTimers();
+    try {
+      const { call, calls } = await connect(typedRoutes({ meaning: 1 }));
+      const pending = call("brain_update_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        typeId: null,
+      });
+      await vi.advanceTimersByTimeAsync(5000);
+      const result = await pending;
+
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("the type is still in place");
+      expect(calls.filter((c) => c.method === "DELETE")).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says that null clears on every argument where it does", async () => {
+    const { client } = await connect([]);
+    const { tools } = await client.listTools();
+    const properties = tools.find((t) => t.name === "brain_update_thought")!.inputSchema
+      .properties as Record<string, { description?: string }>;
+    for (const name of ["label", "typeId", "foregroundColor", "backgroundColor"]) {
+      expect(properties[name]?.description).toMatch(/null (clears|removes)/);
+    }
   });
 });
 

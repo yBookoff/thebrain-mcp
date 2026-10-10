@@ -10,7 +10,7 @@ import { z } from "zod";
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { compareLogTime } from "../../api/log.js";
+import { compareLogTime, logTime } from "../../api/log.js";
 import { ThoughtKind, aliasesOf, type ModificationLogDto } from "../../api/types.js";
 import { describeChange, isSettingNoise, subjectIds } from "../../operations/changes.js";
 import { traverse } from "../../operations/traverse.js";
@@ -315,17 +315,18 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       const settings: string[] = [];
       for await (const page of ctx.api.brains.modificationPages(bid, { since: from })) {
         for (const l of page) {
-          if (isSettingNoise(l)) settings.push(l.creationDateTime);
+          if (isSettingNoise(l)) settings.push(logTime(l));
           else events.push(l);
         }
         if (events.length > want) break;
       }
       const newestFirst = (a: ModificationLogDto, b: ModificationLogDto): number =>
-        compareLogTime(b.creationDateTime, a.creationDateTime);
+        compareLogTime(logTime(b), logTime(a));
       const logs = events.sort(newestFirst).slice(0, want);
       const cut = events.length > want;
       // Settings count only within the period the rows cover.
-      const oldestShown = logs.at(-1)?.creationDateTime;
+      const lastShown = logs.at(-1);
+      const oldestShown = lastShown === undefined ? undefined : logTime(lastShown);
       const hidden =
         cut && oldestShown !== undefined
           ? settings.filter((t) => compareLogTime(t, oldestShown) >= 0).length
@@ -341,7 +342,7 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       const thoughtNames = new Map(resolved);
 
       const rows = logs.map((l) => [
-        l.creationDateTime.slice(0, 16).replace("T", " "),
+        logTime(l).slice(0, 16).replace("T", " "),
         describeChange(l),
         subjectIds(l)
           .map((id) => thoughtNames.get(id) ?? "(deleted or not shown)")

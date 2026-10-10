@@ -18,6 +18,7 @@ import {
   EntityType,
   ModType,
   REEMBED_MOD_TYPES,
+  TAG_LINK_MOD_TYPES,
   ThoughtKind,
   aliasesOf,
   type ModificationLogDto,
@@ -65,8 +66,24 @@ export interface IndexerOptions {
 const DEFAULT_CONCURRENCY = 12;
 const DEFAULT_EMBED_BATCH = 64;
 
+/**
+ * How far before its own start a run leaves the watermark.
+ *
+ * A write is in the log at once and in `graph` a moment later: a tag after
+ * 0.1–0.5 s, about a second when several are attached in a row. A sync that
+ * ran in between read the entry, fetched the old graph, skipped it by hash and
+ * moved past the entry for good. Measured on a live TheBrain 15: of four tags
+ * each followed at once by a sync, one was lost that way. So the next run reads
+ * the last seconds again, ten times the longest delay measured, and the hash
+ * drops what it has already seen.
+ */
+const SYNC_OVERLAP_MS = 10_000;
+
 /** Thought kinds we skip: system and internal ones. */
 const SKIP_KINDS: ReadonlySet<number> = new Set([ThoughtKind.System]);
+
+/** Thought kinds whose name is part of other thoughts' documents. */
+const CARRIED_KINDS: ReadonlySet<number> = new Set([ThoughtKind.Tag, ThoughtKind.Type]);
 
 export class SemanticIndexer {
   readonly #api: TheBrainApi;
@@ -115,7 +132,7 @@ export class SemanticIndexer {
     onProgress: (p: IndexProgress) => void = (): void => undefined,
   ): Promise<IndexResult> {
     const startedAt = Date.now();
-    const watermark = new Date().toISOString();
+    const watermark = watermarkAt(startedAt);
 
     if (
       !this.#store.isCompatible(
@@ -163,10 +180,11 @@ export class SemanticIndexer {
   /**
    * Incremental sync from the log.
    *
-   * The watermark is taken at the start — a small overlap is harmless because
-   * unchanged entries are filtered out by document hash. Every change since the
-   * watermark is read, however many: the API alone would keep only the newest
-   * page and drop the oldest changes while the watermark moved past them.
+   * The watermark is taken a little before the start (`SYNC_OVERLAP_MS`), so
+   * the tail of this run is read again by the next one; unchanged entries are
+   * filtered out by document hash. Every change since the watermark is read,
+   * however many: the API alone would keep only the newest page and drop the
+   * oldest changes while the watermark moved past them.
    */
   async sync(
     brainId: string,
@@ -186,7 +204,7 @@ export class SemanticIndexer {
     }
     if (meta.syncedThrough === null) return this.rebuild(brainId, onProgress);
 
-    const watermark = new Date().toISOString();
+    const watermark = watermarkAt(startedAt);
     onProgress({ phase: "enumerate", done: 0, total: 0, message: "reading changes" });
     const logs = await this.#api.brains.allModifications(brainId, {
       since: meta.syncedThrough,
@@ -194,7 +212,12 @@ export class SemanticIndexer {
 
     const touched = new Set<string>();
     const deleted = new Set<string>();
+    const renamed = new Set<string>();
     for (const log of logs) {
+      // A tag comes and goes as a link, with no event against the thought.
+      for (const end of linkEndIds(log)) {
+        if (!deleted.has(end)) touched.add(end);
+      }
       const thoughtId = logThoughtId(log);
       if (thoughtId === null) continue;
       if (log.modType === ModType.Deleted && log.sourceType === EntityType.Thought) {
@@ -202,11 +225,30 @@ export class SemanticIndexer {
         touched.delete(thoughtId);
       } else if (log.modType === ModType.Created || REEMBED_MOD_TYPES.has(log.modType)) {
         if (!deleted.has(thoughtId)) touched.add(thoughtId);
+        if (log.modType === ModType.NameChanged) renamed.add(thoughtId);
       }
     }
 
-    this.#store.remove([...deleted]);
-    const result = await this.#indexThoughts(brainId, [...touched], onProgress);
+    // A renamed tag or type sits in the document of every thought that carries
+    // it, and the log names only the tag or type itself. Its graph lists the
+    // carriers as children.
+    const graphs = await this.#graphs(
+      brainId,
+      [...renamed].filter((id) => touched.has(id)),
+    );
+    for (const graph of graphs.values()) {
+      if (!CARRIED_KINDS.has(graph.thought.kind)) continue;
+      for (const carrier of graph.children) {
+        if (!deleted.has(carrier.id)) touched.add(carrier.id);
+      }
+    }
+
+    // Only what was indexed counts as removed: the overlap reads a deletion
+    // twice, and a thought created and deleted between two runs never got in.
+    const known = this.#store.contentHashes();
+    const gone = [...deleted].filter((id) => known.has(id));
+    this.#store.remove(gone);
+    const result = await this.#indexThoughts(brainId, [...touched], onProgress, graphs);
     this.#store.setSyncedThrough(watermark);
 
     onProgress({
@@ -215,7 +257,19 @@ export class SemanticIndexer {
       total: touched.size,
       message: "synced",
     });
-    return { ...result, removed: deleted.size, elapsedMs: Date.now() - startedAt };
+    return { ...result, removed: gone.length, elapsedMs: Date.now() - startedAt };
+  }
+
+  /** The graphs of the given thoughts, minus any that could not be read. */
+  async #graphs(brainId: string, ids: readonly string[]): Promise<Map<string, CleanGraph>> {
+    const fetched = await mapWithConcurrency(ids, this.#concurrency, (id) =>
+      this.#api.thoughts.getGraph(brainId, id).catch(() => null),
+    );
+    const graphs = new Map<string, CleanGraph>();
+    fetched.forEach((graph, i) => {
+      if (graph !== null) graphs.set(ids[i]!, graph);
+    });
+    return graphs;
   }
 
   /**
@@ -358,6 +412,11 @@ export class SemanticIndexer {
   }
 }
 
+/** Where the next sync starts reading for a run that began at `startedAt`. */
+function watermarkAt(startedAt: number): string {
+  return new Date(startedAt - SYNC_OVERLAP_MS).toISOString();
+}
+
 /**
  * The thought a log entry is about, or null if it is about something else.
  *
@@ -371,12 +430,38 @@ export class SemanticIndexer {
  *   { modType: 801, sourceType: 4, sourceId: <attachment>,
  *     extraAId: <thought>, extraAType: 2 }
  *   { modType: 211, sourceType: 2, sourceId: <thought>, extraAType: -1 }
- * So an alias change is an ordinary thought event, unlike a note.
+ * So an alias change is an ordinary thought event, unlike a note. A label
+ * (`202`) and a type (`203`, set or lost) are ordinary thought events too.
  */
 export function logThoughtId(log: ModificationLogDto): string | null {
   if (log.sourceType === EntityType.Thought) return log.sourceId;
   if (isNoteMod(log.modType) && log.extraAType === EntityType.Thought) return log.extraAId;
   return null;
+}
+
+/**
+ * Both ends of a link event that may have given a thought a tag or taken one
+ * away; empty for every other entry.
+ *
+ * A tag is a link, so attaching one logs nothing against the thought. Measured
+ * against the live API:
+ *   { modType: 101, sourceType: 3, sourceId: <link>,
+ *     extraAId: <tag>, extraAType: 2, extraBId: <thought>, extraBType: 2 }
+ * and `102` with the same ends when it is detached, or when the tag is
+ * deleted. An ordinary parent link reads exactly the same, parent in `extraA`
+ * and child in `extraB`, values null in both: the entry does not say which of
+ * the two it is. So both ends of every such link are returned, and the
+ * document hash drops the ones that did not change, at one graph request each.
+ *
+ * A moved link (`402`) names its new ends only. The thought a tag link was
+ * moved away from is not in the entry, and keeps its vector until a rebuild.
+ */
+export function linkEndIds(log: ModificationLogDto): string[] {
+  if (log.sourceType !== EntityType.Link || !TAG_LINK_MOD_TYPES.has(log.modType)) return [];
+  return [
+    ...(log.extraAType === EntityType.Thought ? [log.extraAId] : []),
+    ...(log.extraBType === EntityType.Thought ? [log.extraBId] : []),
+  ];
 }
 
 /**

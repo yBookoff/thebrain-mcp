@@ -5,11 +5,18 @@ import {
   LOG_PAGE_SIZE,
   compareLogTime,
   logEntryKey,
+  logTime,
   normalizeAliases,
   replayThoughtIds,
+  urlKey,
   warnIfFencedCode,
 } from "../src/api/index.js";
-import { aliasesOf, type ModificationLogDto, type ThoughtDto } from "../src/api/types.js";
+import {
+  aliasesOf,
+  type AttachmentDto,
+  type ModificationLogDto,
+  type ThoughtDto,
+} from "../src/api/types.js";
 
 const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
 const THOUGHT = "bbbbbbbb-0000-4000-8000-000000000002";
@@ -142,16 +149,155 @@ describe("updating a thought: flat fields become JSON Patch", () => {
     ]);
   });
 
-  it("null passes through — that is how a field is cleared", async () => {
+  it("null clears a label or a colour with remove", async () => {
+    // Measured: `replace` with null is a 403 for a label and a 400 for a colour.
     const { api, calls } = apiWith([["PATCH /api/thoughts", () => 200]]);
-    await api.thoughts.update(BRAIN, THOUGHT, { label: null });
-    expect(calls[0]!.body).toEqual([{ op: "replace", path: "/label", value: null }]);
+    await api.thoughts.update(BRAIN, THOUGHT, {
+      name: "kept",
+      label: null,
+      foregroundColor: null,
+      backgroundColor: null,
+    });
+    expect(calls[0]!.body).toEqual([
+      { op: "replace", path: "/name", value: "kept" },
+      { op: "remove", path: "/label" },
+      { op: "remove", path: "/foregroundColor" },
+      { op: "remove", path: "/backgroundColor" },
+    ]);
   });
 
   it("an empty change set issues no request", async () => {
     const { api, fetchImpl } = apiWith([["PATCH /api/thoughts", () => 200]]);
     await api.thoughts.update(BRAIN, THOUGHT, {});
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("a typeId that is not a UUID is refused before any request, the empty string too", async () => {
+    // The API answers 200 to an empty typeId and changes nothing.
+    const { api, fetchImpl } = apiWith([["PATCH /api/thoughts", () => 200]]);
+    for (const typeId of ["", "Constraint"]) {
+      await expect(api.thoughts.update(BRAIN, THOUGHT, { typeId })).rejects.toMatchObject({
+        kind: "invalid_uuid",
+      });
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("removing a type", () => {
+  const LINK = "eeeeeeee-0000-4000-8000-000000000005";
+
+  /**
+   * A thought of type TYPE. Deleting the link between them takes the type
+   * away, but as measured on the live API the reads that follow still return
+   * it for a while: `staleReads` of them here.
+   */
+  const typed = (options: { staleReads?: number; meaning?: number; linked?: boolean } = {}) => {
+    const { staleReads = 0, meaning = 2, linked = true } = options;
+    let typeId: string | null = TYPE;
+    let stale = 0;
+    return apiWith([
+      [
+        "/api/thoughts/",
+        () => {
+          if (typeId !== null || stale === 0) return thought(THOUGHT, "typed", { typeId });
+          stale -= 1;
+          return thought(THOUGHT, "typed", { typeId: TYPE });
+        },
+      ],
+      ["PATCH /api/thoughts/", () => 200],
+      [
+        "/api/links/",
+        () =>
+          linked && typeId !== null
+            ? { id: LINK, thoughtIdA: TYPE, thoughtIdB: THOUGHT, relation: 1, meaning }
+            : 404,
+      ],
+      [
+        "DELETE /api/links/",
+        () => {
+          typeId = null;
+          stale = staleReads;
+          return 200;
+        },
+      ],
+    ]);
+  };
+  const sent = (calls: Array<{ method: string; url: URL }>, method: string): string[] =>
+    calls.filter((c) => c.method === method).map((c) => c.url.pathname);
+
+  it("deletes the link from the type, since no patch clears typeId", async () => {
+    // Measured: `replace /typeId` with null answers 200 and changes nothing,
+    // and `remove` is a 403.
+    const { api, calls } = typed();
+    await api.thoughts.update(BRAIN, THOUGHT, { typeId: null });
+    expect(sent(calls, "PATCH")).toEqual([]);
+    expect(sent(calls, "GET")).toContain(`/api/links/${BRAIN}/${TYPE}/${THOUGHT}`);
+    expect(sent(calls, "DELETE")).toEqual([`/api/links/${BRAIN}/${LINK}`]);
+  });
+
+  it("goes after the other fields, which still travel as one patch", async () => {
+    const { api, calls } = typed();
+    await api.thoughts.update(BRAIN, THOUGHT, { typeId: null, label: "pattern" });
+    const writes = calls.filter((c) => c.method !== "GET");
+    expect(writes.map((c) => c.method)).toEqual(["PATCH", "DELETE"]);
+    expect(writes[0]!.body).toEqual([{ op: "replace", path: "/label", value: "pattern" }]);
+  });
+
+  it("returns only once the thought reads back without its type", async () => {
+    const { api, calls } = typed({ staleReads: 3 });
+    await expect(api.thoughts.removeType(BRAIN, THOUGHT)).resolves.toBe(true);
+    // One read to learn the type, three stale ones, and the one that agrees.
+    expect(sent(calls, "GET").filter((path) => path.includes("/api/thoughts/"))).toHaveLength(5);
+  });
+
+  it("a thought with no type is left alone", async () => {
+    const { api, calls } = apiWith([["/api/thoughts/", () => thought(THOUGHT, "plain")]]);
+    await expect(api.thoughts.removeType(BRAIN, THOUGHT)).resolves.toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("throws when the type is still there after its link was deleted", async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = typed({ staleReads: Infinity });
+      const pending = api.thoughts.update(BRAIN, THOUGHT, { typeId: null });
+      const outcome = expect(pending).rejects.toMatchObject({
+        kind: "server",
+        message: expect.stringMatching(/still reads back with its type/),
+      });
+      await vi.advanceTimersByTimeAsync(5000);
+      await outcome;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("deletes nothing, and throws, when the link to the type is not the type link", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const options of [{ meaning: 1 }, { linked: false }]) {
+        const { api, calls } = typed(options);
+        const pending = api.thoughts.removeType(BRAIN, THOUGHT);
+        const outcome = expect(pending).rejects.toMatchObject({
+          kind: "server",
+          message: expect.stringMatching(/still in place/),
+        });
+        await vi.advanceTimersByTimeAsync(5000);
+        await outcome;
+        expect(sent(calls, "DELETE")).toEqual([]);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a removal that follows another one finds nothing left to remove", async () => {
+    // The first read may still show the type an earlier removal took away.
+    const { api, calls } = typed({ staleReads: 1 });
+    await api.links.detachType(BRAIN, THOUGHT, TYPE);
+    await expect(api.thoughts.removeType(BRAIN, THOUGHT)).resolves.toBe(false);
+    expect(sent(calls, "DELETE")).toHaveLength(1);
   });
 });
 
@@ -635,28 +781,86 @@ describe("reading the whole log", () => {
     const fraction = String(us).padStart(6, "0").replace(/0+$/, "");
     return `2026-09-30T13:00:00${fraction === "" ? "" : `.${fraction}`}`;
   };
-  // Ties of two, three and four, entries a microsecond apart, and one entry
-  // with no fraction at all.
-  const MICROS = [
-    0, 1, 2, 2, 100, 100, 100, 100, 101, 1000, 1001, 1001, 5000, 5001, 5002, 5003,
-    90000, 90000, 90001, 500000, 500001, 600000, 600000, 600000, 999999,
+  /** An entry the log files under `filed`, which is not always when it was created. */
+  const entry = (id: string, created: number, filed = created): ModificationLogDto => ({
+    ...log(id, 101, at(created)),
+    modificationDateTime: at(filed),
+  });
+  // [created, filed], as measured: most entries are filed at the microsecond
+  // they were created, about one in fifty a microsecond later, a changed note
+  // up to milliseconds later. Ties of two, three and four, entries a
+  // microsecond apart, one with no fraction at all, and late entries on either
+  // side of a tie and in the middle of a run.
+  const STAMPS: Array<[number, number]> = [
+    [0, 0], [1, 1], [2, 2], [2, 2],
+    [99, 100], [100, 100], [100, 100], [100, 100], [100, 101], [101, 101],
+    [1000, 1000], [1001, 1001], [1001, 1001],
+    [5000, 5000], [5001, 5001], [1200, 5002], [5002, 5002], [5003, 5003],
+    [90000, 90000], [90000, 90000], [90000, 90001], [90001, 90001],
+    [500000, 500000], [500001, 500001], [500000, 500001],
+    [600000, 600000], [600000, 600000], [600000, 600000], [999999, 999999],
   ];
-  const entries = MICROS.map((us, i) => log(`t-${i}`, 101, at(us)));
-  const newestFirst = [...entries].reverse();
+  const entries = STAMPS.map(([created, filed], i) => entry(`t-${i}`, created, filed));
 
   /**
-   * Behaves as measured on the live API: both bounds inclusive to the
-   * microsecond, and truncation keeps the newest, newest first.
+   * Behaves as measured on the live API: the log is ordered by
+   * `modificationDateTime`, both bounds compare against it and are inclusive
+   * to the microsecond, and truncation keeps the newest, newest first.
    */
-  const logRoute = (url: URL): ModificationLogDto[] => {
-    const maxLogs = Number(url.searchParams.get("maxLogs"));
-    const start = url.searchParams.get("startTime");
-    const end = url.searchParams.get("endTime");
-    return newestFirst
-      .filter((l) => start === null || compareLogTime(l.creationDateTime, start) >= 0)
-      .filter((l) => end === null || compareLogTime(l.creationDateTime, end) <= 0)
-      .slice(0, maxLogs);
+  const serve = (stored: ModificationLogDto[]) => {
+    const newestFirst = [...stored]
+      .reverse()
+      .sort((a, b) => compareLogTime(b.modificationDateTime, a.modificationDateTime));
+    const route = (url: URL): ModificationLogDto[] => {
+      const maxLogs = Number(url.searchParams.get("maxLogs"));
+      const start = url.searchParams.get("startTime");
+      const end = url.searchParams.get("endTime");
+      return newestFirst
+        .filter((l) => start === null || compareLogTime(l.modificationDateTime, start) >= 0)
+        .filter((l) => end === null || compareLogTime(l.modificationDateTime, end) <= 0)
+        .slice(0, maxLogs);
+    };
+    return { newestFirst, route };
   };
+  const { newestFirst, route: logRoute } = serve(entries);
+
+  it("pages on modificationDateTime, the field the API orders and filters by", async () => {
+    // `late` was created at .000099 and filed at .0001, beside `tied`. A page
+    // that ends on `late` must ask for everything up to .0001: up to .000099,
+    // its creation, the API leaves `tied` out and nothing ever returns it.
+    const stored = [entry("older", 50), entry("tied", 100), entry("late", 99, 100), entry("newer", 200)];
+    const { newestFirst: expected, route } = serve(stored);
+    expect(expected.map((l) => l.sourceId)).toEqual(["newer", "late", "tied", "older"]);
+
+    const { api, calls } = apiWith([["/modifications", route]]);
+    const all = await api.brains.allModifications(BRAIN, { pageSize: 2 });
+    expect(all.map((l) => l.sourceId)).toEqual(["newer", "late", "tied", "older"]);
+    expect(calls.map((c) => c.url.searchParams.get("endTime"))).not.toContain(at(99));
+  });
+
+  it("keeps the entries filed while a slower one was being written", async () => {
+    // A changed note can be filed milliseconds after its creation. Paging on
+    // creation from a page that ends on it would jump back those milliseconds
+    // and drop everything filed in between.
+    const stored = [
+      entry("before", 1000),
+      entry("during-1", 3000),
+      entry("during-2", 4000),
+      entry("note", 1200, 5000),
+      entry("after", 6000),
+    ];
+    const { api } = apiWith([["/modifications", serve(stored).route]]);
+    for (const pageSize of [1, 2, 3]) {
+      const all = await api.brains.allModifications(BRAIN, { pageSize });
+      expect(all.map((l) => l.sourceId), `pageSize ${pageSize}`).toEqual([
+        "after",
+        "note",
+        "during-2",
+        "during-1",
+        "before",
+      ]);
+    }
+  });
 
   it("returns every entry exactly once, whatever the page size", async () => {
     for (let pageSize = 1; pageSize <= entries.length + 1; pageSize++) {
@@ -675,7 +879,7 @@ describe("reading the whole log", () => {
     expect(bounds[0]).toBeNull();
     expect(bounds.length).toBeGreaterThan(2);
     for (const bound of bounds.slice(1)) {
-      expect(entries.map((l) => l.creationDateTime)).toContain(bound);
+      expect(entries.map(logTime)).toContain(bound);
     }
   });
 
@@ -695,7 +899,7 @@ describe("reading the whole log", () => {
     const since = at(1001);
     const all = await api.brains.allModifications(BRAIN, { since, pageSize: 3 });
     expect(all.map(logEntryKey)).toEqual(
-      newestFirst.filter((l) => compareLogTime(l.creationDateTime, since) >= 0).map(logEntryKey),
+      newestFirst.filter((l) => compareLogTime(logTime(l), since) >= 0).map(logEntryKey),
     );
     expect(calls.length).toBeGreaterThan(1);
     for (const c of calls) expect(c.url.searchParams.get("startTime")).toBe(since);
@@ -732,29 +936,26 @@ describe("reading the whole log", () => {
 });
 
 describe("attachments", () => {
+  const attached = (location: string, extra: Partial<AttachmentDto> = {}): AttachmentDto => ({
+    id: "att-1",
+    brainId: BRAIN,
+    sourceId: THOUGHT,
+    sourceType: 2,
+    creationDateTime: "",
+    modificationDateTime: "",
+    name: "already there",
+    position: 0,
+    fileModificationDateTime: null,
+    type: 3,
+    isNotes: false,
+    dataLength: null,
+    location,
+    ...extra,
+  });
+  const ON_THOUGHT = `${THOUGHT}/attachments`;
+
   it("deduplication avoids a second copy of the same URL", async () => {
-    const { api, calls } = apiWith([
-      [
-        "/by-location",
-        () => [
-          {
-            id: "att-1",
-            brainId: BRAIN,
-            sourceId: THOUGHT,
-            sourceType: 2,
-            creationDateTime: "",
-            modificationDateTime: "",
-            name: "already there",
-            position: 0,
-            fileModificationDateTime: null,
-            type: 3,
-            isNotes: false,
-            dataLength: null,
-            location: "https://example.com/",
-          },
-        ],
-      ],
-    ]);
+    const { api, calls } = apiWith([["/by-location", () => [attached("https://example.com/")]]]);
     const res = await api.attachments.attachUrl(BRAIN, THOUGHT, "https://example.com/");
     expect(res.created).toBe(false);
     expect(res.existing?.name).toBe("already there");
@@ -764,11 +965,111 @@ describe("attachments", () => {
   it("creates the attachment when there is no duplicate", async () => {
     const { api, calls } = apiWith([
       ["/by-location", () => []],
+      [ON_THOUGHT, () => []],
       ["POST /api/attachments", () => 200],
     ]);
     const res = await api.attachments.attachUrl(BRAIN, THOUGHT, "https://new.example");
     expect(res.created).toBe(true);
     const post = calls.find((c) => c.method === "POST")!;
     expect(post.url.searchParams.get("url")).toBe("https://new.example");
+  });
+
+  it("a URL already on the thought under another host case is not attached again", async () => {
+    // by-location compares the host by case, so it misses this one.
+    const { api, calls } = apiWith([
+      ["/by-location", () => []],
+      [
+        ON_THOUGHT,
+        () => [
+          attached("Notes.md", { id: "note", type: 1, isNotes: true, name: null }),
+          attached("http://Example.COM/Path/", { id: "att-2" }),
+        ],
+      ],
+    ]);
+    const res = await api.attachments.attachUrl(BRAIN, THOUGHT, "https://example.com/Path");
+    expect(res.created).toBe(false);
+    expect(res.existing?.id).toBe("att-2");
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(0);
+  });
+
+  it("a path in another case is another URL, and is sent as it was given", async () => {
+    const { api, calls } = apiWith([
+      ["/by-location", () => []],
+      [ON_THOUGHT, () => [attached("https://example.com/Path")]],
+      ["POST /api/attachments", () => 200],
+    ]);
+    const res = await api.attachments.attachUrl(BRAIN, THOUGHT, "https://Example.com/path");
+    expect(res.created).toBe(true);
+    const post = calls.find((c) => c.method === "POST")!;
+    expect(post.url.searchParams.get("url")).toBe("https://Example.com/path");
+  });
+
+  it("an attachment of another thought is not a duplicate", async () => {
+    const elsewhere = attached("https://example.com/", { sourceId: TYPE });
+    const { api } = apiWith([
+      ["/by-location", () => [elsewhere]],
+      [ON_THOUGHT, () => []],
+      ["POST /api/attachments", () => 200],
+    ]);
+    const res = await api.attachments.attachUrl(BRAIN, THOUGHT, "https://example.com/");
+    expect(res.created).toBe(true);
+  });
+
+  it("with deduplication off nothing is read first", async () => {
+    const { api, calls } = apiWith([["POST /api/attachments", () => 200]]);
+    await api.attachments.attachUrl(BRAIN, THOUGHT, "https://example.com/", {
+      deduplicate: false,
+    });
+    expect(calls.map((c) => c.method)).toEqual(["POST"]);
+  });
+});
+
+describe("urlKey", () => {
+  it("is the same for every spelling of one web address", () => {
+    for (const spelling of [
+      "https://example.com/Path",
+      "http://example.com/Path",
+      "HTTPS://example.com/Path",
+      "https://example.com/Path/",
+      "https://example.com/Path//",
+      "https://EXAMPLE.com/Path",
+      "http://Example.Com/Path/",
+    ]) {
+      expect(urlKey(spelling), spelling).toBe("example.com/Path");
+    }
+    expect(urlKey("https://Example.com")).toBe(urlKey("http://example.com/"));
+  });
+
+  it("keeps the case of everything after the host", () => {
+    const key = urlKey("https://example.com/Path?Q=Abc#Frag");
+    for (const other of [
+      "https://example.com/path?Q=Abc#Frag",
+      "https://example.com/Path?q=abc#Frag",
+      "https://example.com/Path?Q=Abc#frag",
+      "https://example.com/Path?Q=Abc",
+      "https://example.com/Path/?Q=Abc#Frag",
+      "https://www.example.com/Path?Q=Abc#Frag",
+    ]) {
+      expect(urlKey(other), other).not.toBe(key);
+    }
+  });
+
+  it("lower-cases the host alone, not the credentials before it", () => {
+    expect(urlKey("https://User:Pass@Example.COM:8080/Path")).toBe(
+      "User:Pass@example.com:8080/Path",
+    );
+    expect(urlKey("https://Example.COM?Next=/A")).toBe("example.com?Next=/A");
+  });
+
+  it("leaves anything that is not http(s) untouched", () => {
+    // Here an identifier stands where a host would, and its case may matter.
+    for (const location of [
+      "x-devonthink-item://4F2A-9C",
+      "ftp://Example.com/Path/",
+      "Example.com/Path",
+      "/Users/Me/Notes.md",
+    ]) {
+      expect(urlKey(location)).toBe(location);
+    }
   });
 });

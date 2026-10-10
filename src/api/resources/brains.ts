@@ -1,5 +1,5 @@
 import { assertUuid, type TheBrainClient } from "../client.js";
-import { compareLogTime, logEntryKey } from "../log.js";
+import { compareLogTime, logEntryKey, logTime } from "../log.js";
 import type {
   AppStateDto,
   BrainDto,
@@ -8,9 +8,9 @@ import type {
 } from "../types.js";
 
 /**
- * Entries per log request. Every brain measured so far fits in one page; it
- * takes a brain with a long history, where view settings alone can be most of
- * the log, to need a second.
+ * Entries per log request. Every working brain measured so far fits in one
+ * page; it takes a brain with a long history, where view settings alone can be
+ * most of the log, to need a second.
  */
 export const LOG_PAGE_SIZE = 10_000;
 
@@ -35,8 +35,9 @@ export class BrainsResource {
    * One request to the brain's modification log.
    *
    * The API keeps only the newest `maxLogs` entries in the range, with or
-   * without `since`, and returns them newest first. Everything up to now lives
-   * in `allModifications`; this is the single page underneath it.
+   * without `since`, and returns them newest first. "Newest" and both bounds
+   * go by `logTime`, an entry's `modificationDateTime`. Everything up to now
+   * lives in `allModifications`; this is the single page underneath it.
    */
   async modifications(
     brainId: string,
@@ -68,6 +69,10 @@ export class BrainsResource {
    * pages back on `endTime`. Measured on a live TheBrain 15, each fact pinned
    * by a contract test:
    *
+   * - The API orders the log and compares `endTime` by `logTime`, an entry's
+   *   `modificationDateTime`, so that is the boundary. `creationDateTime` can
+   *   be earlier: a boundary taken from it steps over every entry filed in
+   *   between, and none of them comes back.
    * - `endTime` is inclusive to the microsecond, so the next page repeats the
    *   entries at the boundary. They are dropped by content.
    * - An offsetless `endTime` is read as UTC, the zone the log is written in,
@@ -97,14 +102,14 @@ export class BrainsResource {
       });
       const fresh = page.filter((l) => {
         if (until === undefined) return true;
-        const order = compareLogTime(l.creationDateTime, until);
+        const order = compareLogTime(logTime(l), until);
         return order < 0 || (order === 0 && !seen.has(logEntryKey(l)));
       });
       if (fresh.length > 0) yield fresh;
       if (page.length < size) return;
 
       const oldest = page
-        .map((l) => l.creationDateTime)
+        .map(logTime)
         .reduce((a, b) => (compareLogTime(b, a) < 0 ? b : a));
       if (until !== undefined && compareLogTime(oldest, until) === 0) {
         for (const l of fresh) seen.add(logEntryKey(l));
@@ -113,7 +118,7 @@ export class BrainsResource {
       }
       until = oldest;
       seen = new Set(
-        page.filter((l) => compareLogTime(l.creationDateTime, oldest) === 0).map(logEntryKey),
+        page.filter((l) => compareLogTime(logTime(l), oldest) === 0).map(logEntryKey),
       );
     }
   }

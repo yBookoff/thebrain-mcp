@@ -137,8 +137,12 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
           .string()
           .nullable()
           .optional()
-          .describe("Text colour, for example #ff7145."),
-        backgroundColor: z.string().nullable().optional().describe("Background colour."),
+          .describe("Text colour, for example #ff7145; null clears it."),
+        backgroundColor: z
+          .string()
+          .nullable()
+          .optional()
+          .describe("Background colour; null clears it."),
         addAliases: z
           .array(z.string())
           .max(MAX_ALIASES)

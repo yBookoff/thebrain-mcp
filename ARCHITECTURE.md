@@ -307,6 +307,14 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
 12. **The log keeps only the newest `maxLogs` entries**, with or without
     `startTime`. Reading all of it means paging back on `endTime` — see
     *Reading the whole log* below.
+13. **`by-location` tells `Example.com` from `example.com`**, and a URL is
+    stored as it was given, so the lookup alone cannot deduplicate links.
+    `attachUrl` also compares the thought's own attachments, host case aside.
+14. **`null` clears nothing through `replace`.** A label and a colour are
+    cleared with `remove`. A type is not cleared by any patch: `replace /typeId`
+    with null answers 200 and leaves the type where it was, so `thoughts.update()`
+    deletes the link from the type instead, and reads the thought back before it
+    calls the type removed.
 
 ### Write visibility
 
@@ -318,8 +326,12 @@ Measured against a live API by polling until the result appeared:
 | `rename` → `get(id)` | ~0.1 s |
 | `set aliases` → `get(id)` | ~0.1 s, 0.2 s at the most |
 | `create` with aliases → `get(id)` shows them | usually instant, up to 0.15 s |
+| clear a label or a colour → `get(id)` | up to 0.2 s |
+| delete a type's link → `get(id)` without `typeId` | 20–210 ms |
 | `set note` → `get note` | ~0.2 s |
 | `attachTag` → `graph.tags` | ~0.1–0.5 s |
+| `attach URL` → `by-location` | instant |
+| `attach URL` → the thought's attachment list | ~0.1 s |
 | **`create` → `findByName`** | **~5.6 s** |
 | `create` → full-text search | up to 15 s (per the vendor docs) |
 
@@ -443,18 +455,31 @@ measured on a live TheBrain 15, each point with a contract test:
 
 | Question | Answer |
 |---|---|
+| Which of an entry's two timestamps does the API go by? | `modificationDateTime`: the response is ordered by it, and `startTime` and `endTime` are both compared with it |
+| How far apart are the two? | `modificationDateTime` is never the earlier. Of 11,205 entries 258 were filed a microsecond after their creation and the rest at it, one write at a time as often as in a burst. A type change was up to 10 µs late, a note change up to 56 µs, and five note changes in a working brain 0.8–3.9 ms |
 | Is `endTime` inclusive? | Yes, to the microsecond; `startTime` too |
-| What zone is `creationDateTime` in? | UTC, with no offset, microsecond precision and trailing zeros trimmed: `2026-09-30T13:48:59.61898` |
+| What zone are the timestamps in? | UTC, with no offset, microsecond precision and trailing zeros trimmed: `2026-09-30T13:48:59.61898` |
 | Does the API read an offsetless bound the same way? | Yes, as UTC. An explicit offset is honoured |
 | Can two entries share a timestamp? | Yes, under concurrent writes: 100 creates at once shared 2–5. A single request that logs several entries stamps each one apart |
 
-Each page asks for everything up to the oldest timestamp of the one before. The
-entries at that boundary come back again and are dropped by content. The
-boundary goes back **as the exact string the log returned**: through `Date` it
-would lose its microseconds and fall just before the boundary entry, and the
-entry with it. A page filled by one timestamp cannot move the boundary, so the
-page doubles until it can. Writes made meanwhile land above the boundary and do
-not disturb it.
+Each page asks for everything up to the oldest `modificationDateTime` of the
+one before; `logTime()` is the one place that names the field. The entries at
+that boundary come back again and are dropped by content. The boundary goes
+back **as the exact string the log returned**: through `Date` it would lose its
+microseconds and fall just before the boundary entry, and the entry with it. A
+page filled by one timestamp cannot move the boundary, so the page doubles
+until it can. Writes made meanwhile land above the boundary and do not disturb
+it.
+
+The first version paged on `creationDateTime`, the same string 49 times in 50.
+The fiftieth time the boundary fell short: a range that ends at an entry's
+creation holds neither that entry nor anything else filed up to its
+`modificationDateTime`, and the pager, having moved on, never asked for them
+again. On a live log of 14,045 entries it lost one at page sizes of 1, 2, 7 and
+25 and none at 3, 100 and 1,000; a changed note on the boundary would have
+widened the step from a microsecond to milliseconds. The contract test that
+sent a fresh entry's `creationDateTime` back as `endTime` failed now and then
+for the same reason, and that is how it was found.
 
 Paging on offset or on `startTime` would not work: the API has no offset, and
 `startTime` alone still returns the newest page. For the same reason
@@ -610,16 +635,57 @@ built before that reports itself incompatible and wants a rebuild. No retrieval
 benchmark has been run for aliases; that they belong in the vector is an
 argument, not a measurement.
 
-Incremental sync takes its watermark at the moment the run starts. A small
-overlap is harmless: unchanged documents are skipped by content hash. It reads
-every change since the watermark, page by page (§7, *Reading the whole log*):
-one request would keep only the newest changes and drop the oldest, while the
-watermark moved past them regardless. Mapping a
-log entry to its thought goes through `logThoughtId()`, which reads `sourceId`
-for ordinary events and `extraAId` for note events — otherwise an edit that
-touches only a note leaves the thought unmarked and its vector stale. A rename,
-an alias change and a note event re-embed the thought; an alias change is an
-ordinary event, keyed by the thought.
+Incremental sync reads every change since its watermark, page by page (§7,
+*Reading the whole log*): one request would keep only the newest changes and
+drop the oldest, while the watermark moved past them regardless.
+
+The watermark is left ten seconds before the moment the run starts, so the next
+run reads the tail of this one again. A write is in the log at once and in
+`graph` a moment later, a tag after 0.1–0.5 s. A sync in between reads the
+entry, fetches the old graph and skips it by hash; with the watermark at the
+run's own start, that change then stayed out of the index until a rebuild.
+Measured: of four tags each followed at once by a sync, one was lost. Reading
+the tail twice costs a graph request per thought, and the hash drops the rest.
+
+Everything that goes into a document has a signal in the log. Each row was
+measured and has a contract test:
+
+| What changed | Log entry | Read again |
+|---|---|---|
+| name | `103` against the thought | `sourceId` |
+| aliases | `211` against the thought | `sourceId` |
+| label, set or cleared | `202` against the thought | `sourceId` |
+| type, set or lost | `203` against the thought, the type's name as the value | `sourceId` |
+| note | `801`/`802`/`803` against the `Notes.md` attachment | `extraAId` |
+| tag attached or detached | `101`/`102` against the link | both ends, `extraAId` and `extraBId` |
+| tag or type renamed | `103` against the tag or type alone | its graph's `children` |
+
+`logThoughtId()` covers the first five: it reads `sourceId` for a thought event
+and `extraAId` for a note event — otherwise an edit that touches only a note
+leaves the thought unmarked and its vector stale.
+
+A tag is a link, so attaching one logs nothing against the thought. The link's
+entry has the tag in `extraAId` and the thought in `extraBId`, and reads
+exactly like an ordinary parent link's: same types, values null in both. So
+`linkEndIds()` returns both ends of every link that was created, deleted, moved
+(`402`) or changed meaning (`404`: a tag turned into an ordinary thought), and
+the hash drops the ordinary ones at a graph request each. That request is the
+whole cost of not knowing which links are tags.
+
+A renamed tag or type sits in the document of every thought that carries it,
+while the log names the renamed thought alone. Sync fetches the graph of each
+renamed thought, which indexing needs anyway, and when it is a tag or a type
+marks its `children`: that is where a graph lists the thoughts a tag marks and
+the instances of a type (§7).
+
+One gap is left. A moved link names its new ends only, so the thought a tag
+link was moved away from keeps its vector until a rebuild. No tool here moves a
+link.
+
+> Until this was fixed, sync re-embedded on a rename, an alias change and a
+> note event only. A label, a type or a tag changed the document and left the
+> vector as it was. A rebuild repairs an index synced that way: it compares
+> hashes, and these documents differ.
 
 Measured on a live 45-thought brain: first index 1.5 s, second run 0.1 s
 (everything skipped by hash), empty sync 0.1 s.

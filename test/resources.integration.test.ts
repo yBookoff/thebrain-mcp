@@ -23,18 +23,31 @@ import {
   EntityType,
   MAX_ALIASES,
   ModType,
+  Relation,
   TheBrainApi,
   TheBrainError,
   ThoughtKind,
   aliasesOf,
   compareLogTime,
+  isTypeLink,
   isUuid,
   logEntryKey,
+  logTime,
   replayThoughtIds,
+  type CleanGraph,
   type ModificationLogDto,
+  type ThoughtDto,
 } from "../src/api/index.js";
 import { describeChange, subjectIds } from "../src/operations/changes.js";
-import { isNoteMod, logThoughtId, neighbourIds } from "../src/semantic/indexer.js";
+import type { Embedder } from "../src/semantic/embedder.js";
+import {
+  SemanticIndexer,
+  isNoteMod,
+  linkEndIds,
+  logThoughtId,
+  neighbourIds,
+} from "../src/semantic/indexer.js";
+import { VectorStore } from "../src/semantic/store.js";
 
 const apiKey = process.env["THEBRAIN_API_KEY"];
 const testBrainId = process.env["THEBRAIN_TEST_BRAIN_ID"];
@@ -341,6 +354,383 @@ suite("resource layer against the live API", () => {
     expect(describeChange(event!)).toBe("attachment created");
   }, 30_000);
 
+  /**
+   * What incremental sync of the semantic index reads from the log: a thought's
+   * label, type and tags are all in its document. Measured on TheBrain
+   * 15.0.640; the spec describes none of it.
+   */
+  describe("label, type and tags in the log", () => {
+    const mentions =
+      (id: string) =>
+      (l: ModificationLogDto): boolean =>
+        [l.sourceId, l.extraAId, l.extraBId].includes(id);
+
+    /** The matching entries, oldest first, once there are at least `atLeast`. */
+    const logged = async (
+      matches: (l: ModificationLogDto) => boolean,
+      atLeast = 1,
+    ): Promise<ModificationLogDto[]> => {
+      const logs = await eventually(
+        () => api.brains.modifications(brainId, { maxLogs: 300 }),
+        (entries) => entries.filter(matches).length >= atLeast,
+      );
+      return logs
+        .filter(matches)
+        .sort((a, b) => compareLogTime(a.creationDateTime, b.creationDateTime));
+    };
+
+    const expectThoughtEvent = (event: ModificationLogDto, id: string): void => {
+      expect({ sourceType: event.sourceType, sourceId: event.sourceId }).toEqual({
+        sourceType: EntityType.Thought,
+        sourceId: id,
+      });
+      expect(event.extraAType).toBe(EntityType.Unknown);
+      expect(logThoughtId(event)).toBe(id);
+    };
+
+    it("a label set, changed or cleared is logged as 202 against the thought itself", async () => {
+      const id = await make("log-label");
+      const labelled = (label: string | null): Promise<unknown> =>
+        eventually(
+          () => api.thoughts.get(brainId, id),
+          (t) => t.label === label,
+        );
+
+      await api.thoughts.update(brainId, id, { label: "first" });
+      await labelled("first");
+      await api.thoughts.update(brainId, id, { label: "second" });
+      await labelled("second");
+      await api.thoughts.update(brainId, id, { label: null });
+      await labelled(null);
+
+      // Found by code and by the id in any position, so a failure below shows
+      // how the entry is really keyed.
+      const events = await logged(
+        (l) => l.modType === ModType.LabelChanged && mentions(id)(l),
+        3,
+      );
+      expect(events.map((l) => [l.oldValue, l.newValue])).toEqual([
+        [null, "first"],
+        ["first", "second"],
+        ["second", null],
+      ]);
+      for (const event of events) expectThoughtEvent(event, id);
+      expect(describeChange(events[0]!)).toBe("label changed");
+    }, 30_000);
+
+    it("a type set, changed or lost is logged as 203 against the thought itself", async () => {
+      const first = await make("log-type-1", ThoughtKind.Type);
+      const second = await make("log-type-2", ThoughtKind.Type);
+      const id = await make("log-typed");
+      const typed = (typeId: string | null): Promise<unknown> =>
+        eventually(
+          () => api.thoughts.get(brainId, id),
+          (t) => t.typeId === typeId,
+        );
+
+      await api.thoughts.update(brainId, id, { typeId: first });
+      await typed(first);
+      await api.thoughts.update(brainId, id, { typeId: second });
+      await typed(second);
+      // A thought loses its type when the type is deleted.
+      await api.thoughts.delete(brainId, second);
+      await typed(null);
+
+      const events = await logged((l) => l.modType === ModType.TypeSet && mentions(id)(l), 4);
+      // The values are type names. A change is two entries: the old type goes,
+      // then the new one comes.
+      expect(events.map((l) => [l.oldValue, l.newValue])).toEqual([
+        [null, `${PREFIX}log-type-1`],
+        [`${PREFIX}log-type-1`, null],
+        [null, `${PREFIX}log-type-2`],
+        [`${PREFIX}log-type-2`, null],
+      ]);
+      for (const event of events) expectThoughtEvent(event, id);
+    }, 30_000);
+
+    it("a tag link is logged with the tag in extraA and the thought in extraB, exactly like a parent link", async () => {
+      const tagId = await make("log-tag", ThoughtKind.Tag);
+      const parentId = await make("log-parent");
+      const id = await make("log-tagged");
+      const tagLink = await api.links.attachTag(brainId, id, tagId);
+      // The same request against an ordinary thought makes that thought a parent.
+      const parentLink = await api.links.create(brainId, {
+        thoughtIdA: id,
+        thoughtIdB: parentId,
+        relation: Relation.Parent,
+      });
+
+      const born = await logged(
+        (l) => l.modType === ModType.Created && [tagLink, parentLink].includes(l.sourceId),
+        2,
+      );
+      const tagEvent = born.find((l) => l.sourceId === tagLink)!;
+      const parentEvent = born.find((l) => l.sourceId === parentLink)!;
+      expect(tagEvent).toMatchObject({
+        sourceType: EntityType.Link,
+        extraAId: tagId,
+        extraAType: EntityType.Thought,
+        extraBId: id,
+        extraBType: EntityType.Thought,
+        oldValue: null,
+        newValue: null,
+      });
+      // No thought event comes with it: the link's entry is the only trace.
+      expect(logThoughtId(tagEvent)).toBeNull();
+      expect(linkEndIds(tagEvent)).toEqual([tagId, id]);
+
+      // Take away what must differ, the ids and the time, and nothing is left
+      // to tell the tag link's entry from the parent link's.
+      const anonymous = (l: ModificationLogDto): ModificationLogDto => ({
+        ...l,
+        sourceId: "",
+        extraAId: "",
+        creationDateTime: "",
+        modificationDateTime: "",
+      });
+      expect(parentEvent.extraAId).toBe(parentId);
+      expect(anonymous(tagEvent)).toEqual(anonymous(parentEvent));
+
+      expect(await api.links.detachTag(brainId, id, tagId)).toBe(true);
+      const [gone] = await logged((l) => l.modType === ModType.Deleted && l.sourceId === tagLink);
+      expect(gone).toMatchObject({ sourceType: EntityType.Link, oldValue: null, newValue: null });
+      expect(linkEndIds(gone!)).toEqual([tagId, id]);
+    }, 30_000);
+
+    it("deleting a tag in use logs the end of its link to each thought", async () => {
+      const tagId = await make("log-tag-doomed", ThoughtKind.Tag);
+      const id = await make("log-tag-bereft");
+      const link = await api.links.attachTag(brainId, id, tagId);
+      await eventually(
+        () => api.thoughts.getGraph(brainId, id),
+        (g) => g.tags.some((t) => t.id === tagId),
+      );
+      await api.thoughts.delete(brainId, tagId);
+
+      const [event] = await logged((l) => l.modType === ModType.Deleted && l.sourceId === link);
+      expect(event, "the tag link's deletion is not in the log").toBeDefined();
+      expect(linkEndIds(event!)).toEqual([tagId, id]);
+    }, 30_000);
+
+    it("renaming a tag or a type logs its own 103 and nothing about the thoughts that carry it", async () => {
+      const tagId = await make("log-tag-old", ThoughtKind.Tag);
+      const typeId = await make("log-type-old", ThoughtKind.Type);
+      const id = await make("log-carrier");
+      await api.links.attachTag(brainId, id, tagId);
+      await api.thoughts.update(brainId, id, { typeId });
+      // Created, tag link, type link, type set.
+      const before = await logged(mentions(id), 4);
+
+      await api.thoughts.update(brainId, tagId, { name: `${PREFIX}log-tag-new` });
+      await api.thoughts.update(brainId, typeId, { name: `${PREFIX}log-type-new` });
+
+      const renames = await logged(
+        (l) => l.modType === ModType.NameChanged && [tagId, typeId].includes(l.sourceId),
+        2,
+      );
+      expect(renames.map((l) => l.sourceId).sort()).toEqual([tagId, typeId].sort());
+      for (const event of renames) expectThoughtEvent(event, event.sourceId);
+
+      // The carrier's document now holds both new names...
+      const carrier = await eventually(
+        () => api.thoughts.getGraph(brainId, id),
+        (g) =>
+          g.type?.name === `${PREFIX}log-type-new` &&
+          g.tags.some((t) => t.name === `${PREFIX}log-tag-new`),
+      );
+      expect(carrier.type?.name).toBe(`${PREFIX}log-type-new`);
+      expect(carrier.tags.map((t) => t.name)).toEqual([`${PREFIX}log-tag-new`]);
+
+      // ...and the log has said nothing more about it. Sync finds it through
+      // the graphs of the tag and the type, which list it as a child.
+      const after = await logged(mentions(id), before.length);
+      expect(after.map(logEntryKey)).toEqual(before.map(logEntryKey));
+    }, 30_000);
+
+    it("a moved tag link is logged as 402 and names its new ends only", async () => {
+      const tagId = await make("log-tag-moved", ThoughtKind.Tag);
+      const from = await make("log-move-from");
+      const to = await make("log-move-to");
+      const link = await api.links.attachTag(brainId, from, tagId);
+      await api.client.patch(`/api/links/${brainId}/${link}`, {
+        jsonPatch: [{ op: "replace", path: "/thoughtIdB", value: to }],
+      });
+
+      const [moved] = await logged((l) => l.modType === ModType.LinkMoved && l.sourceId === link);
+      expect(moved, "no 402 entry for the link").toBeDefined();
+      expect(moved).toMatchObject({
+        sourceType: EntityType.Link,
+        oldValue: null,
+        newValue: null,
+      });
+      // The thought that lost the tag is not in the entry at all.
+      expect(linkEndIds(moved!)).toEqual([tagId, to]);
+
+      const loser = await eventually(
+        () => api.thoughts.getGraph(brainId, from),
+        (g) => g.tags.length === 0,
+      );
+      expect(loser.tags).toEqual([]);
+      const gainer = await eventually(
+        () => api.thoughts.getGraph(brainId, to),
+        (g) => g.tags.length > 0,
+      );
+      expect(gainer.tags.map((t) => t.id)).toEqual([tagId]);
+    }, 30_000);
+
+    it("a tag turned into an ordinary thought logs 404 against each of its links", async () => {
+      const tagId = await make("log-tag-demoted", ThoughtKind.Tag);
+      const id = await make("log-tag-demoted-carrier");
+      const link = await api.links.attachTag(brainId, id, tagId);
+      await api.thoughts.update(brainId, tagId, { kind: ThoughtKind.Normal });
+
+      const [event] = await logged(
+        (l) => l.modType === ModType.LinkMeaningChanged && l.sourceId === link,
+      );
+      expect(event, "no 404 entry for the link").toBeDefined();
+      expect(event).toMatchObject({
+        sourceType: EntityType.Link,
+        oldValue: "HasTag",
+        newValue: "Normal",
+      });
+      expect(linkEndIds(event!)).toEqual([tagId, id]);
+
+      // The thought keeps the link and loses the tag: it is a parent now.
+      const graph = await eventually(
+        () => api.thoughts.getGraph(brainId, id),
+        (g) => g.tags.length === 0,
+      );
+      expect(graph.tags).toEqual([]);
+      expect(graph.parents.map((p) => p.id)).toContain(tagId);
+    }, 30_000);
+
+    it("sync re-embeds a thought after each of these, read from the live log", async () => {
+      // The whole path, not its parts: the entries above are only worth
+      // anything if sync turns them into the right thoughts to read again.
+      const tagId = await make("sync-tag", ThoughtKind.Tag);
+      const typeId = await make("sync-type", ThoughtKind.Type);
+      const id = await make("sync-thought");
+      const name = `${PREFIX}sync-thought`;
+
+      const documents: string[] = [];
+      const embedder: Embedder = {
+        id: "contract@v1",
+        dimensions: 1,
+        embedDocuments: async (texts) => {
+          documents.push(...texts);
+          return texts.map(() => new Float32Array([1]));
+        },
+        embedQuery: async () => new Float32Array([1]),
+      };
+      const store = new VectorStore(":memory:");
+      const indexer = new SemanticIndexer(api, store, embedder);
+      await indexer.rebuild(brainId);
+
+      /** What sync embeds once the thought's graph shows the change. */
+      const embeddedAfter = async (
+        change: () => Promise<unknown>,
+        shown: (graph: CleanGraph) => boolean,
+      ): Promise<string[]> => {
+        await change();
+        await eventually(() => api.thoughts.getGraph(brainId, id), shown);
+        const from = documents.length;
+        await indexer.sync(brainId);
+        return documents.slice(from);
+      };
+
+      expect(
+        await embeddedAfter(
+          () => api.thoughts.update(brainId, id, { label: "caption" }),
+          (g) => g.thought.label === "caption",
+        ),
+      ).toEqual([`${name}\ncaption`]);
+
+      expect(
+        await embeddedAfter(
+          () => api.thoughts.update(brainId, id, { typeId }),
+          (g) => g.type?.id === typeId,
+        ),
+      ).toEqual([`${name}\ncaption\ntype: ${PREFIX}sync-type`]);
+
+      expect(
+        await embeddedAfter(
+          () => api.links.attachTag(brainId, id, tagId),
+          (g) => g.tags.some((t) => t.id === tagId),
+        ),
+      ).toEqual([`${name}\ncaption\ntype: ${PREFIX}sync-type\ntags: ${PREFIX}sync-tag`]);
+
+      // A rename is logged against the tag or the type alone. Sync embeds two
+      // documents: the renamed one's own, and the thought that carries it.
+      const tagRenamed = await embeddedAfter(
+        () => api.thoughts.update(brainId, tagId, { name: `${PREFIX}sync-tag-2` }),
+        (g) => g.tags.some((t) => t.name === `${PREFIX}sync-tag-2`),
+      );
+      expect(tagRenamed).toHaveLength(2);
+      expect(tagRenamed).toContain(
+        `${name}\ncaption\ntype: ${PREFIX}sync-type\ntags: ${PREFIX}sync-tag-2`,
+      );
+
+      const typeRenamed = await embeddedAfter(
+        () => api.thoughts.update(brainId, typeId, { name: `${PREFIX}sync-type-2` }),
+        (g) => g.type?.name === `${PREFIX}sync-type-2`,
+      );
+      expect(typeRenamed).toHaveLength(2);
+      expect(typeRenamed).toContain(
+        `${name}\ncaption\ntype: ${PREFIX}sync-type-2\ntags: ${PREFIX}sync-tag-2`,
+      );
+
+      expect(
+        await embeddedAfter(
+          () => api.links.detachTag(brainId, id, tagId),
+          (g) => g.tags.length === 0,
+        ),
+      ).toEqual([`${name}\ncaption\ntype: ${PREFIX}sync-type-2`]);
+      store.close();
+    }, 60_000);
+
+    it("a sync that runs before the graph shows a tag does not lose it", async () => {
+      // The link's entry is in the log at once; `graph.tags` follows 0.1–0.5 s
+      // later. A sync in between reads the old graph. Measured: one tag in
+      // four, each followed at once by a sync, and with the watermark at the
+      // sync's own start that tag stayed out of the index until a rebuild.
+      const tagId = await make("race-tag", ThoughtKind.Tag);
+      const ids = [await make("race-0"), await make("race-1"), await make("race-2")];
+
+      const documents: string[] = [];
+      const embedder: Embedder = {
+        id: "contract@v1",
+        dimensions: 1,
+        embedDocuments: async (texts) => {
+          documents.push(...texts);
+          return texts.map(() => new Float32Array([1]));
+        },
+        embedQuery: async () => new Float32Array([1]),
+      };
+      const store = new VectorStore(":memory:");
+      const indexer = new SemanticIndexer(api, store, embedder);
+      await indexer.rebuild(brainId);
+      const from = documents.length;
+
+      for (const id of ids) {
+        await api.links.attachTag(brainId, id, tagId);
+        await indexer.sync(brainId);
+      }
+      for (const id of ids) {
+        await eventually(
+          () => api.thoughts.getGraph(brainId, id),
+          (g) => g.tags.some((t) => t.id === tagId),
+        );
+      }
+      await indexer.sync(brainId);
+
+      // Each of them exactly once, whichever sync saw its tag first.
+      expect(documents.slice(from).sort()).toEqual(
+        [0, 1, 2].map((i) => `${PREFIX}race-${i}\ntags: ${PREFIX}race-tag`),
+      );
+      store.close();
+    }, 60_000);
+  });
+
   it("the log returns the newest entries first and truncates at maxLogs", async () => {
     // brain_recent_changes filters out settings before applying its limit
     // because of this: the newest entries can all be settings.
@@ -352,16 +742,15 @@ suite("resource layer against the live API", () => {
       (entries) => entries.some((l) => l.sourceId === last),
     );
 
-    const time = (l: ModificationLogDto): number => Date.parse(l.creationDateTime);
-    const newestFirst = (x: number, y: number): number => y - x;
+    const newestFirst = (x: string, y: string): number => compareLogTime(y, x);
     const all = await api.brains.allModifications(brainId);
     const few = await api.brains.modifications(brainId, { maxLogs: 3 });
 
     expect(all.length).toBeGreaterThan(3);
     expect(few).toHaveLength(3);
-    const newest = all.map(time).sort(newestFirst).slice(0, 3);
-    expect(few.map(time).sort(newestFirst)).toEqual(newest); // truncation keeps the newest
-    expect(few.map(time)).toEqual(newest); // and returns them newest first
+    const newest = all.map(logTime).sort(newestFirst).slice(0, 3);
+    expect(few.map(logTime).sort(newestFirst)).toEqual(newest); // truncation keeps the newest
+    expect(few.map(logTime)).toEqual(newest); // and returns them newest first
   }, 30_000);
 
   /** Creates a thought and returns its `created` log entry. */
@@ -380,7 +769,7 @@ suite("resource layer against the live API", () => {
     // still tells them apart. On a machine whose zone is UTC nothing can.
     const before = Date.now();
     const entry = await createdEntry("log-utc");
-    const t = entry.creationDateTime;
+    const t = logTime(entry);
     expect(t).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{1,7})?$/);
     const skew = Math.abs(Date.parse(`${t}Z`) - before);
     expect(skew, `${t} read as UTC is ${skew} ms from the local clock`).toBeLessThan(60_000);
@@ -397,8 +786,10 @@ suite("resource layer against the live API", () => {
   }, 30_000);
 
   it("endTime and startTime are inclusive to the microsecond", async () => {
+    // Of the entry's modificationDateTime. Its creationDateTime is the same
+    // string 49 times in 50, which made this test fail on the fiftieth.
     const entry = await createdEntry("log-bounds");
-    const t = entry.creationDateTime;
+    const t = logTime(entry);
     const key = logEntryKey(entry);
     const within = async (range: { since?: string; until?: string }): Promise<boolean> =>
       (await api.brains.modifications(brainId, { maxLogs: 1000, ...range })).some(
@@ -417,6 +808,49 @@ suite("resource layer against the live API", () => {
       expect(await within({ until: new Date(`${t}Z`).toISOString() })).toBe(false);
     }
   }, 30_000);
+
+  it("the log is ordered and filtered by modificationDateTime, which can be later than creationDateTime", async () => {
+    // Measured over 11,205 entries: 258 were filed a microsecond after their
+    // creation and the rest at it, one write at a time as often as in a burst.
+    // A type change was up to 10 µs late, a note change up to 56 µs, and five
+    // note changes in a working brain 0.8 to 3.9 ms. The log reader pages on
+    // the later one because of what this test pins.
+    const newest = (): Promise<ModificationLogDto[]> =>
+      api.brains.modifications(brainId, { maxLogs: 10_000 });
+    const late = (l: ModificationLogDto): boolean =>
+      compareLogTime(l.modificationDateTime, l.creationDateTime) > 0;
+    let logs = await newest();
+    // A new brain may hold none yet. Three hundred creates gave three.
+    for (let round = 0; !logs.some(late) && round < 10; round++) {
+      const ids = new Set(
+        await Promise.all(Array.from({ length: 100 }, (_, i) => make(`log-late-${round}-${i}`))),
+      );
+      logs = await eventually(
+        newest,
+        (entries) => entries.filter((l) => ids.has(l.sourceId)).length >= ids.size,
+      );
+    }
+    const entry = logs.find(late);
+    expect(entry, "no entry filed later than it was created").toBeDefined();
+
+    expect(logs.filter((l) => compareLogTime(l.modificationDateTime, l.creationDateTime) < 0)).toEqual([]);
+    for (let i = 1; i < logs.length; i++) {
+      expect(compareLogTime(logTime(logs[i - 1]!), logTime(logs[i]!))).toBeGreaterThanOrEqual(0);
+    }
+
+    const key = logEntryKey(entry!);
+    const created = entry!.creationDateTime;
+    const filed = entry!.modificationDateTime;
+    const within = async (range: { since?: string; until?: string }): Promise<boolean> =>
+      (await api.brains.modifications(brainId, { maxLogs: 1000, ...range })).some(
+        (l) => logEntryKey(l) === key,
+      );
+    // startTime: compared with creation, this range would start after the entry.
+    expect(await within({ since: filed, until: filed })).toBe(true);
+    // endTime: compared with creation, this range would still reach the entry.
+    expect(await within({ until: created })).toBe(false);
+    expect(await within({ since: created, until: created })).toBe(false);
+  }, 120_000);
 
   it("startTime does not change which end truncation keeps", async () => {
     // The OpenAPI description says maxLogs counts "beginning from the
@@ -449,7 +883,7 @@ suite("resource layer against the live API", () => {
         () => api.brains.modifications(brainId, { maxLogs: 10_000, since }),
         (entries) => entries.length >= BURST * (round + 1),
       );
-      const times = burst.map((l) => l.creationDateTime);
+      const times = burst.map(logTime);
       tied = new Set(times).size < times.length;
     }
     expect(tied).toBe(true);
@@ -457,7 +891,7 @@ suite("resource layer against the live API", () => {
     const sameEntries = (paged: ModificationLogDto[], whole: ModificationLogDto[]): void => {
       expect(paged.map(logEntryKey).sort()).toEqual(whole.map(logEntryKey).sort());
       for (let i = 1; i < paged.length; i++) {
-        const order = compareLogTime(paged[i - 1]!.creationDateTime, paged[i]!.creationDateTime);
+        const order = compareLogTime(logTime(paged[i - 1]!), logTime(paged[i]!));
         expect(order).toBeGreaterThanOrEqual(0);
       }
     };
@@ -529,6 +963,301 @@ suite("resource layer against the live API", () => {
     expect(found?.name).toBe("probe");
     await api.links.delete(brainId, linkId);
     await expect(api.links.between(brainId, a, b)).resolves.toBeNull();
+  });
+
+  /**
+   * Measured on TheBrain 15.0.640. The matching rules are what the OpenAPI
+   * description says. That a location is stored as given, that the API attaches
+   * a second copy, and how soon each read sees a new attachment are not in it.
+   */
+  describe("URL attachments", () => {
+    /** Straight through the API, and with a name, so that no page title is fetched. */
+    const attach = (id: string, url: string): Promise<unknown> =>
+      api.attachments.attachUrl(brainId, id, url, { name: `${PREFIX}link`, deduplicate: false });
+    const found = async (location: string): Promise<boolean> =>
+      (await api.attachments.byLocation(brainId, location)).length > 0;
+    const locations = async (id: string): Promise<string[]> =>
+      (await api.attachments.ofThought(brainId, id)).map((a) => a.location ?? "");
+
+    it("by-location ignores the scheme and the trailing slashes, and nothing else", async () => {
+      const id = await make("by-location");
+      // Unique to the run: the lookup spans the whole brain.
+      const page = `example.com/${PREFIX}loc-${Date.now()}/Page`;
+      await attach(id, `https://${page}`);
+      await attach(id, `https://${page}/Sub?Q=Abc`);
+
+      const spellings = {
+        "as stored": `https://${page}`,
+        "http": `http://${page}`,
+        "no scheme": page,
+        "scheme in capitals": `HTTPS://${page}`,
+        "a trailing slash": `https://${page}/`,
+        "two trailing slashes": `http://${page}//`,
+        "a slash after the query": `https://${page}/Sub?Q=Abc/`,
+        "host in another case": `https://${page.replace("example.com", "Example.com")}`,
+        "path in another case": `https://${page.replace("/Page", "/page")}`,
+        "query in another case": `https://${page}/Sub?q=abc`,
+        "a slash before the query": `https://${page}/Sub/?Q=Abc`,
+        "another scheme": `ftp://${page}`,
+      };
+      const matched: Record<string, boolean> = {};
+      for (const [what, location] of Object.entries(spellings)) {
+        matched[what] = await found(location);
+      }
+      expect(matched).toEqual({
+        "as stored": true,
+        "http": true,
+        "no scheme": true,
+        "scheme in capitals": true,
+        "a trailing slash": true,
+        "two trailing slashes": true,
+        "a slash after the query": true,
+        "host in another case": false,
+        "path in another case": false,
+        "query in another case": false,
+        "a slash before the query": false,
+        "another scheme": false,
+      });
+    });
+
+    it("a location is stored as given, and the API attaches a second copy of it", async () => {
+      // Why `attachUrl` checks first, and why lower-casing the host before the
+      // lookup would not be enough: the stored copy may be the one in capitals.
+      const id = await make("location-verbatim");
+      const mixed = `https://Example.COM/${PREFIX}verbatim-${Date.now()}/Page`;
+      const lower = mixed.replace("Example.COM", "example.com");
+
+      await attach(id, mixed);
+      expect(await found(mixed)).toBe(true);
+      expect(await found(lower)).toBe(false);
+
+      await attach(id, lower);
+      await attach(id, lower);
+      const stored = await eventually(
+        () => locations(id),
+        (all) => all.length >= 3,
+      );
+      expect(stored.sort()).toEqual([lower, lower, mixed].sort());
+      expect(await api.attachments.byLocation(brainId, lower)).toHaveLength(2);
+    });
+
+    it("by-location finds a new attachment at once; the thought's own list is behind", async () => {
+      // Measured over 30 attachments: by-location had each on the first read,
+      // the thought's list had none, and showed it 80–115 ms later.
+      const id = await make("attachment-lag");
+      const ROUNDS = 5;
+      let listedAtOnce = 0;
+      for (let i = 0; i < ROUNDS; i++) {
+        const url = `https://example.com/${PREFIX}lag-${Date.now()}-${i}`;
+        await attach(id, url);
+        expect(await found(url)).toBe(true);
+
+        const listed = async (): Promise<boolean> => (await locations(id)).includes(url);
+        if (await listed()) listedAtOnce += 1;
+        expect(await eventually(listed, Boolean)).toBe(true);
+      }
+      expect(listedAtOnce).toBeLessThan(ROUNDS);
+    });
+
+    it("attachUrl finds the copy under another host case, and tells paths apart", async () => {
+      const id = await make("attach-dedupe");
+      const stored = `https://Example.com/${PREFIX}dedupe-${Date.now()}/Page`;
+      const add = (url: string) =>
+        api.attachments.attachUrl(brainId, id, url, { name: `${PREFIX}link` });
+
+      expect((await add(stored)).created).toBe(true);
+      // The same spelling straight away: by-location has it already.
+      expect((await add(stored)).created).toBe(false);
+
+      // Another spelling of the host is found in the thought's list.
+      await eventually(
+        () => locations(id),
+        (all) => all.includes(stored),
+      );
+      const again = await add(stored.replace("https://Example.com", "http://example.com") + "/");
+      expect(again.created).toBe(false);
+      expect(again.existing?.location).toBe(stored);
+
+      expect((await add(stored.replace("/Page", "/page"))).created).toBe(true);
+      const all = await eventually(
+        () => locations(id),
+        (list) => list.length >= 2,
+      );
+      expect(all).toHaveLength(2);
+    });
+  });
+
+  /**
+   * What empties a thought's label, colours and type. Measured on TheBrain
+   * 15.0.640; the spec lists the paths a patch may name and says nothing of
+   * this. `brain_update_thought` offers null for all four.
+   */
+  describe("clearing a label, a colour and a type", () => {
+    type Op = { op: "replace" | "remove"; path: string; value?: unknown };
+    const patch = (id: string, ...ops: Op[]): Promise<unknown> =>
+      api.client.patch(`/api/thoughts/${brainId}/${id}`, { jsonPatch: ops });
+    /** The error a patch is refused with, or null when it is accepted. */
+    const refusal = (id: string, ...ops: Op[]): Promise<TheBrainError | null> =>
+      patch(id, ...ops).then(
+        () => null,
+        (error: unknown) => error as TheBrainError,
+      );
+    const makeWith = async (
+      name: string,
+      extra: { label?: string; typeId?: string },
+    ): Promise<string> => {
+      const id = await api.thoughts.create(brainId, { name: PREFIX + name, ...extra });
+      created.push(id);
+      return id;
+    };
+    const read = (id: string, ok: (t: ThoughtDto) => boolean): Promise<ThoughtDto> =>
+      eventually(() => api.thoughts.get(brainId, id), ok);
+
+    it("a label is cleared by remove or by an empty string; replace with null is a 403", async () => {
+      const id = await makeWith("clear-label", { label: "caption" });
+
+      // The same 403 a thought that does not exist gets, not a 400.
+      const refused = await refusal(id, { op: "replace", path: "/label", value: null });
+      expect(refused?.kind).toBe("forbidden");
+      await settle();
+      expect((await api.thoughts.get(brainId, id)).label).toBe("caption");
+
+      await patch(id, { op: "remove", path: "/label" });
+      expect((await read(id, (t) => t.label === null)).label).toBeNull();
+      // Removing what is not there is accepted.
+      expect(await refusal(id, { op: "remove", path: "/label" })).toBeNull();
+
+      await api.thoughts.update(brainId, id, { label: "again" });
+      await read(id, (t) => t.label === "again");
+      await patch(id, { op: "replace", path: "/label", value: "" });
+      expect((await read(id, (t) => t.label === null)).label).toBeNull();
+
+      // The flat facade the tools use.
+      await api.thoughts.update(brainId, id, { label: "once more" });
+      await read(id, (t) => t.label === "once more");
+      await api.thoughts.update(brainId, id, { label: null });
+      expect((await read(id, (t) => t.label === null)).label).toBeNull();
+    });
+
+    it("a colour is cleared by remove alone; null and an empty string are a 400", async () => {
+      const id = await make("clear-colour");
+      const colours = (t: ThoughtDto): unknown[] => [t.foregroundColor, t.backgroundColor];
+      const set = ["#ff7145", "#1a2b3c"];
+      await api.thoughts.update(brainId, id, {
+        foregroundColor: set[0],
+        backgroundColor: set[1],
+      });
+      await read(id, (t) => colours(t).join() === set.join());
+
+      for (const path of ["/foregroundColor", "/backgroundColor"]) {
+        for (const value of [null, ""]) {
+          const refused = await refusal(id, { op: "replace", path, value });
+          expect(refused?.kind, `${path} = ${JSON.stringify(value)}`).toBe("bad_request");
+          expect(refused?.message).toMatch(/malformed/i);
+        }
+      }
+      await settle();
+      expect(colours(await api.thoughts.get(brainId, id))).toEqual(set);
+
+      await api.thoughts.update(brainId, id, { foregroundColor: null, backgroundColor: null });
+      const cleared = await read(id, (t) => colours(t).every((c) => c === null));
+      expect(colours(cleared)).toEqual([null, null]);
+      // Removing what is not there is accepted.
+      await api.thoughts.update(brainId, id, { foregroundColor: null, backgroundColor: null });
+    });
+
+    it("no patch takes a type away: null and an empty string change nothing, remove is a 403", async () => {
+      const typeId = await make("clear-type", ThoughtKind.Type);
+      const id = await makeWith("clear-typed", { typeId });
+      await read(id, (t) => t.typeId === typeId);
+
+      // Accepted, and that is the trap: the type stays.
+      expect(await refusal(id, { op: "replace", path: "/typeId", value: null })).toBeNull();
+      expect(await refusal(id, { op: "replace", path: "/typeId", value: "" })).toBeNull();
+      const nobody = "00000000-0000-0000-0000-000000000000";
+      for (const op of [
+        { op: "remove", path: "/typeId" },
+        { op: "replace", path: "/typeId", value: nobody },
+      ] as const) {
+        expect((await refusal(id, op))?.kind, JSON.stringify(op)).toBe("forbidden");
+      }
+      await settle();
+      expect((await api.thoughts.get(brainId, id)).typeId).toBe(typeId);
+    });
+
+    it("a type goes when the link from it is deleted, which is what update does for null", async () => {
+      const typeId = await make("drop-type", ThoughtKind.Type);
+      const id = await makeWith("drop-typed", { typeId });
+      await read(id, (t) => t.typeId === typeId);
+
+      // One link, whichever end is named first, and `meaning` marks it.
+      const link = await api.links.between(brainId, typeId, id);
+      expect(link, "no link between the type and the thought").not.toBeNull();
+      expect(isTypeLink(link!)).toBe(true);
+      expect([link!.thoughtIdA, link!.thoughtIdB]).toEqual([typeId, id]);
+      expect(link!.relation).toBe(Relation.Child);
+      expect((await api.links.between(brainId, id, typeId))?.id).toBe(link!.id);
+
+      await api.thoughts.update(brainId, id, { typeId: null });
+      // No waiting here: by the time the call returned, a read agreed.
+      expect((await api.thoughts.get(brainId, id)).typeId).toBeNull();
+      expect(await api.links.between(brainId, typeId, id)).toBeNull();
+      const graph = await eventually(
+        () => api.thoughts.getGraph(brainId, id),
+        (g) => g.type === null,
+      );
+      expect(graph.type).toBeNull();
+      expect(graph.parents.map((p) => p.id)).not.toContain(typeId);
+
+      // Logged as the link's deletion and as the thought losing its type.
+      const lostType = (l: ModificationLogDto): boolean =>
+        l.modType === ModType.TypeSet && l.sourceId === id && l.newValue === null;
+      const linkDeleted = (l: ModificationLogDto): boolean =>
+        l.modType === ModType.Deleted && l.sourceId === link!.id;
+      const logs = await eventually(
+        () => api.brains.modifications(brainId, { maxLogs: 200 }),
+        (entries) => entries.some(lostType) && entries.some(linkDeleted),
+      );
+      expect(logs.find(lostType)?.oldValue).toBe(`${PREFIX}drop-type`);
+      expect(logs.find(linkDeleted)?.sourceType).toBe(EntityType.Link);
+
+      // Nothing is left to remove, and the thought takes a type again.
+      expect(await api.thoughts.removeType(brainId, id)).toBe(false);
+      await api.thoughts.update(brainId, id, { typeId });
+      expect((await read(id, (t) => t.typeId === typeId)).typeId).toBe(typeId);
+    }, 30_000);
+
+    it("a read straight after a type's link is deleted still returns the type", async () => {
+      // Measured over 13 removals: the first read had the type every time, and
+      // lost it 20–210 ms later. `removeType` waits for that read.
+      const typeId = await make("lag-type", ThoughtKind.Type);
+      let stale = 0;
+      for (let i = 0; i < 5; i++) {
+        const id = await makeWith(`lag-typed-${i}`, { typeId });
+        await read(id, (t) => t.typeId === typeId);
+        expect(await api.links.detachType(brainId, id, typeId)).toBe(true);
+        if ((await api.thoughts.get(brainId, id)).typeId === typeId) stale += 1;
+        expect((await read(id, (t) => t.typeId === null)).typeId).toBeNull();
+      }
+      expect(stale).toBeGreaterThan(0);
+    }, 30_000);
+
+    it("a refused patch keeps what it wrote before the operation it refused", async () => {
+      // So an update that throws may have landed in part.
+      const id = await make("partial");
+      const renamed = `${PREFIX}partial-renamed`;
+      const refused = await refusal(
+        id,
+        { op: "replace", path: "/name", value: renamed },
+        { op: "replace", path: "/foregroundColor", value: null },
+        { op: "replace", path: "/label", value: "never written" },
+      );
+      expect(refused?.kind).toBe("bad_request");
+
+      expect((await read(id, (t) => t.name === renamed)).name).toBe(renamed);
+      await settle();
+      expect((await api.thoughts.get(brainId, id)).label).toBeNull();
+    });
   });
 
   /**

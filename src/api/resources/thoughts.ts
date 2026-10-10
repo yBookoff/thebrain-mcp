@@ -5,7 +5,7 @@ import {
   type TheBrainClient,
 } from "../client.js";
 import { TheBrainError } from "../errors.js";
-import { compareLogTime } from "../log.js";
+import { compareLogTime, logTime } from "../log.js";
 import {
   ModType,
   aliasesOf,
@@ -18,6 +18,7 @@ import {
   type ThoughtGraphDto,
   ThoughtKind,
 } from "../types.js";
+import type { LinksResource } from "./links.js";
 
 export interface CreateThoughtInput {
   name: string;
@@ -42,6 +43,7 @@ export interface CreateThoughtInput {
 export interface UpdateThoughtInput {
   name?: string | undefined;
   label?: string | null | undefined;
+  /** `null` takes the type away, which no patch does: see `removeType`. */
   typeId?: string | null | undefined;
   foregroundColor?: string | null | undefined;
   backgroundColor?: string | null | undefined;
@@ -61,11 +63,13 @@ export interface UpdateThoughtInput {
 export const MAX_ALIASES = 100;
 
 /**
- * A read straight after an alias write usually still returns the old list.
- * Measured over 82 writes: the new one showed up 50–100 ms later, 0.2 s at the
- * most, and 7 times it was there at once.
+ * A read straight after a write usually still returns the old value.
+ *
+ * Aliases, measured over 82 writes: the new list showed up 50–100 ms later,
+ * 0.2 s at the most, and 7 times it was there at once. A removed type, over 13
+ * removals: 20–210 ms, and not once on the first read.
  */
-const ALIAS_READ_BACK = { stepMs: 25, timeoutMs: 2000 };
+const READ_BACK = { stepMs: 25, timeoutMs: 2000 };
 
 export interface AliasChanges {
   add?: readonly string[] | undefined;
@@ -111,7 +115,10 @@ export class ThoughtsResource {
   /** Only a yes is remembered: an update can add aliases while we run. */
   #aliasesSeen = false;
 
-  constructor(private readonly client: TheBrainClient) {}
+  constructor(
+    private readonly client: TheBrainClient,
+    private readonly links: LinksResource,
+  ) {}
 
   async get(brainId: string, thoughtId: string): Promise<ThoughtDto> {
     assertUuid(brainId, "brainId");
@@ -223,7 +230,16 @@ export class ThoughtsResource {
     return created.id;
   }
 
-  /** Takes flat fields and assembles the JSON Patch internally. */
+  /**
+   * Takes flat fields and assembles the JSON Patch internally.
+   *
+   * A value is cleared with `remove`. `replace` with null is refused for a
+   * label (403) and for a colour (400), and for a type it answers 200 and
+   * changes nothing, so a type goes through `removeType` instead.
+   *
+   * The API applies a patch one operation at a time and keeps what it wrote
+   * before the one it refuses: an update that throws may have landed in part.
+   */
   async update(
     brainId: string,
     thoughtId: string,
@@ -231,12 +247,19 @@ export class ThoughtsResource {
   ): Promise<void> {
     assertUuid(brainId, "brainId");
     assertUuid(thoughtId, "thoughtId");
-    if (changes.typeId) assertUuid(changes.typeId, "typeId");
+    const { aliases, typeId, ...fields } = changes;
+    if (typeof typeId === "string") assertUuid(typeId, "typeId");
 
-    const { aliases, ...fields } = changes;
     const ops: JsonPatchOp[] = Object.entries(fields)
       .filter(([, value]) => value !== undefined)
-      .map(([key, value]) => ({ op: "replace" as const, path: `/${key}`, value }));
+      .map(([key, value]) =>
+        value === null
+          ? { op: "remove", path: `/${key}` }
+          : { op: "replace", path: `/${key}`, value },
+      );
+    if (typeof typeId === "string") {
+      ops.push({ op: "replace", path: "/typeId", value: typeId });
+    }
     if (aliases !== undefined) {
       ops.push(
         aliases === null || aliases.length === 0
@@ -245,10 +268,41 @@ export class ThoughtsResource {
       );
     }
 
-    if (ops.length === 0) return;
-    await this.client.patch(`/api/thoughts/${brainId}/${thoughtId}`, {
-      jsonPatch: ops,
-    });
+    if (ops.length > 0) {
+      await this.client.patch(`/api/thoughts/${brainId}/${thoughtId}`, {
+        jsonPatch: ops,
+      });
+    }
+    if (typeId === null) await this.removeType(brainId, thoughtId);
+  }
+
+  /**
+   * Takes a thought's type away. False when it had none.
+   *
+   * No patch does it: `replace /typeId` with null or "" answers 200 and leaves
+   * the type in place, and `remove` is a 403. The type is a link from the type
+   * to the thought, and deleting that link is what clears `typeId`.
+   *
+   * It returns once the thought reads back without a type, and throws when it
+   * never does: a removal that did not happen must not pass for one that did.
+   * The first read is trusted, though, and a type takes up to 0.2 s to read
+   * back: one set a moment ago is not seen here, and stays.
+   */
+  async removeType(brainId: string, thoughtId: string): Promise<boolean> {
+    const { typeId } = await this.get(brainId, thoughtId);
+    if (!typeId) return false;
+
+    const detached = await this.links.detachType(brainId, thoughtId, typeId);
+    // Also when there was no link to delete: this read may be a stale one that
+    // follows an earlier removal.
+    if (await this.#readsBack(brainId, thoughtId, (t) => !t.typeId)) return detached;
+    throw new TheBrainError(
+      "server",
+      detached
+        ? "the type's link was deleted, but the thought still reads back with its type"
+        : "the thought has a type, but the link that carries it was not found: " +
+          "nothing was deleted and the type is still in place",
+    );
   }
 
   /**
@@ -296,23 +350,26 @@ export class ThoughtsResource {
       );
     }
     await this.update(brainId, thoughtId, { aliases });
-    const readBack = await this.#aliasesReadBack(brainId, thoughtId, aliases);
+    const listed = (list: readonly string[]): string => list.map(aliasKey).sort().join("\n");
+    const readBack = await this.#readsBack(
+      brainId,
+      thoughtId,
+      (t) => listed(aliasesOf(t)) === listed(aliases),
+    );
     return { aliases, added, removed, readBack };
   }
 
-  /** Waits for a written alias list to show up on a read. */
-  async #aliasesReadBack(
+  /** Waits for a write to show up on a read of the thought. */
+  async #readsBack(
     brainId: string,
     thoughtId: string,
-    written: readonly string[],
+    landed: (thought: ThoughtDto) => boolean,
   ): Promise<boolean> {
-    const wanted = written.map(aliasKey).sort().join("\n");
-    const deadline = Date.now() + ALIAS_READ_BACK.timeoutMs;
+    const deadline = Date.now() + READ_BACK.timeoutMs;
     for (;;) {
-      const seen = aliasesOf(await this.get(brainId, thoughtId));
-      if (seen.map(aliasKey).sort().join("\n") === wanted) return true;
+      if (landed(await this.get(brainId, thoughtId))) return true;
       if (Date.now() >= deadline) return false;
-      await new Promise((resolve) => setTimeout(resolve, ALIAS_READ_BACK.stepMs));
+      await new Promise((resolve) => setTimeout(resolve, READ_BACK.stepMs));
     }
   }
 
@@ -407,9 +464,7 @@ export function replayThoughtIds(logs: readonly ModificationLogDto[]): Set<strin
   const alive = new Set<string>();
   // Not through `Date`: it drops microseconds, and a create and a delete in the
   // same millisecond would then replay in whatever order they arrived.
-  const ordered = [...logs].sort((a, b) =>
-    compareLogTime(a.creationDateTime, b.creationDateTime),
-  );
+  const ordered = [...logs].sort((a, b) => compareLogTime(logTime(a), logTime(b)));
   for (const log of ordered) {
     if (log.sourceType !== 2) continue;
     if (log.modType === ModType.Created) alive.add(log.sourceId);

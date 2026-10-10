@@ -140,10 +140,14 @@ export const ModType = {
   Created: 101,
   Deleted: 102,
   NameChanged: 103,
+  LabelChanged: 202,
+  /** Logged when a thought loses its type as well, with `newValue: null`. */
   TypeSet: 203,
   AliasesChanged: 211,
   Forgotten: 301,
   Remembered: 302,
+  LinkMoved: 402,
+  LinkMeaningChanged: 404,
   NoteCreated: 801,
   NoteDeleted: 802,
   NoteChanged: 803,
@@ -152,10 +156,25 @@ export const ModType = {
 /** Codes after which a thought must be re-embedded in the semantic index. */
 export const REEMBED_MOD_TYPES: ReadonlySet<number> = new Set([
   ModType.NameChanged,
+  ModType.LabelChanged,
+  ModType.TypeSet,
   ModType.AliasesChanged,
   ModType.NoteCreated,
   ModType.NoteDeleted,
   ModType.NoteChanged,
+]);
+
+/**
+ * Link events that can give a thought a tag or take one away: the link was
+ * created, deleted, moved to another thought, or changed its meaning (a tag
+ * turned into an ordinary thought). A link's rename, thickness, direction and
+ * relation leave its ends and its meaning alone.
+ */
+export const TAG_LINK_MOD_TYPES: ReadonlySet<number> = new Set([
+  ModType.Created,
+  ModType.Deleted,
+  ModType.LinkMoved,
+  ModType.LinkMeaningChanged,
 ]);
 
 export function describeModType(modType: number): string {
@@ -311,7 +330,9 @@ export interface ModificationLogDto {
   newValue: string | null;
   userId: string;
   brainId: string;
+  /** Never later than `modificationDateTime`, and not what the API files the entry under. */
   creationDateTime: string;
+  /** What the API orders and filters the log by. Read it through `logTime()`. */
   modificationDateTime: string;
   syncUpdateDateTime: string | null;
 }
