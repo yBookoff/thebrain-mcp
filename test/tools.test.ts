@@ -7228,3 +7228,426 @@ describe("a read that fails inside a tool is not an answer that nothing is there
     });
   });
 });
+
+describe("a thought's name: none, white space alone, too long, and one that does not show", () => {
+  const TYPE = "eeeeeeee-0000-4000-8000-000000000005";
+  const TAG = "ffffffff-0000-4000-8000-000000000006";
+  const OTHER = "abababab-0000-4000-8000-000000000007";
+
+  /**
+   * Names the live API takes for none, each with what the refusal says of
+   * it. White space is Unicode's property: a next line (U+0085) is of it,
+   * which `trim()` does not drop.
+   */
+  const BLANK: Array<[sent: string, said: string]> = [
+    [" ", "white space alone (U+0020)"],
+    ["\t\n", "white space alone (U+0009 U+000A)"],
+    ["\u00a0", "white space alone (U+00A0)"],
+    ["\u0085", "white space alone (U+0085)"],
+    ["\u3000 ", "white space alone (U+3000 U+0020)"],
+  ];
+  const TOO_LONG: [sent: string, said: string] = [
+    "a".repeat(1025),
+    "1025 UTF-16 units long, and TheBrain keeps the first 1024 of a name and drops the rest " +
+      "with a 200",
+  ];
+  const noName = (said: string): string =>
+    `name is ${said}, and a thought has to have a name. Nothing was written.`;
+  const UNSEEN = "(no visible character: U+200B)";
+
+  describe("brain_update_thought", () => {
+    /** A brain that would take every write of these calls: the type is one, the patch a 200. */
+    const routes: Route[] = [
+      ["GET /api/thoughts/", () => thought("Pattern", { id: TYPE, kind: 2, aliases: [] })],
+      ["PATCH /api/thoughts/", () => 200],
+    ];
+    const rename = async (name: string, extra: Record<string, unknown> = {}) => {
+      const { call, calls, sent } = await connect(routes);
+      const result = await call("brain_update_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        name,
+        ...extra,
+      });
+      return { result, calls, patches: sent("PATCH") };
+    };
+
+    it("a rename to no name is refused before any request, where it was listed under Done", async () => {
+      // The API answers 200 to each of these and leaves the name as it was.
+      for (const [name, said] of [["", "empty"], ...BLANK]) {
+        const { result, calls } = await rename(name!);
+        expect(result, JSON.stringify(name)).toEqual({ isError: true, text: noName(said!) });
+        expect(calls, JSON.stringify(name)).toEqual([]);
+      }
+    });
+
+    it("so is a rename to a name too long to keep, which the API would cut", async () => {
+      const { result, calls } = await rename(TOO_LONG[0]);
+      expect(result).toEqual({ isError: true, text: `name is ${TOO_LONG[1]}. Nothing was written.` });
+      expect(calls).toEqual([]);
+    });
+
+    it("nothing else of the call is written either, the type that goes first included", async () => {
+      const { result, calls } = await rename("\u00a0", {
+        typeId: TYPE,
+        label: "pattern",
+        addAliases: ["R.A.G."],
+      });
+      expect(result).toEqual({ isError: true, text: noName("white space alone (U+00A0)") });
+      expect(calls).toEqual([]);
+    });
+
+    it("a name is sent as it was given and reported as it is stored", async () => {
+      for (const [name, stored] of [
+        ["  RAG\t", "RAG"],
+        ["\u0085RAG\u0085", "RAG"],
+        ["line\nbreak", "line break"],
+        ["\ufeffRAG", "\ufeffRAG"],
+      ] as const) {
+        const { result, patches } = await rename(name);
+        expect(result, JSON.stringify(name)).toEqual({
+          isError: false,
+          text: `## Done\n- name = ${JSON.stringify(stored)}`,
+        });
+        expect(patches).toEqual([[{ op: "replace", path: "/name", value: name }]]);
+      }
+    });
+
+    it("a name that does not show is written, and spelled out where it read as an empty one", async () => {
+      const { result, patches } = await rename("\u200b", { label: "pattern" });
+      expect(result).toEqual({
+        isError: false,
+        text: `## Done\n- name = "${UNSEEN}"\n- label = "pattern"`,
+      });
+      expect(patches).toEqual([
+        [{ op: "replace", path: "/name", value: "\u200b" }],
+        [{ op: "replace", path: "/label", value: "pattern" }],
+      ]);
+    });
+
+    it("an ordinary rename reads as it did, to the character", async () => {
+      for (const name of ["RAG", "Ретривер", "日本語", "🧠", "👨\u200d👩\u200d👧", "é", "a\u200bb", "."]) {
+        const { result } = await rename(name);
+        expect(result).toEqual({ isError: false, text: `## Done\n- name = ${JSON.stringify(name)}` });
+      }
+    });
+
+    it("the alias edit is told the name as it is stored", async () => {
+      // An alias equal to the name is none, and the name here is "RAG": told
+      // the name as it was sent, the edit took "RAG" for an alias to add.
+      const { result, patches } = await rename("\u0085RAG", { addAliases: ["rag"] });
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain("aliases unchanged");
+      expect(patches).toEqual([[{ op: "replace", path: "/name", value: "\u0085RAG" }]]);
+    });
+  });
+
+  describe("brain_create_thought", () => {
+    const create = async (name: string, extra: Record<string, unknown> = {}) => {
+      const { call, calls, sent } = await connect(brainRoutes({ aliases: true }));
+      const result = await call("brain_create_thought", {
+        brainId: BRAIN,
+        name,
+        parentId: PARENT,
+        ...extra,
+      });
+      return { result, calls, posts: sent("POST") };
+    };
+
+    it("a name of white space is refused before any request, the reads of the tag and the parent included", async () => {
+      // The API's own 400 for it came after those reads: "A name is required".
+      for (const [name, said] of BLANK) {
+        const { result, calls } = await create(name, { tagIds: [TAG], typeId: TYPE });
+        expect(result, JSON.stringify(name)).toEqual({ isError: true, text: noName(said) });
+        expect(calls, JSON.stringify(name)).toEqual([]);
+      }
+    });
+
+    it("an empty name is refused by the schema, as it was: no request, and the argument named", async () => {
+      const { result, calls } = await create("");
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/at least 1 character.* name$/);
+      expect(calls).toEqual([]);
+    });
+
+    it("a name too long to keep is refused, where it was cut and reported whole", async () => {
+      const { result, calls } = await create(TOO_LONG[0]);
+      expect(result).toEqual({ isError: true, text: `name is ${TOO_LONG[1]}. Nothing was written.` });
+      expect(calls).toEqual([]);
+      // 1,024 units are kept whole, and the blanks at the ends are not counted.
+      const kept = await create(` ${"a".repeat(1024)} `);
+      expect(kept.result.isError).toBe(false);
+      expect(kept.result.text).toContain(`created thought "${"a".repeat(1024)}" — ${THOUGHT}`);
+    });
+
+    it("the thought is reported under the name it is stored by, and sent as it was given", async () => {
+      for (const [name, stored] of [
+        ["  RAG\t", "RAG"],
+        ["line\nbreak", "line break"],
+      ] as const) {
+        const { result, posts } = await create(name);
+        expect(result.isError).toBe(false);
+        expect(result.text).toContain(`## Done\n- created thought "${stored}" — ${THOUGHT}\n`);
+        expect(posts).toEqual([expect.objectContaining({ name })]);
+      }
+    });
+
+    it("a name that does not show is created, and spelled out in the result", async () => {
+      const { result, posts } = await create("\u200b");
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain(`## Done\n- created thought "${UNSEEN}" — ${THOUGHT}\n`);
+      expect(posts).toEqual([expect.objectContaining({ name: "\u200b" })]);
+    });
+
+    it("an ordinary name reads as it did, to the character", async () => {
+      for (const name of ["RAG", "Ретривер", "🧠", "👨\u200d👩\u200d👧", "a\u200bb", "\u2800"]) {
+        const { result } = await create(name);
+        expect(result).toEqual({
+          isError: false,
+          text:
+            `## Done\n- created thought "${name}" — ${THOUGHT}\n\n## Next\n` +
+            "The identifier above works immediately. Searching for this thought by name only " +
+            "succeeds after a few seconds, so refer to it by identifier.",
+        });
+      }
+    });
+  });
+
+  describe("brain_ingest", () => {
+    const plan = async (name: string) => {
+      const { call, calls, sent } = await connect(brainRoutes({ aliases: true }));
+      const result = await call("brain_ingest", {
+        brainId: BRAIN,
+        thoughts: [
+          { tempId: "top", name: "Top", parent: PARENT },
+          { tempId: "t1", name, parent: "top" },
+        ],
+      });
+      return { result, calls, posts: sent("POST") };
+    };
+    /** The table's rows, each cut into cells where two or more spaces part them. */
+    const rows = (text: string): string[][] =>
+      text
+        .split("\n")
+        .filter((l) => /^(created|existed) /.test(l))
+        .map((l) => l.split(/\s{2,}/));
+
+    it("a plan is rejected for such a name before any request, with the plan item named", async () => {
+      // A next line used to pass the check and be refused by the API in the
+      // middle of the batch, with the thought above it written.
+      for (const [name, said] of [...BLANK, TOO_LONG]) {
+        const { result, calls } = await plan(name);
+        expect(result, JSON.stringify(name.slice(0, 8))).toEqual({
+          isError: true,
+          text:
+            `Plan rejected, nothing was written: the name of thought "t1" is ${said}` +
+            `${said.startsWith("white") ? ", and a thought has to have a name" : ""}. ` +
+            "Fix it and retry.",
+        });
+        expect(calls).toEqual([]);
+      }
+    });
+
+    it("a byte order mark is no white space: the thought is made, as the other tools make it", async () => {
+      // `trim()` drops it, and the plan used to be rejected for an empty name.
+      const { result, posts } = await plan("\ufeff");
+      expect(result.isError).toBe(false);
+      expect(posts).toEqual([
+        expect.objectContaining({ name: "Top" }),
+        expect.objectContaining({ name: "\ufeff" }),
+      ]);
+      // In the last cell of a row it used to go with the padding.
+      expect(rows(result.text)).toEqual([
+        ["created", "Top", THOUGHT],
+        ["created", "(no visible character: U+FEFF)", THOUGHT],
+      ]);
+    });
+
+    it("the table has each title as it is stored: a line feed in one broke the row in two", async () => {
+      const { result } = await plan(" line\nbreak\t");
+      expect(result.isError).toBe(false);
+      expect(rows(result.text)).toEqual([
+        ["created", "Top", THOUGHT],
+        ["created", "line break", THOUGHT],
+      ]);
+    });
+  });
+
+  describe("what the read tools print for a name that does not show", () => {
+    const at = (id: string, name: string | null, kind = 1) => thought("x", { id, kind, name });
+    const zero = at(OTHER, "\u200b");
+    const mark = at(PARENT, "\ufeff");
+    const NO_ID = "00000000-0000-0000-0000-000000000000";
+
+    it("brain_get_thought: the thought, its neighbours, its type and its tags", async () => {
+      const { call } = await connect([
+        [
+          "GET /graph",
+          () => ({
+            ...graph(thought("\u200b\ufeff\u00ad", { typeId: TYPE })),
+            type: at(TYPE, "\u2060", 2),
+            tags: [at(TAG, "\u200d", 4), at(LINK, "gotcha", 4)],
+            parents: [mark],
+            children: [zero, at(LINK, "Embeddings"), at(TAG, null)],
+          }),
+        ],
+        ["GET /api/notes", () => noNote],
+      ]);
+      const result = await call("brain_get_thought", { brainId: BRAIN, thoughtId: THOUGHT });
+      expect(result).toEqual({
+        isError: false,
+        text: [
+          "# (no visible character: U+200B U+FEFF U+00AD)",
+          THOUGHT,
+          "",
+          "## Type",
+          `(no visible character: U+2060) — ${TYPE}`,
+          "",
+          "## Tags",
+          "(no visible character: U+200D), gotcha",
+          "",
+          "## Parents",
+          `- (no visible character: U+FEFF) — ${PARENT}`,
+          "",
+          "## Children",
+          `- ${UNSEEN} — ${OTHER}`,
+          `- Embeddings — ${LINK}`,
+          `- (unnamed) — ${TAG}`,
+        ].join("\n"),
+      });
+    });
+
+    it("brain_traverse: in its heading, its hops, the way there and a labelled link", async () => {
+      const { call } = await connect([
+        [
+          "GET /graph",
+          () => ({
+            ...graph(thought("\u200b")),
+            children: [mark, at(OTHER, "Embeddings"), at(TAG, null)],
+            links: [{ id: LINK, thoughtIdA: THOUGHT, thoughtIdB: PARENT, relation: 1, meaning: 1, name: "holds" }],
+          }),
+        ],
+      ]);
+      const result = await call("brain_traverse", { brainId: BRAIN, thoughtId: THOUGHT, depth: 1 });
+      expect(result).toEqual({
+        isError: false,
+        text: [
+          `# Neighbourhood of: ${UNSEEN}`,
+          "",
+          "## Hop 1",
+          `- (no visible character: U+FEFF) — ${PARENT}  (via ${UNSEEN})`,
+          `- Embeddings — ${OTHER}  (via ${UNSEEN})`,
+          // A thought the API sends with no name read as an empty one here.
+          `- (unnamed) — ${TAG}  (via ${UNSEEN})`,
+          "",
+          "## Labelled links",
+          `- ${UNSEEN} -> holds -> (no visible character: U+FEFF)`,
+          "",
+          "## Totals",
+          "thoughts 4, links 3",
+        ].join("\n"),
+      });
+    });
+
+    it("brain_list_types_and_tags", async () => {
+      const { call } = await connect([
+        ["GET /types", () => [at(TYPE, "\u2060", 2), at(OTHER, "Pattern", 2)]],
+        ["GET /tags", () => [at(TAG, "\ufe0f", 4)]],
+      ]);
+      const result = await call("brain_list_types_and_tags", { brainId: BRAIN });
+      expect(result).toEqual({
+        isError: false,
+        text:
+          `## Types\n- (no visible character: U+2060) — ${TYPE}\n- Pattern — ${OTHER}\n\n` +
+          `## Tags\n- (no visible character: U+FE0F) — ${TAG}`,
+      });
+    });
+
+    it("brain_recent_changes: a byte order mark at the end of a row went with the padding", async () => {
+      const entry = (second: number, fields: Record<string, unknown>) => ({
+        sourceId: THOUGHT,
+        sourceType: 2,
+        extraAId: NO_ID,
+        extraAType: -1,
+        extraBId: NO_ID,
+        extraBType: -1,
+        modType: 101,
+        oldValue: null,
+        newValue: null,
+        userId: NO_ID,
+        brainId: BRAIN,
+        creationDateTime: `2026-10-10T12:00:0${second}`,
+        modificationDateTime: `2026-10-10T12:00:0${second}`,
+        syncUpdateDateTime: null,
+        ...fields,
+      });
+      const known = [thought("RAG"), mark, at(OTHER, "\u200b", 4)];
+      const { call } = await connect([
+        [
+          "GET /modifications",
+          () => [
+            entry(3, {
+              sourceId: LINK,
+              sourceType: 3,
+              extraAId: THOUGHT,
+              extraAType: 2,
+              extraBId: PARENT,
+              extraBType: 2,
+            }),
+            entry(2, { sourceId: PARENT }),
+            entry(1, { sourceId: OTHER }),
+          ],
+        ],
+        ["GET /api/thoughts/", (url) => known.find((t) => url.pathname.endsWith(t.id)) ?? 404],
+      ]);
+      const result = await call("brain_recent_changes", {
+        brainId: BRAIN,
+        since: "2026-10-10T00:00:00Z",
+      });
+      expect(result.isError).toBe(false);
+      const rows = result.text.split("\n").filter((l) => l.startsWith("2026-10-10 12:00"));
+      expect(rows.map((l) => l.split(/\s{2,}/).slice(1))).toEqual([
+        // It read "RAG ↔", and the row under it "created" and no more.
+        ["link created", "RAG ↔ (no visible character: U+FEFF)"],
+        ["created", "(no visible character: U+FEFF)"],
+        ["created", `${UNSEEN} [tag]`],
+      ]);
+    });
+
+    it("brain_delete_thought: the question names what is to be deleted", async () => {
+      const { call } = await connect(
+        [
+          ["GET /graph", () => graph(thought("\u200b"))],
+          ["GET /api/notes", () => noNote],
+        ],
+        () => ({ config: { allowDestructive: true } }),
+      );
+      const asked = await call("brain_delete_thought", { brainId: BRAIN, thoughtId: THOUGHT });
+      expect(asked.isError).toBe(true);
+      expect(asked.text).toMatch(/^Delete the thought "\(no visible character: U\+200B\)"\?\n/);
+    });
+
+    it("a name with one character that shows is printed as it is", async () => {
+      // A person's emoji, a single symbol, a script the tables may not know:
+      // none of it is spelled out, with what does not show beside it or not.
+      const names = ["🧠", "👨\u200d👩\u200d👧", "❤\ufe0f", ".", "é", "e\u0301", "日本", "a\u200bb", "\u200bRAG\ufeff"];
+      // Blank to the eye, and a symbol or a mark by its properties: as it was.
+      const unknown = ["\u2800", "\u0301"];
+      const all = [...names, ...unknown];
+      const { call } = await connect([
+        [
+          "GET /graph",
+          () => ({
+            ...graph(thought("RAG")),
+            children: all.map((name, i) => at(`${OTHER.slice(0, -2)}${String(i).padStart(2, "0")}`, name)),
+          }),
+        ],
+        ["GET /api/notes", () => noNote],
+      ]);
+      const result = await call("brain_get_thought", { brainId: BRAIN, thoughtId: THOUGHT });
+      expect(result.text.split("\n").slice(4)).toEqual(
+        all.map((name, i) => `- ${name} — ${OTHER.slice(0, -2)}${String(i).padStart(2, "0")}`),
+      );
+    });
+  });
+});

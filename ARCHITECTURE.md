@@ -248,6 +248,40 @@ beside the document*).
 > index's. The mark still costs no request of its own. What the index's kind
 > still decides is which rows a default search leaves out as types and tags.
 
+**A name that does not show is spelled out, not refused.** A thought can be
+named with one zero width space, a byte order mark or a Hangul filler: the
+API stores such a name as it stores any other (§7, item 23). Every tool
+printed it as it is, which reads as no name: `# ` and an identifier, a row
+with a cell missing, `name = ""` after a rename. And `table()` trims the end
+of a row, so a byte order mark in the last cell went with the padding.
+
+Refusing such a name on a write was the other way, and was left. Every
+refusal in this server is for a request the API answers with a 200 and does
+not carry out as asked; this one it carries out. A refusal would not reach
+a thought named in the app or by another client, so the read tools need an
+answer either way. It could not be whole: by its Unicode properties the
+braille pattern blank (U+2800) is a symbol like any other, and a list of
+characters that look empty would be a guess. And a blank name is something
+a person can want.
+
+So `shownName()` prints `(no visible character: U+200B)`, the name's code
+points, in place of a name whose every code point has one of three Unicode
+properties: `White_Space`, `Default_Ignorable_Code_Point`, or the general
+category `Cc`. Nothing is judged: a name with one code point outside them
+is printed as it is, which is an emoji, a single symbol, and a script the
+runtime's tables do not know yet. Wrong one way, a name that is blank to
+the eye and not by those properties prints as it did. Wrong the other way,
+a name some font does draw is given by its code points, and those are the
+name: nothing is lost, up to the eight that are spelled out. It is used by
+`brain_get_thought`, `brain_traverse`, `brain_list_types_and_tags` and
+`brain_recent_changes`, in the question a deletion puts, and in the result
+of a create and of a rename, where the caller can still put it right.
+`table()` does the same for any cell that holds something and shows
+nothing, which covers a search hit and a batch's table. A name that shows
+costs nothing: its result is what it was, to the character. Left as they
+were: the active thought `brain_list` prints, a refusal that quotes the
+name of a type or a tag, and a batch's lines under "Failed" and "Skipped".
+
 ### `brain_ingest` — the tool the product is built around
 
 Input is a plan: thoughts with `tempId`s that reference each other and existing
@@ -1347,6 +1381,23 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     `brain_search` listed every hit as it found it. It reads the thought of
     each hit now, and `findByName` its answer (§8, *A hit for a thought that
     is gone*).
+23. **A name of white space alone is refused for a new thought and ignored
+    for a rename, and a name is not stored as it was sent.** White space is
+    Unicode's `White_Space`, 25 code points, which is not what `trim()`
+    drops: a next line (U+0085) is of it, and a byte order mark is not. A
+    create with nothing else for a name is a 400. A rename to it is a 200
+    that changes nothing and logs nothing, and `brain_update_thought`
+    answered "Done" and `name = ""`. A name is stored with each tab and each
+    line feed as a space and without the white space at its ends, and one
+    past 1,024 UTF-16 units is cut there, each with a 200. So a plan thought
+    sent as `"a\tb"` was looked for under a name no thought has, and made
+    again by every run. `nameRefusal()` refuses a name of white space and one
+    too long to keep, in the resource, in the two tools ahead of their first
+    read, and in `planLevels()`, where a next line used to pass and a byte
+    order mark did not. `thoughtNameAsStored()` is the name a plan thought is
+    looked for under and the name a result gives. A name of characters that
+    do not show is none of this: the API stores a zero width space as it
+    stores a letter (§4, *A name that does not show*).
 
 ### Write visibility
 

@@ -15,7 +15,9 @@ import {
   TheBrainError,
   assertUuid,
   mayHaveLanded,
+  nameRefusal,
   normalizeAliases,
+  thoughtNameAsStored,
   warnIfFencedCode,
   type AliasOutcome,
   type ApiErrorKind,
@@ -34,6 +36,7 @@ import {
   ok,
   section,
   sentence,
+  shownName,
   type ToolResponse,
 } from "../respond.js";
 
@@ -104,6 +107,15 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       const { brainId: bid, name, parentId, relation, note, typeId, tagIds, label } = args;
       const aliases = normalizeAliases(args.aliases ?? []);
 
+      // Ahead of every request. A name of white space was refused by the API
+      // after the reads of the tags and the parent, and a name too long to
+      // keep was cut and reported whole. `create` refuses both too.
+      const noName = nameRefusal(name, "name");
+      if (noName !== null) return fail(`${noName}. Nothing was written.`);
+      // The name as it is stored, and spelled out when nothing of it shows:
+      // the result is where the caller learns what the thought is called.
+      const named = shownName(thoughtNameAsStored(name));
+
       // Refused, not left out: the thought used to be created with no link
       // and reported as created. `create` refuses it too, in its own terms.
       if (relation !== undefined && parentId === undefined) {
@@ -150,12 +162,12 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         return fail(
           join([
             describeError(error),
-            section("Next", afterNoAnswer(name, parentId, hasNote, tags.length > 0)),
+            section("Next", afterNoAnswer(named, parentId, hasNote, tags.length > 0)),
           ]),
         );
       }
 
-      const done: string[] = [`created thought "${name}" — ${thoughtId}`];
+      const done: string[] = [`created thought "${named}" — ${thoughtId}`];
       if (aliases.length > 0) done.push(`aliases: ${JSON.stringify(aliases)}`);
       const warnings: string[] = [];
 
@@ -263,7 +275,15 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       if (provided.length === 0 && !editsAliases) {
         return fail("no fields were supplied to change");
       }
-      const line = ([k, v]: readonly [string, unknown]): string => `${k} = ${JSON.stringify(v)}`;
+      // Ahead of every request, the type's included. A rename to white space
+      // alone is a 200 that changes nothing, and it was listed under "Done".
+      const noName = changes.name === undefined ? null : nameRefusal(changes.name, "name");
+      if (noName !== null) return fail(`${noName}. Nothing was written.`);
+      // A name is given as it is stored, the blanks at its ends dropped, and
+      // spelled out when nothing of it shows: `name = "\u200b"` read as `""`.
+      const stored = changes.name === undefined ? undefined : thoughtNameAsStored(changes.name);
+      const line = ([k, v]: readonly [string, unknown]): string =>
+        `${k} = ${JSON.stringify(k === "name" ? shownName(stored) : v)}`;
       // One field to a request. The API applies a patch one operation at a
       // time and keeps what it wrote before the one it refuses, without
       // saying which that was: with a colour it refused, a name sent in the
@@ -297,7 +317,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
                 bid,
                 thoughtId,
                 { add: addAliases, remove: removeAliases },
-                { name: changes.name },
+                { name: stored },
               ),
             );
             return aliasLines;
@@ -675,7 +695,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       }
       // Marked when it is a type or a tag, as a read result marks one: that
       // is not one thought's own, and the person asked should see which it is.
-      const named = `"${graph.thought.name ?? "(unnamed)"}"${kindMark(graph.thought.kind)}`;
+      const named = `"${shownName(graph.thought.name)}"${kindMark(graph.thought.kind)}`;
       const summary = join([
         `Delete the thought ${named}?`,
         bullet(

@@ -51,8 +51,12 @@ export * from "./types.js";
 export {
   ALIASES_UNSUPPORTED,
   MAX_ALIASES,
+  MAX_NAME_LENGTH,
+  codePoints,
+  nameRefusal,
   normalizeAliases,
   replayThoughtIds,
+  thoughtNameAsStored,
   type AliasChanges,
   type AliasOutcome,
   type CleanGraph,

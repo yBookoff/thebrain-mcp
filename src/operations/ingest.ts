@@ -49,6 +49,10 @@
  *     share one: so two links of a plan between the same two thoughts are not
  *     both sent, and the first in the plan is the link.
  * 13. A label that takes another's place is reported with the one it took.
+ * 14. A thought is looked for under its name as TheBrain stores it: a tab and
+ *     a line feed a space each, the white space at the ends dropped. Looked
+ *     for under the name as the plan had it, such a thought was made again
+ *     by every run.
  */
 
 import {
@@ -60,7 +64,9 @@ import {
   isTypeLink,
   linkNameAsStored,
   mayHaveLanded,
+  nameRefusal,
   normalizeAliases,
+  thoughtNameAsStored,
   type CleanGraph,
   type TheBrainApi,
 } from "../api/index.js";
@@ -85,7 +91,7 @@ const RELATION_NAMES = Object.keys(LIST_OF) as RelationName[];
 
 /**
  * What a thought has next to it: for each relation, the thoughts of each
- * trimmed name, each with its kind as the graph gave it. A plan makes
+ * name as it is stored, each with its kind as the graph gave it. A plan makes
  * ordinary thoughts, and the one it finds there may be a type or a tag. One
  * list can hold two thoughts of a name, and a map of names to one thought
  * each used to keep the last of them alone.
@@ -296,9 +302,13 @@ export function planLevels(plan: IngestPlan): IngestThought[][] {
     if (byTempId.has(t.tempId)) {
       throw new IngestValidationError(`tempId "${t.tempId}" appears twice`);
     }
-    if (t.name.trim() === "") {
-      throw new IngestValidationError(`thought "${t.tempId}" has an empty name`);
-    }
+    // By the API's rule, not by `trim()`: a next line (U+0085) is white
+    // space to it, and a name of that alone went on to be refused in the
+    // middle of the batch; a byte order mark is none, and was refused here.
+    // A name too long to keep is cut with a 200, and was made again by
+    // every run, the plan's name never being the one stored.
+    const noName = nameRefusal(t.name, `the name of thought "${t.tempId}"`);
+    if (noName !== null) throw new IngestValidationError(noName);
     requireRelation(t.relation, `thought "${t.tempId}"`);
     // It used to be dropped without a word, and the thought created with no
     // link and listed as created.
@@ -633,7 +643,7 @@ export async function ingest(
     { tempId: string; relation: RelationName; creation: Promise<string> }
   >();
   const slot = (parentId: string | null, name: string): string =>
-    `${parentId ?? ""}\0${name.trim()}`;
+    `${parentId ?? ""}\0${thoughtNameAsStored(name)}`;
   /**
    * What the batch made next to a thought that was there before it, by that
    * thought: what its graph has to list before a second run can find it.
@@ -676,7 +686,7 @@ export async function ingest(
         if (dedupe) {
           if (parentId !== null) {
             near = await lookAround(parentId);
-            const there = near?.[relation].get(t.name.trim()) ?? [];
+            const there = near?.[relation].get(thoughtNameAsStored(t.name)) ?? [];
             if (there.length > 1) {
               throw twins(t, parentId, relation, there.map((n) => n.id));
             }
@@ -696,7 +706,7 @@ export async function ingest(
             // plan's children, tags and links; made again, it would be a
             // duplicate.
             for (const other of RELATION_NAMES) {
-              const namedSo = near?.[other].get(t.name.trim()) ?? [];
+              const namedSo = near?.[other].get(thoughtNameAsStored(t.name)) ?? [];
               if (namedSo.length > 0) {
                 throw namesake(t, parentId, relation, other, namedSo.map((n) => n.id));
               }
@@ -755,7 +765,9 @@ export async function ingest(
         }
 
         if (parentId !== null) {
-          near?.[relation].set(t.name.trim(), [{ id: thoughtId, kind: ThoughtKind.Normal }]);
+          near?.[relation].set(thoughtNameAsStored(t.name), [
+            { id: thoughtId, kind: ThoughtKind.Normal },
+          ]);
           if (!madeHere.has(parentId)) {
             const made = toBeListed.get(parentId) ?? [];
             toBeListed.set(parentId, [...made, { thoughtId, relation }]);
@@ -985,7 +997,7 @@ async function readNeighbours(
   const byName = (relation: RelationName): Neighbours[RelationName] => {
     const named: Neighbours[RelationName] = new Map();
     for (const t of graph[LIST_OF[relation]]) {
-      const name = (t.name ?? "").trim();
+      const name = thoughtNameAsStored(t.name ?? "");
       named.set(name, [...(named.get(name) ?? []), { id: t.id, kind: t.kind }]);
     }
     return named;

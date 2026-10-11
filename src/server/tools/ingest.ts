@@ -6,7 +6,7 @@ import { z } from "zod";
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { MAX_ALIASES, warnIfFencedCode } from "../../api/index.js";
+import { MAX_ALIASES, thoughtNameAsStored, warnIfFencedCode } from "../../api/index.js";
 import {
   IngestMissingError,
   IngestReadError,
@@ -184,7 +184,9 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
         t: { tempId: string; thoughtId: string; name: string; kind?: number },
       ) => [
         how,
-        t.name,
+        // As it is stored: a line feed in a plan's name broke the row in two.
+        // `table()` spells out one with no character that shows.
+        thoughtNameAsStored(t.name),
         t.thoughtId + (t.kind === undefined ? "" : kindMark(t.kind)),
         ...(noteColumn ? [noteOf(t.tempId)] : []),
         ...(partial ? [t.tempId] : []),

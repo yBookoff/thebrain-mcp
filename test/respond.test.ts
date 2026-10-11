@@ -13,6 +13,7 @@ import {
   kindMark,
   ok,
   section,
+  shownName,
   table,
 } from "../src/server/respond.js";
 import { describeAliasOutcome } from "../src/server/tools/write.js";
@@ -421,6 +422,81 @@ describe("formatting", () => {
 
   it("join drops empty parts", () => {
     expect(join(["first", null, "second"])).toBe("first\n\nsecond");
+  });
+});
+
+describe("a name that does not show", () => {
+  it("is spelled out by its code points, and no name at all is (unnamed)", () => {
+    expect(shownName(null)).toBe("(unnamed)");
+    expect(shownName(undefined)).toBe("(unnamed)");
+    expect(shownName("")).toBe("(unnamed)");
+    expect(shownName("\u200b")).toBe("(no visible character: U+200B)");
+    expect(shownName("\ufeff\u00ad\u2060")).toBe("(no visible character: U+FEFF U+00AD U+2060)");
+    expect(shownName("\u200b".repeat(12))).toBe(
+      `(no visible character: ${"U+200B ".repeat(8)}and 4 more)`,
+    );
+  });
+
+  it("goes by three Unicode properties: white space, default ignorable, control", () => {
+    for (const name of [
+      // Default_Ignorable_Code_Point: zero width and joiners, marks of direction,
+      // a soft hyphen, fillers, variation selectors, a tag character.
+      "\u200b", "\u200c", "\u200d", "\u200e", "\u2060", "\u2061", "\ufeff", "\u00ad",
+      "\u180e", "\u034f", "\u061c", "\u3164", "\u115f", "\uffa0", "\ufe0f", "\ufe00",
+      "\u{e0020}",
+      // Cc: the controls.
+      "\u0000", "\u0001", "\u001c", "\u007f", "\u009f",
+      // White_Space: the API stores no name of it alone, and an old brain might hold one.
+      " ", "\u00a0", "\u3000", "\u0085",
+      // And any run of them.
+      " \u200b\ufeff\u0001",
+    ]) {
+      expect(shownName(name), JSON.stringify(name)).toMatch(/^\(no visible character: U\+/);
+    }
+  });
+
+  it("a name with one character outside them is printed as it is", () => {
+    for (const name of [
+      "RAG", ".", "é", "e\u0301", "Ретривер", "日本語", "🧠", "👨\u200d👩\u200d👧", "❤\ufe0f",
+      "a\u200bb", "\u200bRAG\ufeff", " padded ",
+      // Blank to the eye and a symbol or a mark by its properties: no property
+      // tells these from a letter, and no list of them is kept.
+      "\u2800", "\u0301", "\u{1d159}",
+      // Private use, and a code point the tables may not know yet.
+      "\ue000", "\u{1fc00}",
+    ]) {
+      expect(shownName(name), JSON.stringify(name)).toBe(name);
+    }
+  });
+
+  it("a table cell that holds such a name says so, at the end of a row too", () => {
+    // A byte order mark in the last cell went with the padding, and the row
+    // read as one with nothing there; in the middle it read as an empty cell.
+    expect(
+      table(
+        ["What", "Thought", "Id"],
+        [
+          ["created", "\ufeff", ""],
+          ["created", "RAG", "1"],
+          ["renamed", "", "\u200b"],
+        ],
+      ).split("\n"),
+    ).toEqual([
+      "What     Thought                         Id",
+      "───────  ──────────────────────────────  ──────────────────────────────",
+      "created  (no visible character: U+FEFF)",
+      "created  RAG                             1",
+      "renamed                                  (no visible character: U+200B)",
+    ]);
+  });
+
+  it("a table of names that show is what it was, to the character", () => {
+    expect(table(["Name", "Id", ""], [["short", "1", ""], ["considerably longer", "2", "open"]])).toBe(
+      "Name                 Id\n" +
+        "───────────────────  ──  ────\n" +
+        "short                1\n" +
+        "considerably longer  2   open",
+    );
   });
 });
 

@@ -69,6 +69,74 @@ export interface UpdateThoughtInput {
 /** The API keeps the first hundred aliases of a longer list and drops the rest. */
 export const MAX_ALIASES = 100;
 
+/**
+ * The API keeps the first 1,024 UTF-16 units of a longer name and drops the
+ * rest, with a 200, on a create and on a rename alike.
+ */
+export const MAX_NAME_LENGTH = 1024;
+
+/** Unicode's `White_Space`, 25 code points: what the API takes for a blank in a name. */
+const NAME_EDGES = /^\p{White_Space}+|\p{White_Space}+$/gu;
+
+/**
+ * A thought's name as TheBrain keeps it, by a create and by a rename alike: a
+ * tab and a line feed are each a space, and the white space at either end is
+ * dropped (contract test; docs/api-map.md, L36).
+ *
+ * White space is Unicode's property of that name. It is not what `trim()`
+ * drops: a next line (U+0085) is white space and goes, and a byte order mark
+ * (U+FEFF) is none and stays, as a zero width space does. What is inside a
+ * name is kept, a run of spaces and a carriage return included.
+ *
+ * It is what a name asked for is set against the name a thought has, and what
+ * a result gives for the name: a plan thought sent as `"a\tb"` is stored as
+ * `"a b"`, and looked for as it was sent it was made again by every run.
+ */
+export function thoughtNameAsStored(name: string): string {
+  return name.replace(/[\t\n]/g, " ").replace(NAME_EDGES, "");
+}
+
+/**
+ * Why `name` cannot be a thought's name as it was given, or null when it can.
+ * `what` is the caller's word for it, and begins the sentence.
+ *
+ * The API does not refuse all of it. A name with nothing in it but white
+ * space is a 400 for a new thought, and for a rename a 200 that logs nothing
+ * and leaves the name as it was. A name past `MAX_NAME_LENGTH` is cut, with a
+ * 200. So both are refused here, ahead of the request.
+ *
+ * A name of characters that do not show is none of this: the API stores a
+ * zero width space as it stores a letter, and the server has no opinion of
+ * what a name should look like. A result says so where it prints one.
+ */
+export function nameRefusal(name: string, what: string): string | null {
+  const stored = thoughtNameAsStored(name);
+  if (stored === "") {
+    const of = name === "" ? "empty" : `white space alone (${codePoints(name)})`;
+    return `${what} is ${of}, and a thought has to have a name`;
+  }
+  if (stored.length > MAX_NAME_LENGTH) {
+    return (
+      `${what} is ${stored.length} UTF-16 units long, and TheBrain keeps the first ` +
+      `${MAX_NAME_LENGTH} of a name and drops the rest with a 200`
+    );
+  }
+  return null;
+}
+
+/** The most code points a result spells out. */
+const CODE_POINTS_SHOWN = 8;
+
+/** The code points of a text as `U+200B U+FEFF`: for characters that do not show. */
+export function codePoints(text: string): string {
+  const all = [...text].map(
+    (c) => `U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`,
+  );
+  const shown = all.slice(0, CODE_POINTS_SHOWN).join(" ");
+  const more = all.length - CODE_POINTS_SHOWN;
+  return more > 0 ? `${shown} and ${more} more` : shown;
+}
+
 /** What a new thought can be to its source: the API's own list has one more. */
 const RELATIONS: readonly number[] = Object.values(Relation);
 
@@ -242,6 +310,9 @@ export class ThoughtsResource {
 
   async create(brainId: string, input: CreateThoughtInput): Promise<string> {
     assertUuid(brainId, "brainId");
+    // Ahead of the reads below: the API refuses a name of white space only
+    // once they are made, and cuts a long one without a word.
+    assertName(input.name);
     if (input.sourceThoughtId !== undefined) {
       assertUuid(input.sourceThoughtId, "sourceThoughtId");
     }
@@ -331,6 +402,9 @@ export class ThoughtsResource {
   ): Promise<void> {
     assertUuid(brainId, "brainId");
     assertUuid(thoughtId, "thoughtId");
+    // A 200 that renames nothing, when the name is white space alone: it used
+    // to pass for a rename. Ahead of the type's read, so that nothing is sent.
+    if (changes.name !== undefined) assertName(changes.name);
     const { aliases, typeId, ...fields } = changes;
     // A 200 that sets nothing, also when the thought is a type and so passes
     // the check of its kind. Case aside: the API reads a UUID in capitals too.
@@ -556,6 +630,12 @@ export class ThoughtsResource {
       },
     );
   }
+}
+
+/** Throws `bad_request` for a name `nameRefusal` has a reason against, before anything is sent. */
+function assertName(name: string): void {
+  const refusal = nameRefusal(name, "name");
+  if (refusal !== null) throw new TheBrainError("bad_request", refusal);
 }
 
 /** How aliases are compared: the API deduplicates them ignoring case. */

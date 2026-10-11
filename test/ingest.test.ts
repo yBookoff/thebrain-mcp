@@ -523,7 +523,47 @@ describe("plan validation before any write", () => {
 
   it("an empty name is rejected", () => {
     expect(() => planLevels({ thoughts: [{ tempId: "a", name: "   " }] })).toThrowError(
-      /empty name/,
+      /the name of thought "a" is white space alone/,
+    );
+  });
+
+  it("a name is empty by the API's rule, not by trim(): the plan item is named, and why", () => {
+    const refused = (name: string): string | null => {
+      try {
+        planLevels({ thoughts: [{ tempId: "ok", name: "one" }, { tempId: "t1", name }] });
+        return null;
+      } catch (error) {
+        expect(error).toBeInstanceOf(IngestValidationError);
+        return (error as Error).message;
+      }
+    };
+    const NO_NAME = ", and a thought has to have a name";
+    expect(refused("")).toBe(`the name of thought "t1" is empty${NO_NAME}`);
+    expect(refused(" \t")).toBe(
+      `the name of thought "t1" is white space alone (U+0020 U+0009)${NO_NAME}`,
+    );
+    expect(refused("\u00a0\u3000")).toBe(
+      `the name of thought "t1" is white space alone (U+00A0 U+3000)${NO_NAME}`,
+    );
+    // A next line is white space to the API, and `trim()` leaves it: the
+    // thought went on to be refused in the middle of the batch.
+    expect(refused("\u0085")).toBe(
+      `the name of thought "t1" is white space alone (U+0085)${NO_NAME}`,
+    );
+    // A byte order mark is none, and `trim()` drops it: the API stores a
+    // name of one, and the plan used to be rejected for an empty name.
+    for (const name of ["\ufeff", "\u200b", "\u2800", "\u0301", "🧠", "."]) {
+      expect(refused(name), JSON.stringify(name)).toBeNull();
+    }
+  });
+
+  it("a name too long to keep is rejected: stored cut, it was made again by every run", () => {
+    const plan = (name: string): IngestPlan => ({ thoughts: [{ tempId: "t1", name }] });
+    expect(() => planLevels(plan("a".repeat(1024)))).not.toThrow();
+    expect(() => planLevels(plan(` ${"a".repeat(1024)}\n`))).not.toThrow();
+    expect(() => planLevels(plan("a".repeat(1025)))).toThrowError(
+      'the name of thought "t1" is 1025 UTF-16 units long, and TheBrain keeps the first ' +
+        "1024 of a name and drops the rest with a 200",
     );
   });
 
@@ -3823,5 +3863,78 @@ describe("the identifier of zeros in a plan", () => {
         links: [{ from: "a", to: ZEROS }],
       }),
     ).not.toThrow();
+  });
+});
+
+describe("a plan thought's name, set against the name a thought is stored by", () => {
+  const THERE = "dddddddd-0000-4000-8000-000000000004";
+  const under = (name: string) =>
+    fakeBrain([
+      { id: ROOT, name: "root" },
+      { id: THERE, name, parent: ROOT },
+    ]);
+  const one = (name: string): IngestPlan => ({ thoughts: [{ tempId: "t1", name, parent: ROOT }] });
+
+  it("a name sent with a tab, a line feed or white space around it finds the thought it was stored as", async () => {
+    // TheBrain stores a tab and a line feed as a space each and drops the
+    // white space at the ends, a next line included. Looked for as it was
+    // sent, the thought was made again by every run of the plan.
+    for (const [sent, stored] of [
+      ["a\tb", "a b"],
+      ["a\nb", "a b"],
+      ["\u0085Idea\u0085", "Idea"],
+      ["\u00a0 Idea\t", "Idea"],
+      ["  Idea  ", "Idea"],
+    ] as const) {
+      const { api, thoughts } = under(stored);
+      for (const run of ["first", "second"]) {
+        const outcome = await ingest(api, BRAIN, one(sent));
+        const where = `${JSON.stringify(sent)}, ${run} run`;
+        expect(outcome.failures, where).toEqual([]);
+        expect(outcome.created, where).toEqual([]);
+        expect(
+          outcome.reused.map((r) => r.thoughtId),
+          where,
+        ).toEqual([THERE]);
+      }
+      expect(thoughts.size, JSON.stringify(sent)).toBe(2);
+    }
+  });
+
+  it("a byte order mark or a zero width space at an end is part of the name, as the API has it", async () => {
+    // `trim()` drops the first, so "Idea" used to land on a thought stored
+    // as "\ufeffIdea", which is another name.
+    for (const [sent, stored] of [
+      ["Idea", "\ufeffIdea"],
+      ["\ufeffIdea", "Idea"],
+      ["Idea", "Idea\u200b"],
+    ] as const) {
+      const { api } = under(stored);
+      const outcome = await ingest(api, BRAIN, one(sent));
+      const where = `${JSON.stringify(sent)} beside ${JSON.stringify(stored)}`;
+      expect(outcome.reused, where).toEqual([]);
+      expect(
+        outcome.created.map((c) => c.name),
+        where,
+      ).toEqual([sent]);
+    }
+    // The same name, mark and all, is the same thought.
+    const { api } = under("\ufeffIdea");
+    const outcome = await ingest(api, BRAIN, one("\ufeffIdea"));
+    expect(outcome.reused.map((r) => r.thoughtId)).toEqual([THERE]);
+  });
+
+  it("two plan items whose names are stored alike are one create", async () => {
+    const { api, thoughts } = fakeBrain([{ id: ROOT, name: "root" }]);
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [
+        { tempId: "t1", name: "a\tb", parent: ROOT },
+        { tempId: "t2", name: " a b\n", parent: ROOT },
+      ],
+    });
+    expect(outcome.failures).toEqual([]);
+    expect(outcome.created.map((c) => c.tempId)).toEqual(["t1"]);
+    expect(outcome.reused.map((r) => r.tempId)).toEqual(["t2"]);
+    expect(thoughts.size).toBe(2);
   });
 });

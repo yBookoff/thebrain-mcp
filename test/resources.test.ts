@@ -3,12 +3,16 @@ import { describe, expect, it, vi } from "vitest";
 import { TheBrainApi } from "../src/api/index.js";
 import {
   LOG_PAGE_SIZE,
+  MAX_NAME_LENGTH,
+  codePoints,
   compareLogTime,
   linkNameAsStored,
   logEntryKey,
   logTime,
+  nameRefusal,
   normalizeAliases,
   replayThoughtIds,
+  thoughtNameAsStored,
   urlKey,
   warnIfFencedCode,
 } from "../src/api/index.js";
@@ -183,6 +187,157 @@ describe("updating a thought: flat fields become JSON Patch", () => {
       });
     }
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("a thought's name", () => {
+  /**
+   * Unicode's `White_Space`, all 25 code points of it: what the API takes
+   * for a blank in a name (contract test). Spelled out, so that the rule is
+   * the list that was measured and not whatever the runtime's tables hold.
+   */
+  const WHITE_SPACE = [
+    0x9, 0xa, 0xb, 0xc, 0xd, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004,
+    0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
+  ].map((cp) => String.fromCodePoint(cp));
+  /** Characters that do not show and are no white space: the API stores a name of one. */
+  const UNSEEN = ["\u200b", "\ufeff", "\u2800", "\u2060", "\u0301", "\ufe0f", "\u180e", "\u001c"];
+  const BLANK = ["", " ", "   ", "\t\n", "\r\n", "\u00a0", "\u0085", "\u3000", " \u00a0\t\u3000\u0085\n"];
+
+  const creating = () => apiWith([["POST /api/thoughts", () => ({ id: THOUGHT })]]);
+  const renaming = () => apiWith([["PATCH /api/thoughts", () => 200]]);
+
+  it("is stored with a tab and a line feed as spaces and no white space at its ends", () => {
+    // Each pair as the live API stored it, by a create and by a rename.
+    for (const [sent, stored] of [
+      ["plain", "plain"],
+      ["  ab  ", "ab"],
+      ["\tab\t", "ab"],
+      ["\nab\n", "ab"],
+      ["\r\nab\r\n", "ab"],
+      ["\u000bab\u000c", "ab"],
+      ["\u0085ab\u0085", "ab"],
+      ["\u00a0ab\u00a0", "ab"],
+      ["\u2003ab\u2003", "ab"],
+      ["\u2028ab\u2029", "ab"],
+      ["\u3000ab\u3000", "ab"],
+      // No white space: a byte order mark, a zero width space, a control.
+      ["\ufeffab\ufeff", "\ufeffab\ufeff"],
+      ["\u200bab\u200b", "\u200bab\u200b"],
+      ["\u001cab\u001f", "\u001cab\u001f"],
+      [" \u200b ", "\u200b"],
+      [" \ufeff\t", "\ufeff"],
+      // Inside a name only a tab and a line feed change.
+      ["a\nb", "a b"],
+      ["a\tb", "a b"],
+      ["a\r\nb", "a\r b"],
+      ["a\rb", "a\rb"],
+      ["a  b", "a  b"],
+      ["a\u00a0b", "a\u00a0b"],
+      ["a\u2028b", "a\u2028b"],
+      ["a\u0085b", "a\u0085b"],
+      ["a \n b", "a   b"],
+    ] as const) {
+      expect(thoughtNameAsStored(sent), JSON.stringify(sent)).toBe(stored);
+      // What is stored is stored as it is.
+      expect(thoughtNameAsStored(stored), JSON.stringify(stored)).toBe(stored);
+    }
+  });
+
+  it("white space is the Unicode property's 25 code points, which is not what trim() drops", () => {
+    for (const c of WHITE_SPACE) {
+      const cp = codePoints(c);
+      expect(thoughtNameAsStored(`${c}ab${c}`), cp).toBe("ab");
+      expect(nameRefusal(c, "name"), cp).toBe(
+        `name is white space alone (${cp}), and a thought has to have a name`,
+      );
+    }
+    // The two that differ: `trim()` keeps a next line and drops a byte order mark.
+    expect("\u0085".trim()).toBe("\u0085");
+    expect(nameRefusal("\u0085", "name")).not.toBeNull();
+    expect("\ufeff".trim()).toBe("");
+    expect(nameRefusal("\ufeff", "name")).toBeNull();
+  });
+
+  it("a name with nothing in it but white space is refused, in the caller's word for it", () => {
+    expect(nameRefusal("", "name")).toBe("name is empty, and a thought has to have a name");
+    expect(nameRefusal(" \u00a0\t", 'the name of thought "t1"')).toBe(
+      'the name of thought "t1" is white space alone (U+0020 U+00A0 U+0009), ' +
+        "and a thought has to have a name",
+    );
+    // A long run of it is not spelled out to the end.
+    expect(nameRefusal(" ".repeat(30), "name")).toBe(
+      `name is white space alone (${"U+0020 ".repeat(8)}and 22 more), ` +
+        "and a thought has to have a name",
+    );
+  });
+
+  it("a name of characters that do not show is no white space, and is not refused", () => {
+    for (const name of [...UNSEEN, "\u200b\ufeff", "RAG", "é", "日本", "🧠", "."]) {
+      expect(nameRefusal(name, "name"), codePoints(name)).toBeNull();
+      expect(thoughtNameAsStored(name), codePoints(name)).toBe(name);
+    }
+  });
+
+  it("a name past 1,024 UTF-16 units is refused, counted as it would be stored", () => {
+    expect(MAX_NAME_LENGTH).toBe(1024);
+    expect(nameRefusal("a".repeat(1024), "name")).toBeNull();
+    expect(nameRefusal("a".repeat(1025), "name")).toBe(
+      "name is 1025 UTF-16 units long, and TheBrain keeps the first 1024 of a name and " +
+        "drops the rest with a 200",
+    );
+    // The blanks at its ends are dropped before it is cut, so they do not count.
+    expect(nameRefusal(` ${"a".repeat(1024)}\n`, "name")).toBeNull();
+    // Units, not characters: 512 of these are 1,024 units.
+    expect(nameRefusal("🧠".repeat(512), "name")).toBeNull();
+    expect(nameRefusal("🧠".repeat(513), "name")).toMatch(/^name is 1026 UTF-16 units long/);
+  });
+
+  it("create refuses both before any request", async () => {
+    const { api, fetchImpl } = creating();
+    for (const name of [...BLANK, "a".repeat(1025)]) {
+      await expect(
+        // With a source and a type, each of which is read ahead of the create.
+        api.thoughts.create(BRAIN, { name, sourceThoughtId: THOUGHT, typeId: TYPE }),
+        codePoints(name.slice(0, 8)),
+      ).rejects.toMatchObject({ kind: "bad_request", message: nameRefusal(name, "name") });
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("update refuses both before any request, the type's read included", async () => {
+    // The API answers 200 to such a rename and leaves the name as it was.
+    const { api, fetchImpl } = renaming();
+    for (const name of [...BLANK, "a".repeat(1025)]) {
+      await expect(
+        api.thoughts.update(BRAIN, THOUGHT, { name, typeId: TYPE, label: "kept out" }),
+        codePoints(name.slice(0, 8)),
+      ).rejects.toMatchObject({ kind: "bad_request", message: nameRefusal(name, "name") });
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("any other name goes out as it was given, one that does not show and one with blanks around it", async () => {
+    for (const name of [...UNSEEN, "  padded\t", "a\nb", "a".repeat(1024)]) {
+      const made = creating();
+      await made.api.thoughts.create(BRAIN, { name });
+      expect(made.calls.map((c) => c.body), codePoints(name.slice(0, 8))).toEqual([
+        { name, kind: 1, acType: 0 },
+      ]);
+
+      const renamed = renaming();
+      await renamed.api.thoughts.update(BRAIN, THOUGHT, { name });
+      expect(renamed.calls.map((c) => c.body), codePoints(name.slice(0, 8))).toEqual([
+        [{ op: "replace", path: "/name", value: name }],
+      ]);
+    }
+  });
+
+  it("code points are spelled out to the eighth, and the rest counted", () => {
+    expect(codePoints("\u200b")).toBe("U+200B");
+    expect(codePoints("\t\u00a0\u{e0020}")).toBe("U+0009 U+00A0 U+E0020");
+    expect(codePoints("\u200b".repeat(8))).toBe(Array(8).fill("U+200B").join(" "));
+    expect(codePoints("\u200b".repeat(9))).toBe(`${Array(8).fill("U+200B").join(" ")} and 1 more`);
   });
 });
 

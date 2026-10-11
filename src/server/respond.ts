@@ -6,7 +6,7 @@
  * call; the latter is a protocol failure it never gets to read.
  */
 
-import { TheBrainError } from "../api/index.js";
+import { TheBrainError, codePoints } from "../api/index.js";
 import { ThoughtKind } from "../api/types.js";
 import { EmbedderUnavailableError } from "../semantic/embedder.js";
 
@@ -202,12 +202,16 @@ export function table(
   rows: ReadonlyArray<readonly string[]>,
 ): string {
   if (rows.length === 0) return "(empty)";
+  // A cell that holds something and shows nothing says what it holds: it
+  // read as a cell with nothing in it, and at the end of a row a byte order
+  // mark went with the padding. An empty cell is one the caller left empty.
+  const shown = rows.map((r) => r.map((c) => (c === "" ? c : shownName(c))));
   const widths = headers.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => (r[i] ?? "").length)),
+    Math.max(h.length, ...shown.map((r) => (r[i] ?? "").length)),
   );
   const line = (cells: readonly string[]): string =>
     cells.map((c, i) => (c ?? "").padEnd(widths[i]!)).join("  ").trimEnd();
-  return [line(headers), line(widths.map((w) => "─".repeat(w))), ...rows.map(line)].join(
+  return [line(headers), line(widths.map((w) => "─".repeat(w))), ...shown.map(line)].join(
     "\n",
   );
 }
@@ -224,6 +228,29 @@ export function section(title: string, body: string | null): string | null {
 
 export function join(parts: ReadonlyArray<string | null>): string {
   return parts.filter((p): p is string => p !== null).join("\n\n");
+}
+
+/** A text with nothing in it that shows: white space, what is ignored in drawing text, controls. */
+const UNSEEN = /^[\p{White_Space}\p{Default_Ignorable_Code_Point}\p{Cc}]*$/u;
+
+/**
+ * A thought's name as a result prints it. `(unnamed)` for none, and for a
+ * name with no character that shows its code points, `(no visible character:
+ * U+200B)`: the API stores such a name as it stores any other, and printed
+ * as it is it read as no name at all, with nothing to say why.
+ *
+ * "Shows" is not judged here. A name is spelled out when every code point of
+ * it has one of three Unicode properties: `White_Space`,
+ * `Default_Ignorable_Code_Point`, or the general category `Cc`. That takes
+ * in a zero width space, a byte order mark, a soft hyphen, a Hangul filler
+ * and a variation selector on its own. It leaves out what is blank to the
+ * eye and a symbol by its properties, the braille pattern blank (U+2800)
+ * for one: that prints as it is, as it did. Spelled out, a name of up to
+ * eight code points loses nothing: the code points are the name.
+ */
+export function shownName(name: string | null | undefined): string {
+  if (name === null || name === undefined || name === "") return "(unnamed)";
+  return UNSEEN.test(name) ? `(no visible character: ${codePoints(name)})` : name;
 }
 
 /**

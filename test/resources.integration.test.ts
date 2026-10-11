@@ -36,7 +36,9 @@ import {
   linkNameAsStored,
   logEntryKey,
   logTime,
+  nameRefusal,
   replayThoughtIds,
+  thoughtNameAsStored,
   type CleanGraph,
   type LinkDto,
   type ModificationLogDto,
@@ -6102,6 +6104,283 @@ suite("resource layer against the live API", () => {
 
       await settle();
       expect((await api.thoughts.getGraph(brainId, source)).links).toEqual([]);
+    });
+  });
+
+  /**
+   * Measured on TheBrain 15.0.640, 2026-10-11 (docs/api-map.md, L36). The
+   * spec says of a name that it is a string, and nothing of any of this.
+   */
+  describe("a thought's name: what is refused, what is ignored, and what is stored", () => {
+    /** Unicode's `White_Space`, all 25 code points of it. */
+    const WHITE_SPACE = [
+      0x9, 0xa, 0xb, 0xc, 0xd, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004,
+      0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
+    ].map((cp) => String.fromCodePoint(cp));
+    const BLANK = ["", "   ", "\t\n", "\r\n", " \u00a0\t\u3000\u0085\n", ...WHITE_SPACE];
+    /**
+     * Characters that do not show and are no white space: zero width, a byte
+     * order mark, a braille blank, a word joiner, a combining mark and a
+     * variation selector on their own, a Mongolian vowel separator, a control.
+     */
+    const UNSEEN = ["\u200b", "\ufeff", "\u2800", "\u2060", "\u0301", "\ufe0f", "\u180e", "\u001c"];
+    const KINDS = [ThoughtKind.Normal, ThoughtKind.Type, ThoughtKind.Tag];
+    const hex = (text: string): string =>
+      [...text].map((c) => `U+${c.codePointAt(0)!.toString(16)}`).join(" ");
+
+    const answer = (request: Promise<unknown>): Promise<string> =>
+      request.then(
+        () => "accepted",
+        (e: unknown) =>
+          e instanceof TheBrainError ? `${e.status} ${e.kind}: ${e.message}` : String(e),
+      );
+    /** A create as the API takes it, the name whatever it is, or left out. */
+    const rawCreate = async (name: unknown, kind: number = ThoughtKind.Normal): Promise<string> => {
+      const { id } = await api.client.post<{ id: string }>(`/api/thoughts/${brainId}`, {
+        json: { ...(name === undefined ? {} : { name }), kind, acType: 0 },
+      });
+      created.push(id);
+      return id;
+    };
+    const rawRename = (id: string, value: unknown): Promise<unknown> =>
+      api.client.patch(`/api/thoughts/${brainId}/${id}`, {
+        jsonPatch: [{ op: "replace", path: "/name", value }],
+      });
+    const nameOf = async (id: string): Promise<string | null> =>
+      (await api.thoughts.get(brainId, id)).name;
+    /** The thought's own log entries, oldest first, as `101 "name"` or `103 "old"→"new"`. */
+    const logged = async (id: string): Promise<string[]> =>
+      (await api.thoughts.modifications(brainId, id, { includeRelated: false }))
+        .filter((l) => l.sourceId === id)
+        .reverse()
+        .map((l) =>
+          l.modType === ModType.Created
+            ? `101 ${JSON.stringify(l.newValue)}`
+            : `${l.modType} ${JSON.stringify(l.oldValue)}→${JSON.stringify(l.newValue)}`,
+        );
+
+    it("a create with a name of white space alone is a 400, for each of the 25 code points, and so is no name", async () => {
+      for (const name of BLANK) {
+        expect(await answer(rawCreate(name)), hex(name)).toBe(
+          "400 bad_request: A name is required",
+        );
+        // The server's rule is the API's: it refuses what the API refuses.
+        expect(nameRefusal(name, "name"), hex(name)).not.toBeNull();
+      }
+      for (const kind of [ThoughtKind.Type, ThoughtKind.Tag]) {
+        for (const name of ["", " ", "\u00a0", "\u0085", "\u3000\t"]) {
+          expect(await answer(rawCreate(name, kind)), `kind ${kind}, ${hex(name)}`).toBe(
+            "400 bad_request: A name is required",
+          );
+        }
+      }
+      // With null for a name, and with none, the 400 is the validator's.
+      for (const kind of KINDS) {
+        for (const name of [null, undefined]) {
+          expect(await answer(rawCreate(name, kind)), `kind ${kind}, ${String(name)}`).toMatch(
+            /^400 bad_request: One or more validation errors occurred/,
+          );
+        }
+      }
+    }, 60_000);
+
+    it("a rename to one is a 200 that leaves the name as it was and logs nothing", async () => {
+      for (const kind of KINDS) {
+        const name = `${PREFIX}name-kept-${kind}`;
+        const id = await rawCreate(name, kind);
+        // All 25 for an ordinary thought, a handful for a type and a tag.
+        const blanks = kind === ThoughtKind.Normal ? BLANK : ["", " ", "\u00a0", "\u0085", "\u3000\t"];
+        // And null, and a `replace` that carries no value at all.
+        for (const blank of [...blanks, null, undefined]) {
+          expect(await answer(rawRename(id, blank)), `kind ${kind}, ${hex(blank ?? "none")}`).toBe(
+            "accepted",
+          );
+        }
+        // A rename reads back within 0.2 s: one that had gone through would show.
+        await settle(500);
+        expect(await nameOf(id), `kind ${kind}`).toBe(name);
+        expect(await logged(id), `kind ${kind}`).toEqual([`101 ${JSON.stringify(name)}`]);
+      }
+    }, 60_000);
+
+    it("only replace is taken for a name: remove and add are a 400", async () => {
+      const id = await make("name-ops");
+      for (const op of [
+        { op: "remove", path: "/name" },
+        { op: "add", path: "/name", value: `${PREFIX}added` },
+      ] as const) {
+        expect(
+          await answer(api.client.patch(`/api/thoughts/${brainId}/${id}`, { jsonPatch: [op] })),
+          op.op,
+        ).toBe("400 bad_request: Only 'replace' operation is allowed for 'name' path.");
+      }
+      expect(await nameOf(id)).toBe(`${PREFIX}name-ops`);
+    });
+
+    it("a name of one character that does not show is stored as it was given, by a create and by a rename", async () => {
+      for (const kind of [ThoughtKind.Normal, ThoughtKind.Type]) {
+        const renamed = await rawCreate(`${PREFIX}name-unseen-${kind}`, kind);
+        for (const name of UNSEEN) {
+          const where = `kind ${kind}, ${hex(name)}`;
+          // Not white space, so the server does not refuse it either.
+          expect(nameRefusal(name, "name"), where).toBeNull();
+          expect(thoughtNameAsStored(name), where).toBe(name);
+
+          const made = await rawCreate(name, kind);
+          expect(await nameOf(made), where).toBe(name);
+          expect(await logged(made), where).toEqual([`101 ${JSON.stringify(name)}`]);
+
+          await rawRename(renamed, name);
+          const read = await eventually(() => nameOf(renamed), (n) => n === name, {
+            timeoutMs: 3000,
+            stepMs: 50,
+          });
+          expect(read, where).toBe(name);
+        }
+        // Left under a name the sweep of leftovers can find.
+        await rawRename(renamed, `${PREFIX}name-unseen-${kind}`);
+      }
+    }, 60_000);
+
+    it("a name is stored with a tab and a line feed as spaces and no white space at its ends, by a create as by a rename", async () => {
+      const n = `${PREFIX}name`;
+      const samples = [
+        `  ${n} padded  `,
+        `\t${n} tabs\t`,
+        `\r\n${n} crlf\r\n`,
+        // No white space, so kept: a byte order mark, a zero width space, a control.
+        `\ufeff${n} bom\ufeff`,
+        `\u200b${n} zero width\u200b`,
+        `\u001c${n} control\u001f`,
+        ` \u200b${n} both `,
+        // Inside a name only a tab and a line feed change.
+        `${n} tab\tinside`,
+        `${n} line\nbreak`,
+        `${n} crlf\r\nbreak`,
+        `${n} cr\rinside`,
+        `${n} two  spaces`,
+        `${n} nbsp\u00a0inside`,
+        `${n} next\u0085line`,
+        `${n} separator\u2028inside`,
+        `${n} a \n b`,
+        // Each white space code point at both ends.
+        ...WHITE_SPACE.map((c, i) => `${c}${n} ws-${i}${c}`),
+      ];
+      const renamed = await make("name-stored");
+      for (const sent of samples) {
+        const stored = thoughtNameAsStored(sent);
+        const made = await rawCreate(sent);
+        expect(await nameOf(made), hex(sent)).toBe(stored);
+        // The log has the name as it is stored, too.
+        expect(await logged(made), hex(sent)).toEqual([`101 ${JSON.stringify(stored)}`]);
+
+        await rawRename(renamed, sent);
+        const read = await eventually(() => nameOf(renamed), (name) => name === stored, {
+          timeoutMs: 3000,
+          stepMs: 50,
+        });
+        expect(read, hex(sent)).toBe(stored);
+      }
+      // What `trim()` would have made of two of them is not what is stored.
+      expect(thoughtNameAsStored(`\u0085${n}\u0085`)).toBe(n);
+      expect(thoughtNameAsStored(`\ufeff${n}`)).toBe(`\ufeff${n}`);
+    }, 120_000);
+
+    it("a rename to the name a thought has, in other white space, is a 200 that logs nothing", async () => {
+      const name = `${PREFIX}name same`;
+      const id = await rawCreate(name);
+      for (const again of [name, `${name} `, `\t${name}\n`, `\u00a0${name}\u3000`, name.replace(" same", "\nsame")]) {
+        expect(thoughtNameAsStored(again), hex(again)).toBe(name);
+        await rawRename(id, again);
+      }
+      await settle(500);
+      expect(await nameOf(id)).toBe(name);
+      expect(await logged(id)).toEqual([`101 ${JSON.stringify(name)}`]);
+      // Another name is logged, with the old one beside it. Case alone is another name.
+      await rawRename(id, name.toUpperCase());
+      await eventually(() => nameOf(id), (n) => n === name.toUpperCase(), { timeoutMs: 3000, stepMs: 50 });
+      expect(await logged(id)).toEqual([
+        `101 ${JSON.stringify(name)}`,
+        `103 ${JSON.stringify(name)}→${JSON.stringify(name.toUpperCase())}`,
+      ]);
+    }, 30_000);
+
+    it("a name of 1,024 UTF-16 units is kept whole, and of a longer one the first 1,024, with a 200", async () => {
+      const long = (units: number, tail = ""): string => {
+        const head = `${PREFIX}name-long-`;
+        return head + "a".repeat(units - head.length - tail.length) + tail;
+      };
+      const renamed = await make("name-long-renamed");
+      for (const [sent, kept] of [
+        [long(1024), long(1024)],
+        [long(1025), long(1025).slice(0, 1024)],
+        [long(4000), long(4000).slice(0, 1024)],
+        // Units, not characters or bytes: an emoji is two, a Cyrillic letter one.
+        [long(1026, "яяя"), long(1026, "яяя").slice(0, 1024)],
+        [long(1026, "🧠🧠"), long(1026, "🧠🧠").slice(0, 1024)],
+        // The ends are dropped before the cut, so they are not counted,
+        [`  ${long(1024)}\n`, long(1024)],
+        // and nothing is dropped after it: this one is stored ending in a space.
+        [`${long(1023)} b`, `${long(1023)} `],
+        // A cut that falls inside an emoji leaves U+FFFD for its first half.
+        [long(1025, "🧠"), `${long(1025, "🧠").slice(0, 1023)}\ufffd`],
+      ] as const) {
+        const where = `${sent.length} units`;
+        expect(kept.length, where).toBeLessThanOrEqual(1024);
+        const made = await rawCreate(sent);
+        expect(await nameOf(made), where).toBe(kept);
+
+        await rawRename(renamed, sent);
+        const read = await eventually(() => nameOf(renamed), (name) => name === kept, {
+          timeoutMs: 3000,
+          stepMs: 50,
+        });
+        expect(read, where).toBe(kept);
+        // The server refuses exactly the ones that are cut.
+        expect(nameRefusal(sent, "name") === null, where).toBe(thoughtNameAsStored(sent) === kept);
+      }
+      // The log keeps less of a name: the first 140 units.
+      const made = await rawCreate(long(1024));
+      expect(await logged(made)).toEqual([`101 ${JSON.stringify(long(1024).slice(0, 140))}`]);
+    }, 60_000);
+
+    it("a plan thought sent with a tab or white space around its name is found by the name it was stored by", async () => {
+      // Looked for as it was sent, each of these was made again by every run
+      // of the plan (1 of 1 each, through the tool as it was).
+      const root = await make("name-plan-root");
+      const names = [`${PREFIX}plan tab\tinside`, `${PREFIX}plan line\nbreak`, `\u0085${PREFIX}plan next line\u0085`];
+      const plan = {
+        thoughts: names.map((name, i) => ({ tempId: `t${i}`, name, parent: root })),
+      };
+      const first = await ingest(api, brainId, plan);
+      created.push(...first.created.map((c) => c.thoughtId));
+      expect(first.failures).toEqual([]);
+      expect(first.created).toHaveLength(3);
+
+      const second = await ingest(api, brainId, plan);
+      created.push(...second.created.map((c) => c.thoughtId));
+      expect(second.created).toEqual([]);
+      expect(second.reused.map((r) => r.thoughtId).sort()).toEqual(
+        first.created.map((c) => c.thoughtId).sort(),
+      );
+      const graph = await api.thoughts.getGraph(brainId, root);
+      expect(graph.children.map((c) => c.name).sort()).toEqual(names.map(thoughtNameAsStored).sort());
+    }, 30_000);
+
+    it("the resource refuses a name the API would not store as asked, and sends nothing", async () => {
+      const id = await make("name-refused");
+      for (const name of ["", " ", "\u00a0", "\u0085", "a".repeat(1025)]) {
+        await expect(api.thoughts.update(brainId, id, { name }), hex(name.slice(0, 4))).rejects.toMatchObject({
+          kind: "bad_request",
+          status: undefined,
+        });
+        await expect(api.thoughts.create(brainId, { name }), hex(name.slice(0, 4))).rejects.toMatchObject({
+          kind: "bad_request",
+          status: undefined,
+        });
+      }
+      expect(await nameOf(id)).toBe(`${PREFIX}name-refused`);
+      expect(await logged(id)).toEqual([`101 ${JSON.stringify(`${PREFIX}name-refused`)}`]);
     });
   });
 

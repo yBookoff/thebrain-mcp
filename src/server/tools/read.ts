@@ -39,6 +39,7 @@ import {
   ok,
   section,
   sentence,
+  shownName,
   table,
 } from "../respond.js";
 
@@ -291,7 +292,7 @@ function notReadSection(unread: readonly TraverseUnread[]): string | null {
   const lead =
     `${one ? "The graph of one thought" : `The graphs of ${unread.length} thoughts`} on the ` +
     `way could not be read, so what lies beyond ${one ? "it" : "them"} is missing from this result`;
-  const named = (u: TraverseUnread): string => `${u.name} — ${u.id}`;
+  const named = (u: TraverseUnread): string => `${shownName(u.name)} — ${u.id}`;
   const why = (u: TraverseUnread): string => sentence(describeError(u.error));
   const reasons = new Set(unread.map(why));
   if (reasons.size > 1) {
@@ -550,21 +551,21 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       // and a write refuses it where an ordinary thought was meant.
       const names = (
         list: ReadonlyArray<{ name: string | null; id: string; kind: number }>,
-      ): string[] => list.map((t) => `${t.name ?? "(unnamed)"} — ${t.id}${kindMark(t.kind)}`);
+      ): string[] => list.map((t) => `${shownName(t.name)} — ${t.id}${kindMark(t.kind)}`);
 
       // A thought printed without its note is an error, so that it is not
       // read as the thought in full: the rest is there, and the note is not.
       return ("error" in note ? fail : ok)(
         join([
-          `# ${graph.thought.name ?? "(unnamed)"}\n${graph.thought.id}${kindMark(graph.thought.kind)}`,
+          `# ${shownName(graph.thought.name)}\n${graph.thought.id}${kindMark(graph.thought.kind)}`,
           // One per line: an alias may hold a comma, and the list gets edited by value.
           section("Aliases", bullet(aliasesOf(graph.thought))),
           // With its identifier: that is what a typeId takes.
           graph.type
-            ? section("Type", `${graph.type.name ?? "(unnamed)"} — ${graph.type.id}`)
+            ? section("Type", `${shownName(graph.type.name)} — ${graph.type.id}`)
             : null,
           graph.tags.length > 0
-            ? section("Tags", graph.tags.map((t) => t.name ?? "").join(", "))
+            ? section("Tags", graph.tags.map((t) => shownName(t.name)).join(", "))
             : null,
           section("Parents", bullet(names(graph.parents))),
           section(childrenTitle(graph.thought.kind), bullet(names(graph.children))),
@@ -718,9 +719,10 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       const byDepth = new Map<number, string[]>();
       for (const node of result.nodes) {
         if (node.depth === 0) continue;
+        const named = `${shownName(node.name)} — ${node.id}${kindMark(node.kind)}`;
         const line = node.path.length > 0
-          ? `${node.name} — ${node.id}${kindMark(node.kind)}  (via ${node.path.join(" -> ")})`
-          : `${node.name} — ${node.id}${kindMark(node.kind)}`;
+          ? `${named}  (via ${node.path.map((name) => shownName(name)).join(" -> ")})`
+          : named;
         byDepth.set(node.depth, [...(byDepth.get(node.depth) ?? []), line]);
       }
 
@@ -729,7 +731,7 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
 
       return ok(
         join([
-          `# Neighbourhood of: ${root?.name ?? thoughtId}${root ? kindMark(root.kind) : ""}`,
+          `# Neighbourhood of: ${root ? shownName(root.name) + kindMark(root.kind) : thoughtId}`,
           ...[...byDepth.entries()]
             .sort(([a], [b]) => a - b)
             .map(([d, items]) => section(`Hop ${d}`, bullet(items))),
@@ -738,9 +740,11 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
                 "Labelled links",
                 bullet(
                   labelled.map((e) => {
-                    const from = result.nodes.find((n) => n.id === e.from)?.name ?? e.from;
-                    const to = result.nodes.find((n) => n.id === e.to)?.name ?? e.to;
-                    return `${from} -> ${e.name} -> ${to}`;
+                    const end = (id: string): string => {
+                      const node = result.nodes.find((n) => n.id === id);
+                      return node === undefined ? id : shownName(node.name);
+                    };
+                    return `${end(e.from)} -> ${e.name} -> ${end(e.to)}`;
                   }),
                 ),
               )
@@ -775,8 +779,8 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       ]);
       return ok(
         join([
-          section("Types", bullet(types.map((t) => `${t.name ?? "(unnamed)"} — ${t.id}`))),
-          section("Tags", bullet(tags.map((t) => `${t.name ?? "(unnamed)"} — ${t.id}`))),
+          section("Types", bullet(types.map((t) => `${shownName(t.name)} — ${t.id}`))),
+          section("Tags", bullet(tags.map((t) => `${shownName(t.name)} — ${t.id}`))),
           types.length === 0 && tags.length === 0
             ? section("Note", "This brain has no types or tags yet.")
             : null,
@@ -839,7 +843,7 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
         const name = await ctx.api.thoughts.get(bid, id).then(
           // The read that resolves the name has the kind: a tag attached is
           // logged as a link created, and reads as one unless the tag is marked.
-          (t) => `${t.name ?? "(unnamed)"}${kindMark(t.kind)}`,
+          (t) => `${shownName(t.name)}${kindMark(t.kind)}`,
           // Not "(unnamed)" for a read that failed: a thought deleted since
           // would read as one that is there, in every row about it. The
           // identifier of zeros, which the log has for a note written to no
