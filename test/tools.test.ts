@@ -353,9 +353,21 @@ describe("a thought's kind in what the read tools print", () => {
         .map((l) => l.split(/\s{2,}/));
     };
 
+    /**
+     * The read of each hit's thought, which a search makes before it lists
+     * the hit: the three thoughts as they are, or as `now` has them.
+     */
+    const reads = (now: Record<string, unknown> = {}): Route => [
+      "GET /api/thoughts/",
+      (url) => {
+        const id = url.pathname.split("/").at(-1)!;
+        return now[id] ?? [type, plain, tag].find((t) => t.id === id) ?? 404;
+      },
+    ];
+
     const lexical = async (args: Record<string, unknown>): Promise<string> => {
       const { call } = await connect(
-        [["GET /api/search", () => [hit(type), hit(plain), hit(tag)]]],
+        [["GET /api/search", () => [hit(type), hit(plain), hit(tag)]], reads()],
         searching(new VectorStore(":memory:")),
       );
       const result = await call("brain_search", { brainId: BRAIN, query: "RAG", ...args });
@@ -363,12 +375,16 @@ describe("a thought's kind in what the read tools print", () => {
       return result.text;
     };
 
-    const vector = async (args: Record<string, unknown>): Promise<string> => {
-      const { call, calls } = await connect([], searching(indexed()));
+    const vector = async (
+      args: Record<string, unknown>,
+      now: Record<string, unknown> = {},
+    ): Promise<string> => {
+      const { call, calls } = await connect([reads(now)], searching(indexed()));
       const result = await call("brain_search", { brainId: BRAIN, query: "RAG", ...args });
       expect(result.isError).toBe(false);
-      // The kind is the one the index keeps: no request is made for it.
-      expect(calls).toEqual([]);
+      // What a hit costs is the read of its thought: nothing else is asked.
+      const thoughtRead = /^\/api\/thoughts\/[^/]+\/[^/]+$/;
+      expect(calls.filter((c) => c.method !== "GET" || !thoughtRead.test(c.path))).toEqual([]);
       return result.text;
     };
 
@@ -390,13 +406,28 @@ describe("a thought's kind in what the read tools print", () => {
       ]);
     });
 
-    it("with an index, the kind comes from the index and fills the same column", async () => {
+    it("with an index, a type and a tag fill the same column", async () => {
       const text = await vector({ includeAuxiliary: true });
       expect(text).toContain("## Found by meaning");
       expect(cells(text)).toEqual([
         ["Score", "Thought", "Identifier", "Kind", "Matched"],
         ["1.000", "Pattern", TYPE, "type"],
         ["0.800", "Embeddings", OTHER],
+        ["0.600", "gotcha", TAG, "tag"],
+      ]);
+    });
+
+    it("with an index, the name and the kind are the thought's own, not the index's", async () => {
+      // The index keeps both as of its last sync. A search reads each hit's
+      // thought to see that it is there, and that read has them as they are.
+      const text = await vector(
+        { includeAuxiliary: true },
+        { [OTHER]: at(OTHER, "Vectors", 4), [TYPE]: at(TYPE, "Pattern", 1) },
+      );
+      expect(cells(text)).toEqual([
+        ["Score", "Thought", "Identifier", "Kind", "Matched"],
+        ["1.000", "Pattern", TYPE],
+        ["0.800", "Vectors", OTHER, "tag"],
         ["0.600", "gotcha", TAG, "tag"],
       ]);
     });
@@ -2118,6 +2149,8 @@ describe("an identifier nobody has, and a brainId that is no brain", () => {
                 ? [{ sourceThought: thought("RAG"), name: "RAG", isFromOtherBrain: false }]
                 : 400,
           ],
+          // The hit's thought is read before it is listed, and it is there.
+          ["GET /api/thoughts/", () => thought("RAG")],
         ],
         searching,
       );
@@ -2259,6 +2292,15 @@ describe("brain_search when TheBrain's search does not answer", () => {
     retrieval: [hit(THOUGHT, "RAG"), hit(OTHER, "Retrieval")],
   };
   const answers = (url: URL): unknown => finds[url.searchParams.get("queryText") ?? ""] ?? [];
+  /**
+   * The read of a hit's thought, which a search makes before it lists the
+   * hit: both thoughts are there, under the names the search has for them.
+   */
+  const READS: Route = [
+    "GET /api/thoughts/",
+    (url) =>
+      url.pathname.endsWith(OTHER) ? thought("Retrieval", { id: OTHER }) : thought("RAG"),
+  ];
 
   const embedder: Embedder = {
     id: "fake@v1",
@@ -2438,6 +2480,7 @@ describe("brain_search when TheBrain's search does not answer", () => {
         "GET /api/search",
         (url) => (failing[url.searchParams.get("queryText") ?? ""] ?? (() => answers(url)))(),
       ],
+      READS,
     ];
 
     it("the hits are given, and the phrasing that was not searched is named", async () => {
@@ -2525,7 +2568,7 @@ describe("brain_search when TheBrain's search does not answer", () => {
 
   describe("with no index, and every phrasing answered", () => {
     it("a result with hits reads as it did, to the character", async () => {
-      const { call } = await connect([["GET /api/search", answers]], searching());
+      const { call } = await connect([["GET /api/search", answers], READS], searching());
       const result = await call("brain_search", {
         brainId: BRAIN,
         query: "RAG",
@@ -2563,9 +2606,15 @@ describe("brain_search when TheBrain's search does not answer", () => {
   });
 
   describe("with an index", () => {
-    it("ranking by vectors makes no request, so nothing TheBrain answers reaches it", async () => {
+    it("ranking by vectors asks TheBrain's search nothing: the read of each hit is all it sends", async () => {
+      // It used to send nothing at all, and list a thought deleted since the
+      // last sync like any other. What the reads do with each answer is under
+      // "brain_search and a hit for a thought that is gone".
       const { call, calls } = await connect(
-        [["GET /api/", () => text(500, "Internal Server Error")]],
+        [
+          ["GET /api/search", () => text(500, "Internal Server Error")],
+          ["GET /api/thoughts/", () => thought("Embeddings", { id: OTHER })],
+        ],
         searching(indexed()),
       );
       const result = await call("brain_search", {
@@ -2580,7 +2629,9 @@ describe("brain_search when TheBrain's search does not answer", () => {
           "─────  ──────────  ────────────────────────────────────  ───────\n" +
           `1.000  Embeddings  ${OTHER}`,
       );
-      expect(calls).toEqual([]);
+      expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+        `GET /api/thoughts/${BRAIN}/${OTHER}`,
+      ]);
     });
 
     it("an empty query is refused there as well", async () => {
@@ -2591,7 +2642,10 @@ describe("brain_search when TheBrain's search does not answer", () => {
     });
 
     it("without the embeddings package it still falls back, and says why", async () => {
-      const { call } = await connect([["GET /api/search", answers]], searching(indexed(), absent));
+      const { call } = await connect(
+        [["GET /api/search", answers], READS],
+        searching(indexed(), absent),
+      );
       const result = await call("brain_search", { brainId: BRAIN, query: "RAG" });
       expect(result.isError).toBe(false);
       expect(result.text).toContain(`1.000  RAG      ${THOUGHT}  RAG`);
@@ -2614,6 +2668,352 @@ describe("brain_search when TheBrain's search does not answer", () => {
         `${NOTHING_SEARCHED}: could not reach http://localhost:11522 or ` +
           `http://localhost:8001 — is TheBrain running?${RUNNING}`,
       );
+    });
+  });
+});
+
+describe("brain_search and a hit for a thought that is gone", () => {
+  // Measured on 15.0.640 (docs/api-map.md, L34): TheBrain's search returns a
+  // deleted thought until its index is refreshed, and now and then for good,
+  // and the vector index holds a row until the next sync. Both were listed
+  // like any other hit, and a hit is where a model takes an identifier from.
+  const OTHER = "abababab-0000-4000-8000-000000000007";
+  const GONE = "edededed-0000-4000-8000-00000000000e";
+
+  const hit = (id: string, name: string, kind = 1) => ({
+    sourceThought: thought(name, { id, kind }),
+    name,
+    isFromOtherBrain: false,
+  });
+  /** What both sources have: their own copies, the third of a thought deleted since. */
+  const COPIES: Array<[id: string, name: string]> = [
+    [THOUGHT, "RAG"],
+    [OTHER, "Retrieval"],
+    [GONE, "Gazpacho"],
+  ];
+  const searchFinds = (ids: readonly string[]): Route => [
+    "GET /api/search",
+    () => COPIES.filter(([id]) => ids.includes(id)).map(([id, name]) => hit(id, name)),
+  ];
+
+  /** The API's answers, and fetch's own failures, as the client meets them. */
+  const bareNotFound = (): Response =>
+    new Response(
+      JSON.stringify({
+        type: "https://tools.ietf.org/html/rfc9110#section-15.5.5",
+        title: "Not Found",
+        status: 404,
+        traceId: "00-5df1-eb95-00",
+      }),
+      { status: 404, headers: { "content-type": "application/problem+json" } },
+    );
+  const text = (status: number, body: string): Response =>
+    new Response(body, { status, headers: { "content-type": "text/plain" } });
+  const refusedConnection = (): never => {
+    throw new TypeError("fetch failed", {
+      cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:11522"), {
+        code: "ECONNREFUSED",
+      }),
+    });
+  };
+
+  /**
+   * The read of each hit's thought. One that is there answers with itself
+   * under the name its copy has, the deleted one with the API's 404, and
+   * `now` says otherwise for the identifiers it names.
+   */
+  const reads = (now: Record<string, () => unknown> = {}): Route => [
+    "GET /api/thoughts/",
+    (url) => {
+      const id = url.pathname.split("/").at(-1)!;
+      const [, name] = COPIES.find(([copy]) => copy === id) ?? [];
+      const asItIs = (): unknown => (id === GONE ? bareNotFound() : thought(name ?? "", { id }));
+      return (now[id] ?? asItIs)();
+    },
+  ];
+
+  const embedder: Embedder = {
+    id: "fake@v1",
+    dimensions: 2,
+    embedDocuments: async (texts) => texts.map(() => new Float32Array([1, 0])),
+    embedQuery: async () => new Float32Array([1, 0]),
+  };
+  /** An index that ranks Retrieval, Gazpacho, RAG, or only the `ids` of them it is given. */
+  const indexed = (ids: readonly string[] = [OTHER, GONE, THOUGHT]): VectorStore => {
+    const store = new VectorStore(":memory:");
+    store.setMeta({
+      brainId: BRAIN,
+      model: indexModelId(embedder.id),
+      dimensions: embedder.dimensions,
+      syncedThrough: "2026-10-10T00:00:00.000Z",
+    });
+    const x: Record<string, number> = { [OTHER]: 1, [GONE]: 0.8, [THOUGHT]: 0.6 };
+    store.upsert(
+      COPIES.filter(([id]) => ids.includes(id)).map(([thoughtId, name]) => ({
+        thoughtId,
+        name,
+        kind: 1,
+        contentHash: "h",
+        vector: new Float32Array([x[thoughtId]!, Math.sqrt(1 - x[thoughtId]! ** 2)]),
+      })),
+    );
+    return store;
+  };
+  const searching =
+    (store: VectorStore = new VectorStore(":memory:")) =>
+    (api: TheBrainApi) => ({ search: () => new SemanticSearch(api, store, embedder) });
+
+  const NOT_INDEXED =
+    "## Warning\n" +
+    "Semantic search unavailable: the semantic index has not been built yet — run a rebuild. " +
+    "Fell back to substring name search, so recall is lower. " +
+    "Build the index with the brain_index tool.";
+  const STILL_RETURNED =
+    " Its search goes on returning a deleted thought for about five seconds, and now and " +
+    "then for good.";
+  const SYNC =
+    " The index holds a deleted thought until its next sync: call brain_index with action=sync.";
+  const BEFORE_USING = " Read a thought with brain_get_thought before using its identifier.";
+  const RUNNING = " Check that the TheBrain desktop app is running and its local API is enabled.";
+
+  const search = async (
+    routes: Route[],
+    store?: VectorStore,
+    args: Record<string, unknown> = {},
+  ) => {
+    const { call, calls } = await connect(routes, searching(store));
+    const result = await call("brain_search", { brainId: BRAIN, query: "RAG", ...args });
+    return { ...result, calls };
+  };
+
+  describe("with no index", () => {
+    it("the hit is left out and counted, and the thoughts that are there are listed", async () => {
+      const result = await search([searchFinds([THOUGHT, OTHER, GONE]), reads()]);
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(
+        "## Found by substring\n" +
+          "Score  Thought    Identifier                            Matched\n" +
+          "─────  ─────────  ────────────────────────────────────  ───────\n" +
+          `1.000  RAG        ${THOUGHT}  RAG\n` +
+          `0.500  Retrieval  ${OTHER}  RAG\n\n` +
+          "## Left out\n" +
+          "1 hit was left out: TheBrain's search returned it, and the read of the thought " +
+          `answered 404.${STILL_RETURNED}\n\n${NOT_INDEXED}`,
+      );
+      // An identifier nobody has is of no use to the model, and is not printed.
+      expect(result.text).not.toContain(GONE);
+      expect(result.text).not.toContain("Gazpacho");
+    });
+
+    it("costs one read a hit, after the search", async () => {
+      const { calls } = await search([searchFinds([THOUGHT, OTHER, GONE]), reads()]);
+      expect(calls.map((c) => `${c.method} ${c.path}`).sort()).toEqual(
+        [
+          `GET /api/search/${BRAIN}`,
+          `GET /api/thoughts/${BRAIN}/${THOUGHT}`,
+          `GET /api/thoughts/${BRAIN}/${OTHER}`,
+          `GET /api/thoughts/${BRAIN}/${GONE}`,
+        ].sort(),
+      );
+    });
+
+    it("the one hit being gone is not 'matched no thought'", async () => {
+      // "Nothing: TheBrain's search matched no thought" would be false: it matched one.
+      const result = await search([searchFinds([GONE]), reads()]);
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(
+        "## Found by substring\n" +
+          "Nothing that is still there: the one hit was a thought that is gone.\n\n" +
+          "## Left out\n" +
+          "1 hit was left out: TheBrain's search returned it, and the read of the thought " +
+          `answered 404.${STILL_RETURNED}\n\n${NOT_INDEXED}`,
+      );
+    });
+
+    it("several hits gone, and nothing else found, are said in the plural", async () => {
+      const result = await search([
+        searchFinds([THOUGHT, GONE]),
+        reads({ [THOUGHT]: bareNotFound }),
+      ]);
+      expect(result.text).toBe(
+        "## Found by substring\n" +
+          "Nothing that is still there: each of the 2 hits was a thought that is gone.\n\n" +
+          "## Left out\n" +
+          "2 hits were left out: TheBrain's search returned them, and the read of each " +
+          `thought answered 404.${STILL_RETURNED}\n\n${NOT_INDEXED}`,
+      );
+    });
+
+    it("a thought the search still has under its old name is listed under the one it has now", async () => {
+      // The hit carries the search's copy: the old name, and the old kind.
+      const result = await search(
+        [
+          searchFinds([THOUGHT, OTHER]),
+          reads({ [THOUGHT]: () => thought("Retrieval-augmented generation", { kind: 4 }) }),
+        ],
+        undefined,
+        { includeAuxiliary: true },
+      );
+      expect(result.text).toContain(
+        `1.000  Retrieval-augmented generation  ${THOUGHT}  tag   RAG\n`,
+      );
+      expect(result.text).not.toMatch(/1\.000 {2}RAG /);
+    });
+
+    it("a read that fails is not a thought that is gone: the hit stays, marked, and is named", async () => {
+      const result = await search([
+        searchFinds([THOUGHT, OTHER, GONE]),
+        reads({ [OTHER]: () => text(500, "Internal Server Error") }),
+      ]);
+      // Not an error: the rest is a result, and what it does not say is named.
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(
+        "## Found by substring\n" +
+          "Score  Thought    Identifier                            Verified  Matched\n" +
+          "─────  ─────────  ────────────────────────────────────  ────────  ───────\n" +
+          `1.000  RAG        ${THOUGHT}            RAG\n` +
+          `0.500  Retrieval  ${OTHER}  no        RAG\n\n` +
+          "## Not verified\n" +
+          "The read of 1 of the 2 thoughts above failed, so this result does not say whether " +
+          `it is still there: TheBrain answered 500: Internal Server Error.${BEFORE_USING}\n\n` +
+          "## Left out\n" +
+          "1 hit was left out: TheBrain's search returned it, and the read of the thought " +
+          `answered 404.${STILL_RETURNED}\n\n${NOT_INDEXED}`,
+      );
+    });
+
+    it("the catch-all 403 on a thought's own read is a failure too, and not a 404", async () => {
+      // It is what the graph of a thought nobody has gets. The thought's own
+      // read answers 404 for one, so a 403 there says nothing of the thought.
+      const result = await search([
+        searchFinds([THOUGHT]),
+        reads({ [THOUGHT]: generic403 }),
+      ]);
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain(`1.000  RAG      ${THOUGHT}  no        RAG`);
+      expect(result.text).toContain(
+        "## Not verified\n" +
+          "The read of the thought above failed, so this result does not say whether it is " +
+          `still there: TheBrain answered 403 and named no cause.${BEFORE_USING}`,
+      );
+      expect(result.text).not.toContain("## Left out");
+    });
+
+    it("reads that fail each in its own way are listed, each with its reason", async () => {
+      const result = await search([
+        searchFinds([THOUGHT, OTHER]),
+        reads({ [THOUGHT]: () => text(500, "boom"), [OTHER]: generic403 }),
+      ]);
+      expect(result.text).toContain(
+        "## Not verified\n" +
+          "The read of each of the 2 thoughts above failed, so this result does not say " +
+          "whether any of them is still there:\n" +
+          `- ${THOUGHT}: TheBrain answered 500: boom.\n` +
+          `- ${OTHER}: TheBrain answered 403 and named no cause.\n` +
+          BEFORE_USING.trimStart(),
+      );
+    });
+  });
+
+  describe("with an index", () => {
+    it("a thought deleted since the last sync is left out, and the result says to sync", async () => {
+      // The index knows nothing of the delete: it ranked second, and was listed.
+      const result = await search([reads()], indexed());
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(
+        "## Found by meaning\n" +
+          "Score  Thought    Identifier                            Matched\n" +
+          "─────  ─────────  ────────────────────────────────────  ───────\n" +
+          `1.000  Retrieval  ${OTHER}\n` +
+          `0.600  RAG        ${THOUGHT}\n\n` +
+          "## Left out\n" +
+          "1 hit was left out: the semantic index holds it, and the read of the thought " +
+          `answered 404.${SYNC}`,
+      );
+      expect(result.calls.map((c) => c.path).sort()).toEqual(
+        [THOUGHT, OTHER, GONE].map((id) => `/api/thoughts/${BRAIN}/${id}`).sort(),
+      );
+    });
+
+    it("the only row being of a thought that is gone is said, where nothing used to be printed", async () => {
+      const result = await search([reads()], indexed([GONE]));
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(
+        "## Found by meaning\n" +
+          "Nothing that is still there: the one hit was a thought that is gone.\n\n" +
+          "## Left out\n" +
+          "1 hit was left out: the semantic index holds it, and the read of the thought " +
+          `answered 404.${SYNC}`,
+      );
+    });
+
+    it("with TheBrain not running the hits are listed, and none is passed for a thought that is there", async () => {
+      // It listed them with no request at all, the deleted one among them.
+      const result = await search([["GET /api/", refusedConnection]], indexed());
+      expect(result.isError).toBe(false);
+      expect(result.text).toBe(
+        "## Found by meaning\n" +
+          "Score  Thought    Identifier                            Verified  Matched\n" +
+          "─────  ─────────  ────────────────────────────────────  ────────  ───────\n" +
+          `1.000  Retrieval  ${OTHER}  no\n` +
+          `0.800  Gazpacho   ${GONE}  no\n` +
+          `0.600  RAG        ${THOUGHT}  no\n\n` +
+          "## Not verified\n" +
+          "The read of each of the 3 thoughts above failed, so this result does not say " +
+          "whether any of them is still there: could not reach http://localhost:11522 or " +
+          `http://localhost:8001 — is TheBrain running?${RUNNING}${BEFORE_USING}`,
+      );
+    });
+
+    it("a hit that is a type and one that could not be read have a column each", async () => {
+      const result = await search(
+        [
+          reads({
+            [OTHER]: () => thought("Retrieval", { id: OTHER, kind: 2 }),
+            [THOUGHT]: () => 503,
+          }),
+        ],
+        indexed([OTHER, THOUGHT]),
+      );
+      expect(result.text).toContain(
+        "Score  Thought    Identifier                            Kind  Verified  Matched\n" +
+          "─────  ─────────  ────────────────────────────────────  ────  ────────  ───────\n" +
+          `1.000  Retrieval  ${OTHER}  type\n` +
+          `0.600  RAG        ${THOUGHT}        no\n\n`,
+      );
+      expect(result.text).toContain(
+        "The read of 1 of the 2 thoughts above failed, so this result does not say whether " +
+          "it is still there: TheBrain answered 503: (empty response).",
+      );
+    });
+
+    it.each<[string, () => Response, RegExp]>([
+      [
+        "a key TheBrain rejects",
+        () => text(401, "Invalid API Key"),
+        /^TheBrain rejected the key\. Check THEBRAIN_API_KEY/,
+      ],
+      [
+        "a brain that is no brain any more",
+        () => text(401, `Access to brain ${BRAIN} is unauthorized.`),
+        /^Access to brain \S+ is unauthorized\. The key was accepted: it is brainId/,
+      ],
+    ])("%s fails the search, where the index used to answer for it", async (_what, answer, told) => {
+      // Nothing was asked in vector mode, so the hits of a brain that had been
+      // deleted were listed as they stood in its index.
+      const result = await search([["GET /api/thoughts/", answer]], indexed());
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(told);
+      expect(result.text).not.toContain("## Found by meaning");
+    });
+
+    it("a hit left out makes the result shorter than the limit: nothing is read to fill its place", async () => {
+      const result = await search([reads()], indexed(), { limit: 2 });
+      // Retrieval and Gazpacho were the two. RAG is next in line, and is not asked for.
+      expect(result.text).toContain(`1.000  Retrieval  ${OTHER}`);
+      expect(result.text).not.toContain(THOUGHT);
+      expect(result.text).toContain("1 hit was left out");
+      expect(result.calls).toHaveLength(2);
     });
   });
 });

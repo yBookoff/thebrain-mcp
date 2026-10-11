@@ -779,6 +779,49 @@ describe("exact name lookup", () => {
     const found = await api.thoughts.findByName(BRAIN, "present");
     expect(found?.name).toBe("present");
   });
+
+  /**
+   * The lookup answers from the index TheBrain's search has, which goes on
+   * holding a thought after it is deleted or renamed (docs/api-map.md, L34).
+   * `listed` is what the lookup returns, `read` what the thought's own read
+   * answers: a thought, or a status.
+   */
+  const lookup = (listed: ThoughtDto, read: () => unknown) =>
+    apiWith([
+      [`/api/thoughts/${BRAIN}/${THOUGHT}`, read],
+      ["/api/thoughts/", () => listed],
+    ]);
+
+  it("a thought the lookup still lists, and that is gone, is not returned", async () => {
+    // It was returned: the lookup's 200 was the whole of the answer.
+    const { api, calls } = lookup(thought(THOUGHT, "deleted"), () => 404);
+    await expect(api.thoughts.findByName(BRAIN, "deleted")).resolves.toBeNull();
+    expect(calls.map((c) => c.url.pathname + c.url.search)).toEqual([
+      `/api/thoughts/${BRAIN}?nameExact=deleted`,
+      `/api/thoughts/${BRAIN}/${THOUGHT}`,
+    ]);
+  });
+
+  it("nor is a thought the lookup lists under a name it no longer has", async () => {
+    const { api } = lookup(thought(THOUGHT, "old name"), () => thought(THOUGHT, "new name"));
+    await expect(api.thoughts.findByName(BRAIN, "old name")).resolves.toBeNull();
+  });
+
+  it("what is returned is the thought as it reads now, not the lookup's copy", async () => {
+    const { api } = lookup(thought(THOUGHT, "present", { label: "old caption" }), () =>
+      thought(THOUGHT, "present", { label: "new caption" }),
+    );
+    const found = await api.thoughts.findByName(BRAIN, "present");
+    expect(found?.label).toBe("new caption");
+  });
+
+  it.each([
+    [500, "server"],
+    [403, "forbidden"],
+  ])("a read of the answer that fails with a %i is thrown, not taken for no thought", async (status, kind) => {
+    const { api } = lookup(thought(THOUGHT, "present"), () => status);
+    await expect(api.thoughts.findByName(BRAIN, "present")).rejects.toMatchObject({ kind });
+  });
 });
 
 describe("notes", () => {

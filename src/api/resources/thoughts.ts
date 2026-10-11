@@ -175,22 +175,47 @@ export class ThoughtsResource {
   }
 
   /**
-   * Exact name match, or null.
+   * The thought that has exactly this name now, as it reads now, or null.
    *
    * Faster than full-text search but **not instant**: measured at roughly
    * 5.6 seconds between creating a thought and its appearance here. After a
    * write, address thoughts by id rather than by name.
+   *
+   * The lookup answers from the index TheBrain's search has, and that index
+   * is behind in the other direction too (docs/api-map.md, L34). Until its
+   * next refresh, at most 5.2 s, it answers with a thought that was deleted,
+   * and with a renamed thought under the old name, the old name in the answer.
+   * A thought deleted a moment after a neighbour stayed in it for good about
+   * once in a hundred. So the answer is read by its identifier before it is
+   * returned, and what comes back is that read: a 404 or another name is null.
+   * Any other failure of that read is thrown: it is no answer.
+   *
+   * Null is then "the lookup's one answer is not such a thought", which is
+   * less than "no thought has this name". Of two namesakes the lookup gives
+   * the newer, and it went on giving it for 5.1 s after it was deleted, 8 of
+   * 8, with the older one there all along.
    */
   async findByName(brainId: string, nameExact: string): Promise<ThoughtDto | null> {
     assertUuid(brainId, "brainId");
+    const gone = (error: unknown): boolean =>
+      error instanceof TheBrainError && error.kind === "not_found";
+    let listed: ThoughtDto;
     try {
-      return await this.client.get<ThoughtDto>(`/api/thoughts/${brainId}`, {
+      listed = await this.client.get<ThoughtDto>(`/api/thoughts/${brainId}`, {
         query: { nameExact },
       });
     } catch (error) {
-      if (error instanceof TheBrainError && error.kind === "not_found") return null;
+      if (gone(error)) return null;
       throw error;
     }
+    let thought: ThoughtDto;
+    try {
+      thought = await this.get(brainId, listed.id);
+    } catch (error) {
+      if (gone(error)) return null;
+      throw error;
+    }
+    return thought.name === nameExact ? thought : null;
   }
 
   /**

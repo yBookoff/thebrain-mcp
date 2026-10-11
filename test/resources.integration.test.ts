@@ -39,6 +39,7 @@ import {
   type CleanGraph,
   type LinkDto,
   type ModificationLogDto,
+  type SearchResultDto,
   type ThoughtDto,
   type ThoughtGraphDto,
 } from "../src/api/index.js";
@@ -3028,6 +3029,330 @@ suite("resource layer against the live API", () => {
       });
       expect(Array.isArray(await api.search.inBrain(brainId, "zz"))).toBe(true);
     });
+  });
+
+  /**
+   * The search answers from an index of its own, refreshed about every five
+   * seconds, and a hit is that index's copy of a thought. Measured on TheBrain
+   * 15.0.640 (docs/api-map.md, L34): until the next refresh it returns a
+   * thought that is gone, and a changed one by its old text and under its old
+   * name. `brain_search` listed both as it found them, and `findByName`
+   * returned the first.
+   *
+   * What is not here, because a test cannot wait for it or make it happen: a
+   * thought deleted within some tens of milliseconds of a neighbour stayed in
+   * that index for good about once in a hundred (7 of 720), and such hits
+   * were still returned seventeen hours later.
+   */
+  describe("a thought the search still returns after it is deleted or changed", () => {
+    const hitsFor = (queryText: string): Promise<SearchResultDto[]> =>
+      api.client.get<SearchResultDto[]>(`/api/search/${brainId}`, {
+        query: { queryText, maxResults: 10, onlySearchThoughtNames: false },
+      });
+    /** The hit for one thought among what the search returns for a word, if it is there. */
+    const hitFor = async (word: string, id: string): Promise<SearchResultDto | null> =>
+      (await hitsFor(word)).find((h) => h.sourceThought?.id === id) ?? null;
+    /** The lookup by exact name as the API answers it, with nothing read after it. */
+    const lookedUp = (nameExact: string): Promise<ThoughtDto | null> =>
+      api.client.get<ThoughtDto>(`/api/thoughts/${brainId}`, { query: { nameExact } }).catch(
+        (e: unknown) => {
+          if (e instanceof TheBrainError && e.kind === "not_found") return null;
+          throw e;
+        },
+      );
+    const reads = (id: string): Promise<string> =>
+      api.thoughts.get(brainId, id).then(
+        (t) => `there as ${t.name}`,
+        (e: unknown) => (e instanceof TheBrainError ? e.kind : String(e)),
+      );
+    /** `brain_search` as it runs with no index: on TheBrain's own search. */
+    const fallback = (): SemanticSearch =>
+      new SemanticSearch(api, new VectorStore(":memory:"), {
+        id: "contract@v1",
+        dimensions: 1,
+        embedDocuments: async (texts) => texts.map(() => new Float32Array([1])),
+        embedQuery: async () => new Float32Array([1]),
+      });
+
+    /**
+     * Runs `look` until it has looked between two refreshes of the search's
+     * index. It returns false when the index caught up before it was done,
+     * which a write queued behind another test's burst can bring about, and
+     * is then run again, on a thought of its own.
+     */
+    const betweenRefreshes = async (look: (attempt: number) => Promise<boolean>): Promise<void> => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (await look(attempt)) return;
+        console.warn(`[search] the index caught up before it was asked, attempt ${attempt + 1}`);
+      }
+      throw new Error(
+        "three times of three the search had caught up with the change before it was asked: " +
+          "either a refresh fell in between every time, or TheBrain's search no longer " +
+          "answers from a copy that is behind (docs/api-map.md, L34)",
+      );
+    };
+
+    it("a deleted thought is returned by the search and by the name lookup, the hit as it was, while its read is a 404", async () => {
+      let word = "";
+      let id = "";
+      await betweenRefreshes(async (attempt) => {
+        word = `gone${Date.now()}x${attempt}`;
+        const name = PREFIX + word;
+        id = await make(word);
+        // The moment the search first returns it follows a refresh, and the
+        // next is about five seconds off.
+        const hit = await eventually(() => hitFor(word, id), (h) => h !== null, {
+          timeoutMs: 20_000,
+          stepMs: 50,
+        });
+        expect(hit, "the search never returned the new thought").not.toBeNull();
+        expect((await lookedUp(name))?.id).toBe(id);
+        const everywhere = await api.search.accessible(word, { maxResults: 10 });
+        expect(everywhere.map((h) => h.thought.id)).toContain(id);
+
+        await api.thoughts.delete(brainId, id);
+        // The thought itself reads for a moment more: 30 to 206 ms, 80 times of 80.
+        const gone = await eventually(() => reads(id), (r) => !r.startsWith("there"), {
+          timeoutMs: 5_000,
+          stepMs: 10,
+        });
+        expect(gone).toBe("not_found");
+
+        const before = await hitFor(word, id);
+        const byName = await lookedUp(name);
+        const found = await api.thoughts.findByName(brainId, name);
+        const outcome = await fallback().find(brainId, word);
+        const acrossBrains = await api.search.accessible(word, { maxResults: 10 });
+        const after = await hitFor(word, id);
+        if (before === null || after === null) return false;
+
+        // Between two answers of the search that both had it, and with the
+        // thought's own read a 404 throughout. The hit is the one it was
+        // before the delete, to the last field: nothing in it gives it away.
+        expect(before).toEqual(hit);
+        expect(after).toEqual(hit);
+        expect(byName?.id).toBe(id);
+        expect(await reads(id)).toBe("not_found");
+        // The search across every brain does not return it.
+        expect(acrossBrains.map((h) => h.thought.id)).not.toContain(id);
+        // What the layers above make of it: no thought of that name, and a
+        // hit left out and counted.
+        expect(found).toBeNull();
+        expect(outcome.mode).toBe("keyword");
+        expect(outcome.matches.map((m) => m.thoughtId)).not.toContain(id);
+        expect(outcome.gone.map((m) => m.thoughtId)).toEqual([id]);
+        expect(outcome.unverified).toEqual([]);
+        return true;
+      });
+
+      // It leaves at the next refresh: 5.0 to 5.2 s after the delete, 11 runs.
+      const left = await eventually(() => hitFor(word, id), (h) => h === null, {
+        timeoutMs: 15_000,
+        stepMs: 250,
+      });
+      expect(left).toBeNull();
+      expect(await lookedUp(PREFIX + word)).toBeNull();
+    }, 90_000);
+
+    it("a changed thought is found by its old name, caption, alias and note, under its old name, until the search catches up", async () => {
+      let id = "";
+      let now = { name: "", caption: "", alias: "", note: "" };
+      await betweenRefreshes(async (attempt) => {
+        const stamp = `${Date.now()}x${attempt}`;
+        // One word each, and no word in common: the search matches by word.
+        const was = {
+          name: `wasname${stamp}`,
+          caption: `wascaption${stamp}`,
+          alias: `wasalias${stamp}`,
+          note: `wasnote${stamp}`,
+        };
+        now = {
+          name: `nowname${stamp}`,
+          caption: `nowcaption${stamp}`,
+          alias: `nowalias${stamp}`,
+          note: `nownote${stamp}`,
+        };
+        id = await api.thoughts.create(brainId, {
+          name: PREFIX + was.name,
+          label: was.caption,
+          aliases: [was.alias],
+        });
+        created.push(id);
+        await api.notes.set(brainId, id, `${was.note} is in the note`);
+        const foundByAll = async (words: Record<string, string>): Promise<boolean> => {
+          const hits = await Promise.all(Object.values(words).map((w) => hitFor(w, id)));
+          return hits.every((h) => h !== null);
+        };
+        expect(
+          await eventually(() => foundByAll(was), (all) => all, { timeoutMs: 20_000, stepMs: 50 }),
+          "the search never found the new thought by all four",
+        ).toBe(true);
+        // By its caption and by an alias it is found as by its name. By its
+        // note it is a hit of another shape, for the note's attachment, with a
+        // thought in it that has no caption or aliases; a search of names
+        // leaves that one out, and no other.
+        const [byCaption, byAlias, byNote] = await Promise.all(
+          [was.caption, was.alias, was.note].map((w) => hitFor(w, id)),
+        );
+        for (const hit of [byCaption, byAlias]) {
+          expect(hit).toMatchObject({ searchResultType: 1, entityType: 2 });
+          expect(hit?.sourceThought).toMatchObject({ label: was.caption, aliases: [was.alias] });
+        }
+        expect(byNote).toMatchObject({ searchResultType: 3, entityType: 4, name: null });
+        expect(byNote?.attachmentId).not.toBe("00000000-0000-0000-0000-000000000000");
+        expect(byNote?.sourceThought).toMatchObject({ label: null, aliases: [] });
+        const amongNames = (queryText: string): Promise<boolean> =>
+          api.client
+            .get<SearchResultDto[]>(`/api/search/${brainId}`, {
+              query: { queryText, maxResults: 10, onlySearchThoughtNames: true },
+            })
+            .then((hits) => hits.some((h) => h.sourceThought?.id === id));
+        expect(await Promise.all(Object.values(was).map(amongNames))).toEqual([
+          true,
+          true,
+          true,
+          false,
+        ]);
+
+        await api.thoughts.update(brainId, id, {
+          name: PREFIX + now.name,
+          label: now.caption,
+          aliases: [now.alias],
+        });
+        await api.notes.set(brainId, id, `${now.note} is in the note`);
+        const renamed = await eventually(
+          () => api.thoughts.get(brainId, id),
+          (t) => t.name === PREFIX + now.name && t.label === now.caption,
+          { timeoutMs: 5_000, stepMs: 10 },
+        );
+        expect(renamed).toMatchObject({ name: PREFIX + now.name, label: now.caption });
+
+        const before = await hitFor(was.name, id);
+        const byOldText = await Promise.all(
+          [was.caption, was.alias, was.note].map((w) => hitFor(w, id)),
+        );
+        const byNewText = await Promise.all(Object.values(now).map((w) => hitFor(w, id)));
+        const lookedOld = await lookedUp(PREFIX + was.name);
+        const lookedNew = await lookedUp(PREFIX + now.name);
+        const foundOld = await api.thoughts.findByName(brainId, PREFIX + was.name);
+        const outcome = await fallback().find(brainId, was.name);
+        const after = await hitFor(was.name, id);
+        if (before === null || after === null) return false;
+
+        // The hit is the search's copy: the name, the caption and the aliases
+        // the thought had, where its own read has the new ones.
+        expect(before.sourceThought).toMatchObject({
+          name: PREFIX + was.name,
+          label: was.caption,
+          aliases: [was.alias],
+        });
+        expect(before.name).toBe(PREFIX + was.name);
+        expect(byOldText.map((h) => h?.sourceThought?.id)).toEqual([id, id, id]);
+        expect(byNewText).toEqual([null, null, null, null]);
+        // The lookup by name answers the same way, old name and all.
+        expect(lookedOld).toMatchObject({ id, name: PREFIX + was.name });
+        expect(lookedNew).toBeNull();
+        // Above it, the thought is not one of that name any more, and a hit
+        // for it is listed under the name it has.
+        expect(foundOld).toBeNull();
+        expect(outcome.matches.find((m) => m.thoughtId === id)).toMatchObject({
+          name: PREFIX + now.name,
+        });
+        expect(outcome).toMatchObject({ gone: [], unverified: [] });
+        return true;
+      });
+
+      const caughtUp = await eventually(() => hitFor(now.name, id), (h) => h !== null, {
+        timeoutMs: 15_000,
+        stepMs: 250,
+      });
+      expect(caughtUp?.sourceThought).toMatchObject({
+        name: PREFIX + now.name,
+        label: now.caption,
+        aliases: [now.alias],
+      });
+      expect((await api.thoughts.findByName(brainId, PREFIX + now.name))?.id).toBe(id);
+    }, 90_000);
+
+    it("the name lookup is exact to the letter case, gives the newer of two namesakes, and goes on giving it once it is gone", async () => {
+      // So `findByName` compares the name it reads with the one it was asked
+      // for as they stand, and a null from it is less than "no thought has
+      // this name": the older namesake is behind the newer one.
+      let name = "";
+      let older = "";
+      await betweenRefreshes(async (attempt) => {
+        name = `${PREFIX}Namesake${Date.now()}x${attempt}`;
+        older = await api.thoughts.create(brainId, { name });
+        const newer = await api.thoughts.create(brainId, { name });
+        created.push(older, newer);
+        const first = await eventually(() => lookedUp(name), (t) => t?.id === newer, {
+          timeoutMs: 20_000,
+          stepMs: 50,
+        });
+        expect(first?.id).toBe(newer);
+        for (const other of [name.toLowerCase(), name.toUpperCase(), `${name} `, ` ${name}`]) {
+          expect(await lookedUp(other), JSON.stringify(other)).toBeNull();
+        }
+
+        await api.thoughts.delete(brainId, newer);
+        const gone = await eventually(() => reads(newer), (r) => !r.startsWith("there"), {
+          timeoutMs: 5_000,
+          stepMs: 10,
+        });
+        expect(gone).toBe("not_found");
+        const before = await lookedUp(name);
+        const found = await api.thoughts.findByName(brainId, name);
+        const after = await lookedUp(name);
+        if (before?.id !== newer || after?.id !== newer) return false;
+
+        // The lookup's one answer is the thought that is gone, with the
+        // older one there all the while.
+        expect(await reads(older)).toBe(`there as ${name}`);
+        expect(found).toBeNull();
+        return true;
+      });
+
+      const next = await eventually(() => lookedUp(name), (t) => t?.id === older, {
+        timeoutMs: 15_000,
+        stepMs: 250,
+      });
+      expect(next?.id).toBe(older);
+      expect((await api.thoughts.findByName(brainId, name))?.id).toBe(older);
+    }, 90_000);
+
+    it("a vector search leaves out a thought deleted since the last sync, and the next sync takes its row", async () => {
+      const id = await make(`vector-gone-${Date.now()}`);
+      const embedder: Embedder = {
+        id: "contract@v1",
+        dimensions: 1,
+        embedDocuments: async (texts) => texts.map(() => new Float32Array([1])),
+        embedQuery: async () => new Float32Array([1]),
+      };
+      const store = new VectorStore(":memory:");
+      const indexer = new SemanticIndexer(api, store, embedder);
+      await indexer.rebuild(brainId);
+      expect(store.contentHashes().has(id)).toBe(true);
+
+      await api.thoughts.delete(brainId, id);
+      await eventually(() => reads(id), (r) => r === "not_found", { timeoutMs: 5_000, stepMs: 10 });
+
+      // The index knows nothing of the delete, and every row scores the same
+      // here: the row is among the hits, and the read of its thought is a 404.
+      const outcome = await new SemanticSearch(api, store, embedder).find(brainId, "anything", {
+        limit: Math.max(store.size(), 1),
+        includeAuxiliary: true,
+      });
+      expect(outcome.mode).toBe("vector");
+      // It was listed like any other hit.
+      expect(outcome.matches.map((m) => m.thoughtId)).not.toContain(id);
+      expect(outcome.gone.map((m) => m.thoughtId)).toContain(id);
+      // A search writes nothing. The delete is in the log, and a sync goes by that.
+      expect(store.contentHashes().has(id)).toBe(true);
+      const synced = await indexer.sync(brainId);
+      expect(store.contentHashes().has(id)).toBe(false);
+      expect(synced.removed).toBeGreaterThanOrEqual(1);
+      store.close();
+    }, 90_000);
   });
 
   /**

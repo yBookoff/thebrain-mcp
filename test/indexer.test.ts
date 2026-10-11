@@ -1646,6 +1646,251 @@ describe("search: a phrasing TheBrain's search does not answer", () => {
   });
 });
 
+describe("search: a hit for a thought that is gone, or that could not be read", () => {
+  // Neither source knows that a thought is gone (docs/api-map.md, L34).
+  // TheBrain's search returns a deleted thought until its index is refreshed,
+  // and now and then for good; the vector index holds a row until a sync. A
+  // hit was listed whatever had become of its thought.
+  type Copy = { id: string; name: string; kind: number };
+  /** What a source still has of a thought: its own copy, whatever the thought is now. */
+  const copy = (id: string, name: string, kind = 1): Copy => ({ id, name, kind });
+  const A = copy("a", "Unity");
+  const B = copy("b", "borscht");
+  /** Deleted: its read is a 404, and both sources have it still. */
+  const G = copy("g", "gazpacho");
+
+  const there = (): Map<string, FakeThought> =>
+    new Map([
+      ["a", { id: "a", name: "Unity" }],
+      ["b", { id: "b", name: "borscht" }],
+    ]);
+
+  /** A search with no index: TheBrain's search answers every phrasing with `hits`. */
+  function fallback(hits: readonly Copy[], thoughts: Map<string, FakeThought> = there()) {
+    const { api, calls, faults } = fakeApi(thoughts, []);
+    (api.search as unknown as { inBrain: () => Promise<unknown> }).inBrain = async () =>
+      hits.map((thought) => ({ thought }));
+    const store = new VectorStore(":memory:");
+    return { search: new SemanticSearch(api, store, new FakeEmbedder()), store, calls, faults };
+  }
+
+  /** A search over an index built while all three were there, with `g` deleted since. */
+  async function indexed() {
+    const thoughts = there();
+    thoughts.set("g", { id: "g", name: "gazpacho" });
+    const { api, calls, faults } = fakeApi(thoughts, [
+      log("a", 101, "2026-08-11T09:00:00"),
+      log("b", 101, "2026-08-11T09:00:01"),
+      log("g", 101, "2026-08-11T09:00:02"),
+    ]);
+    const store = new VectorStore(":memory:");
+    const embedder = new FakeEmbedder();
+    await new SemanticIndexer(api, store, embedder).rebuild(BRAIN);
+    thoughts.delete("g");
+    calls.thought = 0;
+    return { search: new SemanticSearch(api, store, embedder), store, calls, faults, thoughts };
+  }
+
+  const refused = (kind: ApiErrorKind, status?: number): TheBrainError =>
+    new TheBrainError(kind, `refused as ${kind}`, {
+      ...(status !== undefined ? { status } : {}),
+      method: "GET",
+      path: `/api/thoughts/${BRAIN}/b`,
+    });
+  const ids = (matches: ReadonlyArray<{ thoughtId: string }>): string[] =>
+    matches.map((m) => m.thoughtId);
+
+  describe("with no index", () => {
+    it("a hit whose thought reads 404 is left out, and the rest keep their order", async () => {
+      const { search, store, calls } = fallback([A, G, B]);
+      const outcome = await search.find(BRAIN, "soup");
+
+      expect(outcome.mode).toBe("keyword");
+      expect(ids(outcome.matches)).toEqual(["a", "b"]);
+      // As the search returned it, for the result to count.
+      expect(outcome.gone).toMatchObject([{ thoughtId: "g", name: "gazpacho", source: "keyword" }]);
+      expect(outcome.unverified).toEqual([]);
+      // One read a hit, and nothing else.
+      expect(calls.thought).toBe(3);
+      store.close();
+    });
+
+    it("with every thought there nothing is left out, at one read a hit", async () => {
+      const { search, store, calls } = fallback([A, B]);
+      const outcome = await search.find(BRAIN, "soup");
+      expect(ids(outcome.matches)).toEqual(["a", "b"]);
+      expect(outcome).toMatchObject({ gone: [], unverified: [] });
+      expect(calls.thought).toBe(2);
+      store.close();
+    });
+
+    it("with every hit gone there is no match, and each is counted", async () => {
+      const { search, store } = fallback([G, copy("h", "harira")]);
+      const outcome = await search.find(BRAIN, "soup");
+      expect(outcome.matches).toEqual([]);
+      expect(ids(outcome.gone)).toEqual(["g", "h"]);
+      store.close();
+    });
+
+    it("nothing is fetched to fill the place of a hit left out", async () => {
+      // The hits are cut to the limit and then read: one left out makes the
+      // result shorter, and the next in line is not read in its place.
+      const { search, store, calls } = fallback([G, A, B]);
+      const outcome = await search.find(BRAIN, "soup", { limit: 2 });
+      expect(ids(outcome.matches)).toEqual(["a"]);
+      expect(ids(outcome.gone)).toEqual(["g"]);
+      expect(calls.thought).toBe(2);
+      store.close();
+    });
+
+    it("a hit is listed under the name and the kind its thought reads with now", async () => {
+      // The search returns a renamed thought under its old name, with the old
+      // name in the hit, until its index is refreshed.
+      const thoughts = there();
+      thoughts.set("a", { id: "a", name: "Unity 6", kind: 4 });
+      const { search, store } = fallback([A, B], thoughts);
+      const outcome = await search.find(BRAIN, "Unity", { includeAuxiliary: true });
+      expect(outcome.matches[0]).toMatchObject({ thoughtId: "a", name: "Unity 6", kind: 4 });
+      expect(outcome.matches[1]).toMatchObject({ thoughtId: "b", name: "borscht", kind: 1 });
+      store.close();
+    });
+
+    it.each<[string, unknown]>([
+      ["server", refused("server", 500)],
+      // The catch-all: what the graph of a thought nobody has gets, and not its read.
+      ["forbidden", refused("forbidden", 403)],
+      ["bad_request", refused("bad_request", 400)],
+      ["route_miss", refused("route_miss", 200)],
+      ["malformed", refused("malformed", 200)],
+      ["an error that is not the API's", new TypeError("cannot read properties of undefined")],
+    ])(
+      "a read that fails with %s leaves the hit in, unverified: it is not taken for gone",
+      async (_kind, failure) => {
+        const { search, store, faults } = fallback([A, B]);
+        faults.thought = (id) => (id === "b" ? failure : undefined);
+        const outcome = await search.find(BRAIN, "soup");
+
+        expect(ids(outcome.matches)).toEqual(["a", "b"]);
+        expect(outcome.gone).toEqual([]);
+        expect(outcome.unverified).toEqual([{ thoughtId: "b", error: failure }]);
+        // Nothing was read of it, so it keeps what the search had.
+        expect(outcome.matches[1]).toMatchObject({ name: "borscht", kind: 1 });
+        store.close();
+      },
+    );
+
+    it.each<[ApiErrorKind]>([["auth"], ["unknown_brain"]])(
+      "%s on the read of a hit is about the call, and fails the search",
+      async (kind) => {
+        const failure = refused(kind, 401);
+        const { search, store, faults } = fallback([A, B]);
+        faults.thought = (id) => (id === "b" ? failure : undefined);
+        const failed = await search.find(BRAIN, "soup").then(
+          () => null,
+          (error: unknown) => error,
+        );
+        expect(failed).toBe(failure);
+        store.close();
+      },
+    );
+
+    it("TheBrain not answering ends the reads: no hit is read after it, and none is called gone", async () => {
+      // Against an app that hangs, each further read would wait out its timeout.
+      const down = new TheBrainError("network", "request exceeded 30000 ms");
+      const many = Array.from({ length: 25 }, (_, i) => copy(`h${i}`, `hit ${i}`));
+      const { search, store, calls, faults } = fallback(many);
+      faults.thought = () => down;
+      const outcome = await search.find(BRAIN, "soup", { limit: 25 });
+
+      expect(outcome.matches).toHaveLength(25);
+      expect(outcome.gone).toEqual([]);
+      expect(outcome.unverified).toEqual(many.map((h) => ({ thoughtId: h.id, error: down })));
+      // The ten that were in flight together, and not the fifteen after them.
+      expect(calls.thought).toBe(10);
+      store.close();
+    });
+
+    it("the reads in flight beside the one that got no answer are kept as they came", async () => {
+      const down = new TheBrainError("network", "could not reach http://localhost:11522");
+      const { search, store, faults } = fallback([A, G, B]);
+      faults.thought = (id) => (id === "a" ? down : undefined);
+      const outcome = await search.find(BRAIN, "soup");
+
+      expect(ids(outcome.matches)).toEqual(["a", "b"]);
+      expect(outcome.unverified).toEqual([{ thoughtId: "a", error: down }]);
+      expect(ids(outcome.gone)).toEqual(["g"]);
+      store.close();
+    });
+  });
+
+  describe("with a ready index", () => {
+    it("a thought deleted since the last sync is left out, and its row stays for a sync", async () => {
+      // The index knows nothing of the delete: the row ranked, and was listed.
+      const { search, store, calls } = await indexed();
+      const outcome = await search.find(BRAIN, "gazpacho");
+
+      expect(outcome.mode).toBe("vector");
+      expect(ids(outcome.matches).sort()).toEqual(["a", "b"]);
+      expect(outcome.gone).toMatchObject([{ thoughtId: "g", name: "gazpacho", source: "vector" }]);
+      expect(outcome.unverified).toEqual([]);
+      expect(calls.thought).toBe(3);
+      // A search writes nothing: what takes the row out is the next sync.
+      expect(store.contentHashes().has("g")).toBe(true);
+      store.close();
+    });
+
+    it("a hit is listed under the name and the kind its thought reads with now", async () => {
+      // The index has both as of its last sync.
+      const { search, store, thoughts } = await indexed();
+      thoughts.set("a", { id: "a", name: "Unity 6", kind: 4 });
+      const outcome = await search.find(BRAIN, "Unity");
+      expect(outcome.matches.find((m) => m.thoughtId === "a")).toMatchObject({
+        name: "Unity 6",
+        kind: 4,
+      });
+      store.close();
+    });
+
+    it("a read that fails leaves the hit in, unverified, and a 404 beside it still leaves one out", async () => {
+      const failure = refused("server", 500);
+      const { search, store, faults } = await indexed();
+      faults.thought = (id) => (id === "b" ? failure : undefined);
+      const outcome = await search.find(BRAIN, "soup");
+
+      expect(ids(outcome.matches).sort()).toEqual(["a", "b"]);
+      expect(outcome.unverified).toEqual([{ thoughtId: "b", error: failure }]);
+      expect(ids(outcome.gone)).toEqual(["g"]);
+      store.close();
+    });
+
+    it("with TheBrain not running every hit is listed, and none is verified", async () => {
+      // Ranking asks TheBrain nothing, so the hits are there to list.
+      const down = new TheBrainError("network", "could not reach http://localhost:11522");
+      const { search, store, faults } = await indexed();
+      faults.thought = () => down;
+      const outcome = await search.find(BRAIN, "soup");
+
+      expect(outcome.mode).toBe("vector");
+      expect(ids(outcome.matches).sort()).toEqual(["a", "b", "g"]);
+      expect(outcome.gone).toEqual([]);
+      expect(outcome.unverified.map((u) => u.error)).toEqual([down, down, down]);
+      store.close();
+    });
+
+    it.each<[ApiErrorKind]>([["auth"], ["unknown_brain"]])(
+      "%s on the read of a hit fails the search there too: nothing was asked before it",
+      async (kind) => {
+        // A brain deleted since its index was built, or a key that was changed.
+        const failure = refused(kind, 401);
+        const { search, store, faults } = await indexed();
+        faults.thought = () => failure;
+        await expect(search.find(BRAIN, "soup")).rejects.toBe(failure);
+        store.close();
+      },
+    );
+  });
+});
+
 describe("a read that fails while the index is built or refreshed", () => {
   // A failed read used to stand for a thought that is not there
   // (`.catch(() => null)` on a graph and on the brain) or for one with no note

@@ -239,6 +239,13 @@ thought again when its kind changes and a rebuild compares the kind of every
 row, and either gives the row its kind with nothing encoded (§8, *The kind is
 beside the document*).
 
+> **Since then** `brain_search` reads the thought of every hit before it
+> lists it, to see that it is there (§8, *A hit for a thought that is gone*),
+> and that read has the kind. So the `Kind` column, and the name beside it,
+> are the thought's own in both modes, and no longer the search's copy or the
+> index's. The mark still costs no request of its own. What the index's kind
+> still decides is which rows a default search leaves out as types and tags.
+
 ### `brain_ingest` — the tool the product is built around
 
 Input is a plan: thoughts with `tempId`s that reference each other and existing
@@ -1168,6 +1175,18 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     it says how the two relate, and that link is the one place to keep it.
     It does not go onto a tag's attachment or a type's link, where both
     tools used to write it.
+22. **The search answers from a copy that is behind, and a hit is that
+    copy.** The search of a brain has an index of its own, refreshed about
+    every five seconds. Until the next refresh it returns a thought that was
+    deleted, the hit the same to the last field as before the delete, and a
+    thought that was renamed or given another caption, alias or note by its
+    old text, with the old name in the hit. The lookup by exact name answers
+    from the same index. A thought deleted within some tens of milliseconds
+    of a neighbour of its own stayed in it for good 7 times of 720, and six
+    such thoughts were still returned hours later, the oldest seventeen.
+    `brain_search` listed every hit as it found it. It reads the thought of
+    each hit now, and `findByName` its answer (§8, *A hit for a thought that
+    is gone*).
 
 ### Write visibility
 
@@ -1195,7 +1214,10 @@ Measured against a live API by polling until the result appeared:
 | `attach URL` → `by-location` | instant |
 | `attach URL` → the thought's attachment list | up to 0.2 s: a copy refreshed about every 0.1 s. Live on its first read |
 | **`create` → `findByName`** | **~5.6 s** |
-| `create` → full-text search | up to 15 s (per the vendor docs) |
+| `create` → full-text search | up to 15 s (per the vendor docs); 3.8–5.3 s measured, at the next refresh of the search's index |
+| `delete` → `get(id)` is a 404 | 30–206 ms: the thought still reads at first, 80 times of 80 |
+| `delete` → the search and the lookup by name stop returning it | 4.5–5.2 s, at that refresh; never for about one in a hundred deleted 9 to 38 ms after a neighbour |
+| a new name, caption, alias or note → the search finds it by the new text | up to 5 s, at that refresh; by the old text, and under the old name, until then |
 
 **The rule that falls out: after a write, address thoughts by identifier, never
 by name.** `brain_ingest` links newly created thoughts through returned UUIDs
@@ -1463,6 +1485,12 @@ is. The answer comes from the index, which is as old as its last sync
 whether the app runs or not; `brain_index` with `action: "status"` gives that
 time.
 
+> **Since then** it is the ranking alone that asks nothing. A search reads
+> the thought of every hit before it lists it, in vector mode as in the
+> fallback, and those three come out otherwise: a rejected key fails the
+> search, and with nothing listening or a 5xx the hits are listed as not
+> verified. See *A hit for a thought that is gone*, below.
+
 **The reads inside the other tools go by the same rule.** `brain_get_thought`,
 `brain_set_note`, `brain_append_note`, `brain_delete_thought`,
 `brain_traverse`, `brain_list` and the wait at the end of `brain_ingest` each
@@ -1495,6 +1523,154 @@ created the file, three with the journal's. So did `brain_list` for every
 brain it listed, and `brain_delete_thought` for a brain never indexed. A
 store now makes its file at its first write, and reads as an empty index
 until then (`VectorStore`): nothing is created to be looked at.
+
+### A hit for a thought that is gone
+
+> **Correction.** A hit was listed as its source returned it, and neither
+> source knows that a thought is gone. Measured on 15.0.640
+> (`docs/api-map.md`, L34), through the API and then through the real tool:
+>
+> - **TheBrain's search answers from an index of its own**, refreshed about
+>   every five seconds. A deleted thought was returned until the next
+>   refresh, 4.5 to 5.2 s after its delete in six runs of 6 to 30 thoughts,
+>   with its own read a 404 from 0.2 s on. The lookup by exact name answers
+>   from the same index, and returned the deleted thought as long.
+> - **Now and then a deleted thought stays there for good.** Six thoughts the
+>   contract tests had deleted were still returned 2 to 17 hours after
+>   their delete, each with its read a 404. By the log each had been deleted
+>   3 to 13 ms after a neighbour of its own. Made on purpose: of 720
+>   thoughts deleted 9 to 38 ms after their parent, their type or the
+>   thoughts a tag was on, 7 stayed; of 720 deleted 120 to 330 ms after,
+>   none, and none of 2,340 deleted with no neighbour just before. A second
+>   `DELETE` does not take one out.
+> - **Nothing in a hit tells.** The hit for a deleted thought is the one it
+>   was before the delete, to the last field.
+> - **A changed thought is found by what it used to say.** After a rename, a
+>   new caption, a new alias and a new note it was found by each old text
+>   for 4.4 s more, and the hit by its old name had the old name in it.
+> - **The vector index is as old as its last sync.** A thought deleted since
+>   was the first hit of a vector search 12 times of 12. Its row left at the
+>   next sync 12 times of 12, and at a rebuild 5 of 5.
+>
+> So `brain_search` printed the identifier of a thought that was gone, in
+> the row of a thought to use: for five seconds after a delete with no
+> index, now and then for good, and with an index until someone called a
+> sync. Through the tool as it was, a search for the name of a thought
+> deleted the day before answered with its row.
+
+A hit is where a model takes an identifier from. The next call with one that
+is gone is a write refused, or worse: a note written to an identifier nobody
+has is stored and reported as written (§7, `docs/api-map.md`, L3).
+
+**Every hit's thought is read before the hit is listed, in both modes.**
+`find()` ranks, cuts to the limit, and asks for each hit's thought by its
+identifier, ten at a time (`#verify`). That read is the one thing that tells:
+it is a 404 once no thought of the brain has the identifier (L3). What it
+answers decides.
+
+- **The thought.** The hit is listed, under the name and the kind the read
+  gives. A hit carries its source's copy of both: the search's, five seconds
+  old or older, or the index's, as old as its last sync.
+- **A 404.** The hit is left out, and returned in `gone`. `brain_search`
+  counts it under "Left out" and does not print it: an identifier nobody has
+  is of no use. The section says what there is to do, which goes by the
+  source. For the fallback, nothing: "Its search goes on returning a deleted
+  thought for about five seconds, and now and then for good." For the index,
+  one call: "The index holds a deleted thought until its next sync: call
+  brain_index with action=sync." With every hit gone the first section reads
+  "Nothing that is still there: each of the 3 hits was a thought that is
+  gone", and not that nothing matched, which the fallback would have said
+  and which is false.
+- **A `brainId` that is no brain, or a rejected key.** The search fails with
+  it, as the fan-out does. With an index nothing was asked before these
+  reads, so this is where a brain deleted since its index was built is found
+  out: it used to be answered from the index.
+- **Any other failure.** A read that failed is no answer about the thought
+  (*A request that fails is not an empty answer*, above), so the hit is
+  neither left out nor passed for a thought that is there. It stays in its
+  place in the ranking, with `no` under a `Verified` column that is there
+  only when some hit has it, and a "Not verified" section says how many of
+  the thoughts above could not be read, why, once when the reason is the
+  same for all, and to read a thought with `brain_get_thought` before using
+  its identifier. The catch-all 403 is such a failure: it is what the graph
+  of a thought nobody has gets, and its own read gets the 404.
+- **No answer at all.** The same, and it is the last read asked for: the
+  ones in flight are waited for, and every hit not yet read is unverified
+  for that reason. Against an app that hangs, each further read would wait
+  out its thirty seconds.
+
+Such a result is no error. Like a search that some phrasings failed and a
+walk that could not look around every thought (§4), the rest is a result and
+what it does not say is named. With TheBrain not running, a vector search
+still lists what the index ranks, every row marked.
+
+**What it costs.** One request a hit, 15 by default and 50 at the most, and
+none when nothing was found. Measured on 15.0.640, 30 runs of each: reading 25
+thoughts took 0.9 ms at the median ten at a time, 2.6 ms at the most, and
+2.7 ms one after another. Through the real tool with no index, a search of
+one phrasing that found 25 thoughts took 8.3 ms where the search request
+alone took 5.7, and one that found 15 took 4.9 ms against 3.3. With an index
+and a stand-in for the embedder, a search of three hits took 0.6 to 1.2 ms,
+its three reads included. A result with nothing gone and every read answered
+is what it was, to the character: tests pin that for both modes. The
+description says nothing of it, so `tools/list` is the size it was.
+
+**What was weighed and not taken.**
+
+- *Leaving it, and saying so on every result or in the description.* Every
+  search would pay for it in tokens, and the model would be left to read
+  each hit itself before using it: the same reads, at a call each.
+- *Keeping the hit in the table with a mark.* A row with an identifier is
+  what a model picks up, and a thought that is gone has nothing to offer the
+  one reading. The mark is kept for the hit of which nothing is known.
+- *Leaving it out in silence.* A result shorter than its limit, or empty
+  where TheBrain matched, would say nothing of why, and with an index
+  nothing would say that the index is behind and which call brings it up.
+- *Filling the places left.* The hits are cut to the limit and then read,
+  so a result can be shorter than `limit`. With an index a sync is what
+  makes it whole; a loop that asked the index for more and read again would
+  hide that it is behind. With no index it would mean reading every
+  candidate of every phrasing, 550 at the most, where the hits that are gone
+  are few: five seconds' worth, and the rare one that stayed.
+- *Taking the row out of the index when its thought reads 404.* It is the
+  answer a sync removes a row for (*A read that fails while the index is
+  built*, below). But a search is a read: the index is written by
+  `brain_index` and by `brain_delete_thought`, and the result names the call
+  that takes the rows out. Until it is made the row is read and left out
+  again, at one request.
+- *Asking the log what was deleted since the watermark*, one request in
+  place of one a hit. It serves the index alone, the log since an old sync
+  can be thousands of entries, and a row can be stale for another reason.
+- *`GET /api/search/accessible`*, which returned no deleted thought past the
+  moment its read turned 404, nor any of thirteen the brain's own search
+  still held. It searches every brain the key opens, and they share
+  `maxResults` between them.
+- *Leaving vector mode to ask nothing.* It answered with TheBrain closed,
+  and that is all it had over this. Of the two modes it is the one that
+  holds a thought that is gone the longest: until a sync, which is a call
+  somebody has to make.
+
+**`findByName` reads its answer too.** The lookup by exact name returned the
+deleted thought for those five seconds, and a renamed one under its old name
+with the old name in the answer. Nothing in the server calls it, since a
+thought is never resolved by name (§7, *Write visibility*); it reads the
+thought by its identifier now and returns that read, null for a 404 and for
+another name. Its null is "the lookup's one answer is not such a thought",
+which is less than "no thought has this name": of two namesakes the lookup
+gives the newer, and went on giving it for 5.1 s after it was deleted, 8
+times of 8.
+
+**Not guarded.** A thought still reads for 30 to 206 ms after its `DELETE`
+is answered, 80 times of 80, and one deleted in that moment is listed. Which
+rows a default search leaves out as types and tags still goes by the kind
+the index recorded. And none of this finds what the search does not return:
+a thought made in the last five seconds, which is why a thought is
+addressed by identifier after a write (§7). Two things were not measured:
+whether a restart of TheBrain clears the thoughts that stayed in its index,
+since the app was in use; and whether thoughts deleted together in
+TheBrain's own window, a parent with its children, stay there the same way.
+The API cannot drive that window, and the deletes that did leave one were a
+neighbour's and then the thought's, a few milliseconds apart.
 
 ### A read that fails while the index is built
 

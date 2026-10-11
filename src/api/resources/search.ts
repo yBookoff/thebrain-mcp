@@ -18,6 +18,20 @@ export interface SearchHit {
  *  - the index lags by up to 15 seconds, so freshly created content is missing;
  *  - matching is prefix-based, not semantic: `OT` finds `OTGP`, but a typo or
  *    a synonym returns nothing.
+ *
+ * And a third, measured on 15.0.640 (docs/api-map.md, L34): **a hit is the
+ * index's copy of a thought, not the thought.** The index is refreshed about
+ * every five seconds. Until then `inBrain` returns a thought that was deleted,
+ * and a thought renamed or given another label, alias or note under the old
+ * text, with the old name, label and aliases in the hit. A thought deleted
+ * within some tens of milliseconds of a neighbour stayed in the index for
+ * good about once in a hundred, and was still returned seventeen hours later.
+ * Nothing in a hit says so: it is the same to the last field before the
+ * delete and after. Read the thought by its identifier before relying on a
+ * hit; `SemanticSearch` does.
+ *
+ * `accessible` did not return a deleted thought past the moment its own read
+ * turned 404, nor any of thirteen such leftovers.
  */
 export class SearchResource {
   constructor(private readonly client: TheBrainClient) {}

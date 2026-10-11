@@ -17,6 +17,12 @@
  * is one phrasing's own: it is left out and named in the outcome, and when no
  * phrasing was answered there is no outcome at all (`SearchFailedError`).
  * Ranking by vectors asks TheBrain nothing, so none of this reaches it.
+ *
+ * Neither source knows that a thought is gone. TheBrain's search goes on
+ * returning a deleted thought until its index is next refreshed, about five
+ * seconds, and now and then for good; the vector index holds a row until the
+ * next sync. A hit is where a model takes an identifier from, so in both
+ * modes each hit's thought is read before it is listed (`#verify`).
  */
 
 import {
@@ -35,6 +41,13 @@ export type MatchSource = "vector" | "keyword";
 
 export interface Match {
   thoughtId: string;
+  /**
+   * The name and the kind the thought reads with now. What found it is a
+   * copy: TheBrain's search returns a renamed thought under its old name, with
+   * the old name in the hit, until its index is refreshed, and the vector
+   * index keeps both as of its last sync. They are the copy's only for a hit
+   * listed in `SearchOutcome.unverified`.
+   */
   name: string;
   kind: number;
   /** Cosine for vector hits, a heuristic weight for lexical ones. */
@@ -58,8 +71,31 @@ export interface PhrasingFailure {
   error: unknown;
 }
 
+/** A hit whose thought could not be read, and what came instead of the thought. */
+export interface UnverifiedHit {
+  thoughtId: string;
+  error: unknown;
+}
+
 export interface SearchOutcome {
+  /**
+   * The hits, best first, less the ones in `gone`. Fewer than `limit` when
+   * some were left out: nothing is fetched to fill their places.
+   */
   matches: Match[];
+  /**
+   * Hits left out of `matches` because the thought is gone: its own read
+   * answered 404. They are as the source returned them, name and kind
+   * included.
+   */
+  gone: Match[];
+  /**
+   * Hits that are in `matches` although the read of the thought failed, in
+   * some way other than that 404. Nothing is known of such a thought, least
+   * of all that it is gone, so it is neither left out nor passed for one that
+   * is there.
+   */
+  unverified: UnverifiedHit[];
   /** Whether vector search ran or the fallback kicked in. */
   mode: "vector" | "keyword";
   /** Why it degraded — surfaced to the user. */
@@ -115,6 +151,24 @@ const AUXILIARY_KINDS = [ThoughtKind.Type, ThoughtKind.Tag, ThoughtKind.System];
  */
 const FAILS_EVERY_PHRASING: readonly ApiErrorKind[] = ["invalid_uuid", "unknown_brain", "auth"];
 
+/**
+ * The same for the read that checks a hit: a `brainId` that is no brain and a
+ * key TheBrain rejects fail the search, as they fail the fan-out. With an
+ * index nothing was asked before these reads, so this is where a brain
+ * deleted since the index was built is found out.
+ */
+const FAILS_EVERY_READ: readonly ApiErrorKind[] = ["unknown_brain", "auth"];
+
+/**
+ * How many hits are read at a time. Measured on 15.0.640, 30 runs of each:
+ * 25 hits took 0.9 ms at the median ten at a time, 2.6 ms at the most, and
+ * 2.7 ms one after another, where the search request itself took 6.5 ms.
+ */
+const VERIFY_CONCURRENCY = 10;
+
+/** What was ranked, before the hits are checked against TheBrain. */
+type Ranked = Omit<SearchOutcome, "gone" | "unverified">;
+
 export class SemanticSearch {
   constructor(
     private readonly api: TheBrainApi,
@@ -131,12 +185,19 @@ export class SemanticSearch {
    * Throws `EmptyQueryError` when there is no phrasing to look for, in either
    * mode: the fan-out would send nothing and report nothing found, and the
    * vectors would rank the brain against an empty string.
+   *
+   * In either mode every hit's thought is read before the outcome is
+   * returned: see `#verify` for what each answer of that read does.
    */
   async find(
     brainId: string,
     concept: string,
     options: SearchOptions = {},
   ): Promise<SearchOutcome> {
+    return this.#verify(brainId, await this.#rank(brainId, concept, options));
+  }
+
+  async #rank(brainId: string, concept: string, options: SearchOptions): Promise<Ranked> {
     const limit = options.limit ?? 15;
     const excludeKinds = options.includeAuxiliary ? [] : AUXILIARY_KINDS;
     const phrasings = dedupeVariants([concept, ...(options.variants ?? [])]);
@@ -224,7 +285,7 @@ export class SemanticSearch {
     options: SearchOptions,
     limit: number,
     reason: string,
-  ): Promise<SearchOutcome> {
+  ): Promise<Ranked> {
     type Answered = { variant: string; hits: SearchHit[] };
     const asked = await mapWithConcurrency<string, Answered | PhrasingFailure>(
       phrasings,
@@ -288,6 +349,74 @@ export class SemanticSearch {
       phrasings: phrasings.length,
       notSearched,
     };
+  }
+
+  /**
+   * Reads the thought of every hit, and goes by the answer.
+   *
+   * Measured on 15.0.640 (docs/api-map.md, L34). TheBrain's search returns a
+   * thought until its index is next refreshed, at most 5.2 s after the
+   * thought was deleted, and a thought deleted within some tens of
+   * milliseconds of a neighbour of its own stayed in it for good about once
+   * in a hundred: such hits were still returned seventeen hours on. A vector
+   * search returned a thought deleted since the last sync 12 times of 12.
+   * Nothing in a hit tells: before the delete and after it, it is the same to
+   * the last field. What tells is the thought's own read, a 404 once it is
+   * gone (L3).
+   *
+   * - **It answers**: the hit is listed, with the name and the kind that
+   *   read gives. A hit carries its source's copy of both.
+   * - **A 404**: the thought is gone. The hit is left out and returned in
+   *   `gone`, for the result to count.
+   * - **A `brainId` that is no brain, or a rejected key**: thrown. It is the
+   *   call's failure, and the first is the search's answer.
+   * - **Any other failure**: the hit stays, and is named in `unverified`. A
+   *   read that failed is no answer, so the thought is not taken for gone
+   *   and not for one that is there.
+   * - **No answer at all** (`network`) is such a failure, and the last read
+   *   asked for: the reads in flight are waited for, and every hit not yet
+   *   read is unverified for the same reason. Against an app that hangs,
+   *   each further read would wait out its thirty seconds.
+   *
+   * What it does not catch: a thought still reads for 30 to 206 ms after its
+   * `DELETE` is answered, 80 times of 80, so one deleted in that moment is
+   * listed.
+   */
+  async #verify(brainId: string, ranked: Ranked): Promise<SearchOutcome> {
+    type Checked = { match: Match; error?: unknown } | { gone: Match };
+    let down: { error: unknown } | null = null;
+
+    const checked = await mapWithConcurrency<Match, Checked>(
+      ranked.matches,
+      VERIFY_CONCURRENCY,
+      async (match) => {
+        if (down !== null) return { match, error: down.error };
+        try {
+          const thought = await this.api.thoughts.get(brainId, match.thoughtId);
+          return { match: { ...match, name: thought.name ?? "", kind: thought.kind } };
+        } catch (error) {
+          if (error instanceof TheBrainError) {
+            if (error.kind === "not_found") return { gone: match };
+            if (FAILS_EVERY_READ.includes(error.kind)) throw error;
+            if (error.kind === "network") down = { error };
+          }
+          return { match, error };
+        }
+      },
+    );
+
+    const matches: Match[] = [];
+    const gone: Match[] = [];
+    const unverified: UnverifiedHit[] = [];
+    for (const item of checked) {
+      if ("gone" in item) {
+        gone.push(item.gone);
+        continue;
+      }
+      matches.push(item.match);
+      if ("error" in item) unverified.push({ thoughtId: item.match.thoughtId, error: item.error });
+    }
+    return { ...ranked, matches, gone, unverified };
   }
 }
 

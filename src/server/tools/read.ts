@@ -145,15 +145,93 @@ function notSearchedSection(outcome: SearchOutcome): string | null {
  * The body of the result's first section. With no hit the fallback says so
  * in words, and of how many phrasings: it used to print no section at all,
  * which is also all it printed when every request had failed.
+ *
+ * When every hit was a thought that is gone, that is said in either mode, and
+ * not that nothing matched.
  */
 function foundBody(outcome: SearchOutcome, hits: string): string {
-  if (outcome.mode === "vector" || outcome.matches.length > 0) return hits;
+  if (outcome.matches.length > 0) return hits;
+  const gone = outcome.gone.length;
+  if (gone > 0) {
+    return gone === 1
+      ? "Nothing that is still there: the one hit was a thought that is gone."
+      : `Nothing that is still there: each of the ${gone} hits was a thought that is gone.`;
+  }
+  if (outcome.mode === "vector") return hits;
   const answered = outcome.phrasings - outcome.notSearched.length;
   if (outcome.phrasings === 1) return "Nothing: TheBrain's search matched no thought.";
   const which = answered === outcome.phrasings ? "" : " it answered";
   return answered === 1
     ? `Nothing: TheBrain's search matched no thought for the one phrasing${which}.`
     : `Nothing: TheBrain's search matched no thought for any of the ${answered} phrasings${which}.`;
+}
+
+/**
+ * The hits that were left out because their thoughts are gone, or null when
+ * none was. Counted and not listed: an identifier nobody has is of no use,
+ * and a result is where identifiers are taken from.
+ *
+ * What it says to do goes by the source. TheBrain's own search drops a
+ * deleted thought by itself or not at all, and there is nothing to call for
+ * it. The index is brought up to date by a sync (docs/api-map.md, L34).
+ */
+function leftOutSection(outcome: SearchOutcome): string | null {
+  const gone = outcome.gone.length;
+  if (gone === 0) return null;
+  const one = gone === 1;
+  const lead = `${gone} ${one ? "hit was" : "hits were"} left out: `;
+  const read = `and the read of ${one ? "the" : "each"} thought answered 404`;
+  return section(
+    "Left out",
+    outcome.mode === "vector"
+      ? `${lead}the semantic index holds ${one ? "it" : "them"}, ${read}. The index holds a ` +
+          "deleted thought until its next sync: call brain_index with action=sync."
+      : `${lead}TheBrain's search returned ${one ? "it" : "them"}, ${read}. Its search goes ` +
+          "on returning a deleted thought for about five seconds, and now and then for good.",
+  );
+}
+
+/** What a hit's row has in the `Verified` column when its thought could not be read. */
+const NOT_VERIFIED = "no";
+
+/**
+ * Why the read of a hit's thought failed, with no identifier in it, so that
+ * the same failure of many hits is one reason.
+ */
+function whyUnverified(error: unknown): string {
+  return error instanceof TheBrainError && error.kind === "network"
+    ? sentence(describeError(error))
+    : answered(error);
+}
+
+/**
+ * The hits whose thoughts could not be read, or null when every one was.
+ * Each has `no` under `Verified` in its row. Without this a hit for a thought
+ * that may be gone reads like any other.
+ *
+ * One reason for all of them is given once, as for the phrasings above.
+ */
+function notVerifiedSection(outcome: SearchOutcome): string | null {
+  const failed = outcome.unverified.length;
+  if (failed === 0) return null;
+  const listed = outcome.matches.length;
+  const lead =
+    listed === 1
+      ? "The read of the thought above failed, so this result does not say whether it is " +
+        "still there"
+      : failed === listed
+        ? `The read of each of the ${listed} thoughts above failed, so this result does not ` +
+          "say whether any of them is still there"
+        : `The read of ${failed} of the ${listed} thoughts above failed, so this result does ` +
+          `not say whether ${failed === 1 ? "it is" : "they are"} still there`;
+  const next = "Read a thought with brain_get_thought before using its identifier.";
+  const reasons = new Set(outcome.unverified.map((u) => whyUnverified(u.error)));
+  if (reasons.size > 1) {
+    const lines = outcome.unverified.map((u) => `${u.thoughtId}: ${whyUnverified(u.error)}`);
+    return section("Not verified", `${lead}:\n${bullet(lines)}\n${next}`);
+  }
+  const [shared] = reasons;
+  return section("Not verified", `${lead}: ${shared} ${next}`);
 }
 
 /** A read that was answered, or the failure that came in its place. */
@@ -527,11 +605,17 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       // thoughts reads as it did.
       const kinds = outcome.matches.map((m) => kindLabel(m.kind));
       const kindColumn = kinds.some((k) => k !== null);
+      // The same for a hit whose thought could not be read: a column that is
+      // there only when there is one, so that it is not read as a thought to
+      // use. A hit whose thought is gone is not in the table at all.
+      const unverified = new Set(outcome.unverified.map((u) => u.thoughtId));
+      const verifiedColumn = unverified.size > 0;
       const rows = outcome.matches.map((m, i) => [
         m.score.toFixed(3),
         m.name,
         m.thoughtId,
         ...(kindColumn ? [kinds[i] ?? ""] : []),
+        ...(verifiedColumn ? [unverified.has(m.thoughtId) ? NOT_VERIFIED : ""] : []),
         m.matchedVariant ?? "",
       ]);
 
@@ -542,11 +626,20 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
             foundBody(
               outcome,
               table(
-                ["Score", "Thought", "Identifier", ...(kindColumn ? ["Kind"] : []), "Matched"],
+                [
+                  "Score",
+                  "Thought",
+                  "Identifier",
+                  ...(kindColumn ? ["Kind"] : []),
+                  ...(verifiedColumn ? ["Verified"] : []),
+                  "Matched",
+                ],
                 rows,
               ),
             ),
           ),
+          notVerifiedSection(outcome),
+          leftOutSection(outcome),
           notSearchedSection(outcome),
           outcome.degradedReason === null
             ? null
