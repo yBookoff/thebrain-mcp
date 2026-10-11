@@ -182,6 +182,12 @@ silent wrong behaviour rather than a loud failure:
   Two plan items for one thought are one create: when it fails the other
   stands under `skipped`. A plan that names nothing in the brain reads the
   brain before its first write, so a `brainId` that is no brain fails it once.
+- **`requireParent()` returns null for an identifier nobody has, and does not
+  throw.** `brain_create_thought` and `brain_link` leave such a parent to
+  their write, which the API refuses by name. Only `ingest()` rejects by it,
+  before its first write, and it reads a thought's `parent` under every
+  relation. The lower end of a plan link and the ends of a jump are not read:
+  that link fails alone.
 - **A tool that writes more than once says what it wrote when a later write
   fails.** A write after the first is a step of `inOrder()` in
   `src/server/tools/write.ts`, never a bare `await`: thrown to `guard()`, its
