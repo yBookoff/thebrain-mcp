@@ -231,6 +231,25 @@ silent wrong behaviour rather than a loud failure:
   read").
 - **A note write with no answer may have landed, and an append sent again
   lands twice.** Both note tools say so under "Next" when `mayHaveLanded()`.
+- **For a moment after a note changes, its thought's `graph` is wrong about
+  it.** After a change it lists no Notes attachment at one read within 0.2 s;
+  after a deletion it still lists the note for up to 0.2 s, while the note's
+  read is a 403; a first note shows up to 0.15 s late where the graph or the
+  note was read before. The indexer takes "has a note" from the latest note
+  entry in the log it has read (`noteStates()`), and from `isNotes` only where
+  the log has none.
+- **`notes/update` replaces, and a plan's note goes only where there is
+  none.** `ingest()` reads the note of a thought it found in place and writes
+  the plan's only when that read answers that there is none; a read that fails
+  is not that answer. A found thought used to lose its note on every run.
+  Changing a note is `brain_set_note` or `brain_append_note`, never a plan.
+- **A graph is behind any write, not a batch's own alone.** The single-thought
+  tools return at once. `ingest()` waits out what is left of `COPY_LAG_MS`
+  since `client.sinceLastWrite()` before its first look; anything new that
+  decides by a graph or by a note being there needs the same.
+- **Two thoughts of one name in one list of a graph are in no order to rely
+  on.** They change places from read to read. `ingest()` fails a plan thought
+  with two candidates and names both.
 - **Search is prefix-based.** This is why `src/semantic/` exists.
 
 ## Semantic layer
@@ -255,10 +274,22 @@ Constraints to respect in any new code:
   no phrasing was answered, and returns the phrasings it left out in
   `notSearched`, which `brain_search` prints. Never end a request with
   `.catch(() => [])` where the model will read the emptiness as "nothing there".
-- **An index is a local file, and `ctx.store(brainId)` creates it before any
-  request.** `brain_index` asks `brains.get()` first, for every action;
-  `indexPath()` refuses a `brainId` that is no UUID. Vector search makes no
-  request at all, so it answers with TheBrain closed.
+- **An index is a local file, and only a write creates it.** A `VectorStore`
+  with no file reads as an empty index, so `brain_list`, `brain_search`, a
+  status and `ctx.store(id).remove()` leave nothing behind. `brain_index` asks
+  `brains.get()` first, for every action; `indexPath()` refuses a `brainId`
+  that is no UUID. Vector search makes no request at all, so it answers with
+  TheBrain closed.
+- **A rebuild and a sync read everything before they write anything, and a
+  read that fails is not an answer.** `auth`, `unknown_brain` and `network`
+  stop the run, and so do the log's and the brain's reads whatever they fail
+  with: the index is as it was. Any other failure leaves the thought in
+  `IndexResult.unread`, its row untouched; only the 404 of the thought's own
+  read, asked for after its graph's 403, removes a row. With anything unread
+  the watermark does not move, a rebuild removes no row its walk did not
+  reach, and `brain_index` answers `isError`. Never `.catch(() => null)` a
+  graph or `.catch(() => "")` a note there. Both runs ask
+  `Embedder.isAvailable?.()` before their first request.
 
 ## Tests
 
