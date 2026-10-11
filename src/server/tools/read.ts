@@ -15,7 +15,12 @@ import { compareLogTime, logTime } from "../../api/log.js";
 import { ThoughtKind, aliasesOf, type ModificationLogDto } from "../../api/types.js";
 import { describeChange, isSettingNoise, subjectIds } from "../../operations/changes.js";
 import { traverse, type TraverseUnread } from "../../operations/traverse.js";
-import { mapWithConcurrency } from "../../semantic/indexer.js";
+import {
+  mapWithConcurrency,
+  type IndexResult,
+  type IndexStatus,
+  type UnreadThought,
+} from "../../semantic/indexer.js";
 import {
   SearchFailedError,
   type PhrasingFailure,
@@ -217,6 +222,151 @@ function notReadSection(unread: readonly TraverseUnread[]): string | null {
   return section("Not read", `${lead}: ${shared}\n${bullet(unread.map(named))}`);
 }
 
+/**
+ * Built is a build that finished. A rebuild writes its metadata ahead of its
+ * first row and its watermark last, and that only when it read every
+ * thought: one that stopped in between, or left a thought unread, has the
+ * first and not the second.
+ */
+function indexBuilt(s: IndexStatus): boolean {
+  return s.exists && s.syncedThrough !== null;
+}
+
+/** What `brain_search` asks of an index before it ranks by it. */
+function indexUsable(s: IndexStatus): boolean {
+  return s.compatible && s.size > 0;
+}
+
+/**
+ * The index of a brain in a row of `brain_list`. It printed `index: 0` for a
+ * build that never finished, which reads as an index of a brain with nothing
+ * in it.
+ */
+function indexCell(s: IndexStatus): string {
+  const unfinished = s.exists && s.compatible && !indexBuilt(s);
+  if (indexUsable(s)) return `index: ${s.size}${unfinished ? ", build not finished" : ""}`;
+  return unfinished ? "build not finished" : "no index";
+}
+
+/** How many of the thoughts a run left unread its result lists by identifier. */
+const MAX_UNREAD_LISTED = 20;
+
+/**
+ * What TheBrain answered in place of a read, in its own words where they say
+ * something. The catch-all 403 is not quoted: its text is about the key, and
+ * the key is not what it is about (docs/api-map.md, L3).
+ */
+function answered(error: unknown): string {
+  if (!(error instanceof TheBrainError)) {
+    return sentence(error instanceof Error ? error.message : String(error));
+  }
+  if (error.kind === "forbidden") return "TheBrain answered 403 and named no cause.";
+  if (error.status === undefined || error.status < 400) return sentence(error.message);
+  return `TheBrain answered ${error.status}: ${sentence(error.message)}`;
+}
+
+/**
+ * Why a thought was left unread, with no identifier in it, so that the same
+ * failure of many thoughts is one reason. A 403 is said for what it is here:
+ * the indexer has asked for the thought itself, and a thought that is not
+ * there is not in this list.
+ */
+function whyUnread(u: UnreadThought): string {
+  const refused = u.error instanceof TheBrainError && u.error.kind === "forbidden";
+  if (u.read === "note") {
+    return (
+      `The read of the note failed: ${answered(u.error)}` +
+      (refused ? " A note's read gets that answer for a moment after the note is deleted." : "")
+    );
+  }
+  if (u.read === "thought") {
+    return (
+      "The read of the graph was a 403 that names no cause, and the read of the thought " +
+      `itself failed: ${answered(u.error)}`
+    );
+  }
+  return refused
+    ? "The read of the graph failed: TheBrain answered 403 and named no cause, while the " +
+        "thought itself reads."
+    : `The read of the graph failed: ${answered(u.error)}`;
+}
+
+/**
+ * What `brain_index` answers for a run that left thoughts unread. It is an
+ * error, and its title does not say built or refreshed: it used to say both
+ * of a run that had read nothing, with a watermark moved past what it had
+ * not read.
+ *
+ * It says what was written, which thoughts were left and why, and what to
+ * call next. One reason for all of them is given once, as `brain_search`
+ * gives it.
+ */
+function leftUnread(r: IndexResult, after: IndexStatus): string {
+  const rebuild = r.ran === "rebuild";
+  const left = r.unread.length;
+  const none = left === r.asked;
+  const run = rebuild ? "rebuild" : "sync";
+
+  const title = none
+    ? `Index not ${rebuild ? "rebuilt" : "refreshed"}`
+    : `Index ${rebuild ? "rebuilt" : "refreshed"} in part`;
+  const done = none
+    ? [`thoughts read: 0 of ${r.asked}`, "written to the index: nothing, it is as it was"]
+    : [
+        `thoughts read: ${r.asked - left} of ${r.asked}`,
+        `thoughts encoded: ${r.indexed}`,
+        ...(r.kindUpdated > 0 ? [`kind updated, nothing to encode: ${r.kindUpdated}`] : []),
+        `skipped unchanged: ${r.skipped}`,
+        `removed from index: ${r.removed}`,
+      ];
+
+  const one = left === 1;
+  const lead = none
+    ? `None of the ${r.asked} thoughts the ${run} asked TheBrain for could be read.`
+    : `${left} of the ${r.asked} thoughts the ${run} asked TheBrain for could not be read. ` +
+      `What the index holds for ${one ? "it" : "them"} is what it held before this run, ` +
+      "which for a thought not yet indexed is nothing.";
+  const named = (u: UnreadThought): string => (u.name ? `${u.name} — ${u.id}` : u.id);
+  const reasons = new Set(r.unread.map(whyUnread));
+  const listed = r.unread.slice(0, MAX_UNREAD_LISTED);
+  const more = left > listed.length ? [`and ${left - listed.length} more, not listed`] : [];
+  const [shared] = reasons;
+  const list =
+    reasons.size > 1
+      ? `\n${bullet([...listed.map((u) => `${named(u)}: ${whyUnread(u)}`), ...more])}`
+      : ` ${shared}\n${bullet([...listed.map(named), ...more])}`;
+  // A rebuild finds the thoughts the log does not list through graphs alone,
+  // and removes a row for what its walk did not reach only when it was whole.
+  const kept = r.keptUnreached;
+  const unwalked =
+    rebuild && r.unread.some((u) => u.read !== "note")
+      ? "\nWhat is next to a thought whose graph was not read was not walked to from it, so a " +
+        "thought the log does not list may be missing as well." +
+        (kept > 0
+          ? ` ${kept} ${kept === 1 ? "row of a thought" : "rows of thoughts"} the walk did not ` +
+            `reach ${kept === 1 ? "was" : "were"} left in the index, not removed.`
+          : "")
+      : "";
+
+  const through = after.syncedThrough;
+  const next = !rebuild
+    ? `Call this tool with action=sync again. The index is still synced through ${through}: ` +
+      "this run did not move that on, so the next one reads the same changes again."
+    : through === null
+      ? "Call this tool with action=rebuild again. The index is not built until a rebuild " +
+        "has read every thought" +
+        (indexUsable(after) ? "; brain_search ranks by what is in it meanwhile." : ".")
+      : "Call this tool with action=rebuild again. action=sync would not go back for " +
+        `${one ? "this thought" : "these thoughts"}: it reads what changed since ${through}, ` +
+        "which this run did not move on.";
+
+  return join([
+    section(title, bullet([...done, `took: ${(r.elapsedMs / 1000).toFixed(1)} s`])),
+    section("Not read", `${lead}${list}${unwalked}`),
+    section("What to do", next),
+  ]);
+}
+
 export function registerReadTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "brain_list",
@@ -235,12 +385,12 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       const state = "value" in appState ? appState.value : null;
 
       const rows = brains.map((b) => {
-        const status = ctx.indexer(b.id).status(b.id);
         return [
           b.name ?? "(unnamed)",
           b.id,
           b.id === state?.currentBrainId ? "open" : "",
-          status.compatible ? `index: ${status.size}` : "no index",
+          // A look at a local file, and one that creates none.
+          indexCell(ctx.indexer(b.id).status(b.id)),
         ];
       });
 
@@ -630,11 +780,8 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
 
       if (action === "status") {
         const s = indexer.status(bid);
-        // Built is a build that finished: one that failed leaves its metadata
-        // and no watermark, and read as built and usable with no thought in it.
-        const built = s.exists && s.syncedThrough !== null;
-        // What brain_search asks of an index before it ranks by it.
-        const usable = s.compatible && s.size > 0;
+        const built = indexBuilt(s);
+        const usable = indexUsable(s);
         const unfinished = s.exists ? "no — a build was started and did not finish" : "no";
         return ok(
           join([
@@ -656,8 +803,22 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
         );
       }
 
-      const result =
-        action === "rebuild" ? await indexer.rebuild(bid) : await indexer.sync(bid);
+      let result: IndexResult;
+      try {
+        result = action === "rebuild" ? await indexer.rebuild(bid) : await indexer.sync(bid);
+      } catch (error) {
+        // A request that stops a run is a read, and every read of a run comes
+        // before its first write: the index is as it was. Said, because the
+        // failure's own words are about the request and not about the index.
+        if (!(error instanceof TheBrainError)) throw error;
+        return fail(
+          `${sentence(describeError(error))} The ${action} stopped at that request and wrote ` +
+            "nothing: the index is as it was.",
+        );
+      }
+      // Anything left unread makes the result an error: read as a success,
+      // "Not read" would be one more section of an index that was built.
+      if (result.unread.length > 0) return fail(leftUnread(result, indexer.status(bid)));
 
       return ok(
         join([

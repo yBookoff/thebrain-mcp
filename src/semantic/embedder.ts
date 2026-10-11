@@ -20,6 +20,11 @@ export interface Embedder {
   embedDocuments(texts: readonly string[]): Promise<Float32Array[]>;
   /** Encodes a search query (`query` in e5 terms). */
   embedQuery(text: string): Promise<Float32Array>;
+  /**
+   * Whether it can embed at all, asked before a run that would read a whole
+   * brain to find out. An embedder without the method is taken to be able to.
+   */
+  isAvailable?(): Promise<boolean>;
 }
 
 /** The optional dependency is missing. Tools turn this into guidance. */
@@ -120,6 +125,14 @@ export class LocalEmbedder implements Embedder {
   async embedQuery(text: string): Promise<Float32Array> {
     const extract = await this.#ensureLoaded();
     return run(extract, `query: ${text}`);
+  }
+
+  /**
+   * Whether the optional package is there to load. It says nothing of the
+   * model, which may still be to download: that shows on first use.
+   */
+  async isAvailable(): Promise<boolean> {
+    return this.#pipeline !== null || (await isLocalEmbedderAvailable());
   }
 
   /** Warms the model up so the first search does not wait for the download. */

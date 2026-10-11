@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { VectorStore, dot, normalize } from "../src/semantic/store.js";
 
@@ -273,5 +277,84 @@ describe("scale", () => {
     expect(hits).toHaveLength(10);
     expect(elapsed).toBeLessThan(200);
     s.close();
+  });
+});
+
+describe("the index file", () => {
+  // Opening a store created its file, and the journal's two beside it. A
+  // store is opened for a look as often as for a build: `brain_list` asks
+  // every brain's, and `brain_search` asks before it knows the brain is there.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "thebrain-mcp-store-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const data = (): string => join(dir, "data");
+  const path = (): string => join(data(), `index-${BRAIN}.sqlite`);
+  const meta = { brainId: BRAIN, model: "m", dimensions: 2, syncedThrough: null };
+  const row = { thoughtId: "a", name: "a", kind: 1, contentHash: "h", vector: vec(1, 0) };
+
+  it("is not created by a look: a store with no file reads as an empty index", () => {
+    const s = new VectorStore(path());
+    expect(s.getMeta()).toBeNull();
+    expect(s.isCompatible(BRAIN, "m", 2)).toBe(false);
+    expect(s.size()).toBe(0);
+    expect(s.contentHashes()).toEqual(new Map());
+    expect(s.kinds()).toEqual(new Map());
+    expect(s.search(vec(1, 0))).toEqual([]);
+    s.close();
+    // Not its directory either.
+    expect(existsSync(data())).toBe(false);
+  });
+
+  it("nor by a write with nothing to write to", () => {
+    const s = new VectorStore(path());
+    s.remove(["a"]);
+    s.setKinds(new Map([["a", 4]]));
+    s.upsert([]);
+    s.clear();
+    s.close();
+    expect(existsSync(data())).toBe(false);
+  });
+
+  it("is created by the first write, with its directory, and read back by the next store", () => {
+    const s = new VectorStore(path());
+    s.setMeta(meta);
+    expect(existsSync(path())).toBe(true);
+    s.upsert([row]);
+    s.setSyncedThrough("2026-10-11T00:00:00.000Z");
+    s.close();
+
+    const again = new VectorStore(path());
+    expect(again.getMeta()).toEqual({ ...meta, syncedThrough: "2026-10-11T00:00:00.000Z" });
+    expect(again.size()).toBe(1);
+    again.close();
+  });
+
+  it("an upsert alone creates it", () => {
+    const s = new VectorStore(path());
+    s.upsert([row]);
+    expect(readdirSync(data())).toContain(`index-${BRAIN}.sqlite`);
+    expect(s.size()).toBe(1);
+    s.close();
+  });
+
+  it("is found by a store that was opened before it was there", () => {
+    // Two servers can share a data directory: one builds, the other looks.
+    const early = new VectorStore(path());
+    expect(early.size()).toBe(0);
+    expect(early.search(vec(1, 0))).toEqual([]);
+
+    const builder = new VectorStore(path());
+    builder.setMeta(meta);
+    builder.upsert([row]);
+
+    expect(early.getMeta()?.brainId).toBe(BRAIN);
+    expect(early.size()).toBe(1);
+    expect(early.search(vec(1, 0)).map((h) => h.thoughtId)).toEqual(["a"]);
+    early.close();
+    builder.close();
   });
 });

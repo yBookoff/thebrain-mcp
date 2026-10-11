@@ -2686,6 +2686,483 @@ describe("brain_index and a brain it has not been shown", () => {
       );
     });
   });
+
+  describe("a run that cannot read every thought", () => {
+    // A failed read of a thought was dropped: with every graph a 500 the
+    // tool answered "Index built" or "Index refreshed", nothing encoded, and
+    // a sync moved its watermark past the changes. Measured through this
+    // tool on the live API, the failures put in at fetch (ARCHITECTURE §8).
+    const A = THOUGHT;
+    const B = PARENT;
+    const C = LINK;
+    const NAMES: Record<string, string> = { [A]: "RAG", [B]: "Retrieval", [C]: "Embeddings" };
+    const THROUGH = "2026-10-01T00:00:00.000Z";
+    const NOTE_OF_A = { modificationDateTime: "2026-10-01T10:00:09", markdown: "what RAG is" };
+    const NOTED = [{ id: "a77ac4ed-0000-4000-8000-00000000000a", isNotes: true, type: 1 }];
+
+    const created = (id: string, second: number) => ({
+      sourceId: id,
+      sourceType: 2,
+      extraAId: "00000000-0000-0000-0000-000000000000",
+      extraAType: -1,
+      extraBId: "00000000-0000-0000-0000-000000000000",
+      extraBType: -1,
+      modType: 101,
+      oldValue: null,
+      newValue: null,
+      userId: "u",
+      brainId: BRAIN,
+      creationDateTime: `2026-10-01T10:00:${String(second).padStart(2, "0")}`,
+      modificationDateTime: `2026-10-01T10:00:${String(second).padStart(2, "0")}`,
+      syncUpdateDateTime: null,
+    });
+    const idOf = (url: URL): string => /\/([0-9a-f-]{36})(?:\/graph)?$/.exec(url.pathname)![1]!;
+
+    /**
+     * A brain of three logged thoughts, the first with a note. `fails` puts
+     * an answer in the way of a request: it returns nothing to let one through.
+     */
+    const three = (fails: (url: URL) => unknown = () => undefined): Route[] => [
+      ["GET /modifications", (url) => fails(url) ?? [A, B, C].map((id, i) => created(id, i))],
+      ["GET /api/brains/", () => ({ id: BRAIN, name: "Test brain", homeThoughtId: A })],
+      [
+        "GET /graph",
+        (url) =>
+          fails(url) ?? {
+            ...graph(thought(NAMES[idOf(url)]!, { id: idOf(url) })),
+            attachments: idOf(url) === A ? NOTED : null,
+          },
+      ],
+      ["GET /api/notes/", (url) => fails(url) ?? NOTE_OF_A],
+      ["GET /api/thoughts/", (url) => fails(url) ?? thought(NAMES[idOf(url)]!, { id: idOf(url) })],
+    ];
+    const graphOf = (id: string) => (url: URL) => url.pathname.endsWith(`${id}/graph`);
+    const anyGraph = (url: URL): boolean => url.pathname.endsWith("/graph");
+    const aNote = (url: URL): boolean => url.pathname.includes("/api/notes/");
+    const when =
+      (matches: (url: URL) => boolean, answer: () => unknown) =>
+      (url: URL): unknown =>
+        matches(url) ? answer() : undefined;
+    const boom = (): Response => text(500, "Internal Server Error");
+    const dropped = (): never => {
+      throw new TypeError("fetch failed", {
+        cause: Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" }),
+      });
+    };
+
+    /** The run's time is the one thing in a result that is not the same twice. */
+    const timeless = (said: string): string => said.replace(/- took: [\d.]+ s/, "- took: T s");
+    const run = async (store: VectorStore, action: "rebuild" | "sync", routes: Route[]) => {
+      const { call, calls } = await connect(routes, indexing(store).context);
+      const result = await call("brain_index", { brainId: BRAIN, action });
+      return { ...result, text: timeless(result.text), calls, call };
+    };
+    /** An index of the three thoughts, built through the tool and synced through `THROUGH`. */
+    const built = async (): Promise<VectorStore> => {
+      const store = new VectorStore(":memory:");
+      const first = await run(store, "rebuild", three());
+      expect(first.isError).toBe(false);
+      expect(first.text).toContain("## Index built\n- thoughts encoded: 3\n");
+      store.setSyncedThrough(THROUGH);
+      return store;
+    };
+
+    /** How the lead of "Not read" ends for a run that read some thoughts. */
+    const AS_BEFORE =
+      "is what it held before this run, which for a thought not yet indexed is nothing.";
+    const UNWALKED =
+      "What is next to a thought whose graph was not read was not walked to from it, so a " +
+      "thought the log does not list may be missing as well.";
+    const GRAPH_500 = "The read of the graph failed: TheBrain answered 500: Internal Server Error.";
+    const UNBUILT =
+      "Call this tool with action=rebuild again. The index is not built until a rebuild has " +
+      "read every thought";
+    const SYNC_AGAIN =
+      `Call this tool with action=sync again. The index is still synced through ${THROUGH}: ` +
+      "this run did not move that on, so the next one reads the same changes again.";
+
+    describe("a rebuild", () => {
+      it("with no thought read is an error that says so, and leaves nothing that reads as an index", async () => {
+        const store = new VectorStore(":memory:");
+        const result = await run(store, "rebuild", three(when(anyGraph, boom)));
+        expect(result.isError).toBe(true);
+        expect(result.text).toBe(
+          "## Index not rebuilt\n" +
+            "- thoughts read: 0 of 3\n" +
+            "- written to the index: nothing, it is as it was\n" +
+            "- took: T s\n\n" +
+            "## Not read\n" +
+            "None of the 3 thoughts the rebuild asked TheBrain for could be read. " +
+            `${GRAPH_500}\n- ${A}\n- ${B}\n- ${C}\n${UNWALKED}\n\n` +
+            `## What to do\n${UNBUILT}.`,
+        );
+        expect(store.getMeta()).toBeNull();
+
+        // It read "built: yes" with a watermark, and brain_list "index: 0".
+        const after = await result.call("brain_index", { brainId: BRAIN, action: "status" });
+        expect(after.text).toBe(
+          `${status([
+            "built: no",
+            "usable: no",
+            "thoughts indexed: 0",
+            "model: —",
+            "synced through: —",
+          ])}\n\n${REBUILD}`,
+        );
+      });
+
+      it("with one thought not read says what it wrote and which it left, and is not finished", async () => {
+        const store = new VectorStore(":memory:");
+        const result = await run(store, "rebuild", three(when(graphOf(B), boom)));
+        expect(result.isError).toBe(true);
+        expect(result.text).toBe(
+          "## Index rebuilt in part\n" +
+            "- thoughts read: 2 of 3\n" +
+            "- thoughts encoded: 2\n" +
+            "- skipped unchanged: 0\n" +
+            "- removed from index: 0\n" +
+            "- took: T s\n\n" +
+            "## Not read\n" +
+            "1 of the 3 thoughts the rebuild asked TheBrain for could not be read. What the " +
+            `index holds for it ${AS_BEFORE} ${GRAPH_500}\n- ${B}\n` +
+            `${UNWALKED}\n\n` +
+            `## What to do\n${UNBUILT}; brain_search ranks by what is in it meanwhile.`,
+        );
+        expect([...store.contentHashes().keys()].sort()).toEqual([A, C].sort());
+
+        const after = await result.call("brain_index", { brainId: BRAIN, action: "status" });
+        expect(after.text).toBe(
+          `${status([
+            "built: no — a build was started and did not finish",
+            "usable: yes",
+            "thoughts indexed: 2",
+            "model: fake@v1#doc3",
+            "synced through: —",
+          ])}\n\n${REBUILD}`,
+        );
+      });
+
+      it("over a built index, a note not read: the row is kept, and a sync is said not to go back for it", async () => {
+        // The note's read gets the catch-all 403 for a moment after the note
+        // is deleted. The thought was indexed as one with no note.
+        const store = await built();
+        const row = store.contentHashes().get(A);
+        const result = await run(store, "rebuild", three(when(aNote, generic403)));
+        expect(result.isError).toBe(true);
+        expect(result.text).toBe(
+          "## Index rebuilt in part\n" +
+            "- thoughts read: 2 of 3\n" +
+            "- thoughts encoded: 0\n" +
+            "- skipped unchanged: 2\n" +
+            "- removed from index: 0\n" +
+            "- took: T s\n\n" +
+            "## Not read\n" +
+            "1 of the 3 thoughts the rebuild asked TheBrain for could not be read. What the " +
+            `index holds for it ${AS_BEFORE} The read of the note failed: ` +
+            "TheBrain answered 403 and named no cause. A note's read gets that answer for a " +
+            `moment after the note is deleted.\n- RAG — ${A}\n\n` +
+            "## What to do\n" +
+            "Call this tool with action=rebuild again. action=sync would not go back for this " +
+            `thought: it reads what changed since ${THROUGH}, which this run did not move on.`,
+        );
+        expect(store.contentHashes().get(A)).toBe(row);
+        expect(store.getMeta()!.syncedThrough).toBe(THROUGH);
+      });
+
+      it("thoughts left for different reasons are listed each with its own", async () => {
+        const store = new VectorStore(":memory:");
+        const fails = (url: URL): unknown =>
+          aNote(url) ? text(500, "boom") : graphOf(B)(url) ? text(503, "") : undefined;
+        const result = await run(store, "rebuild", three(fails));
+        expect(result.text).toContain(
+          "## Not read\n" +
+            "2 of the 3 thoughts the rebuild asked TheBrain for could not be read. What the " +
+            `index holds for them ${AS_BEFORE}\n` +
+            `- RAG — ${A}: The read of the note failed: TheBrain answered 500: boom.\n` +
+            `- ${B}: The read of the graph failed: TheBrain answered 503: (empty response).\n` +
+            `${UNWALKED}\n\n`,
+        );
+      });
+
+      it("a graph refused with a 403 while the thought reads is said as that, with the thought's name", async () => {
+        const store = new VectorStore(":memory:");
+        const result = await run(store, "rebuild", three(when(graphOf(C), generic403)));
+        expect(result.isError).toBe(true);
+        expect(result.text).toContain(
+          "The read of the graph failed: TheBrain answered 403 and named no cause, while the " +
+            `thought itself reads.\n- Embeddings — ${C}\n`,
+        );
+        // The API's own words for that 403 are about the key, and are not passed on.
+        expect(result.text).not.toContain("API key");
+      });
+
+      it("a graph refused with a 403 and a thought that does not read either: both are said", async () => {
+        const store = new VectorStore(":memory:");
+        const fails = (url: URL): unknown =>
+          graphOf(C)(url) ? generic403() : url.pathname.endsWith(C) ? text(500, "boom") : undefined;
+        const result = await run(store, "rebuild", three(fails));
+        expect(result.isError).toBe(true);
+        expect(result.text).toContain(
+          "The read of the graph was a 403 that names no cause, and the read of the thought " +
+            `itself failed: TheBrain answered 500: boom.\n- ${C}\n`,
+        );
+      });
+
+      it("a thought whose graph is a 403 and whose own read is a 404 is gone, and no failure", async () => {
+        const store = await built();
+        const gone = (url: URL): unknown =>
+          graphOf(B)(url) ? generic403() : url.pathname.endsWith(B) ? 404 : undefined;
+        const result = await run(store, "rebuild", three(gone));
+        expect(result.isError).toBe(false);
+        expect(result.text).toBe(
+          "## Index built\n- thoughts encoded: 0\n- skipped unchanged: 2\n" +
+            "- removed from index: 1\n- took: T s",
+        );
+      });
+
+      it("lists the first twenty of many, and counts the rest", async () => {
+        const ids = Array.from(
+          { length: 25 },
+          (_, i) => `eeeeeeee-0000-4000-8000-${String(i).padStart(12, "0")}`,
+        );
+        const routes: Route[] = [
+          ["GET /modifications", () => ids.map((id, i) => created(id, i))],
+          ["GET /api/brains/", () => ({ id: BRAIN, name: "Test brain", homeThoughtId: ids[0] })],
+          ["GET /graph", boom],
+        ];
+        const result = await run(new VectorStore(":memory:"), "rebuild", routes);
+        expect(result.text).toContain("None of the 25 thoughts the rebuild asked TheBrain for");
+        expect(result.text.split("\n").filter((l) => l.startsWith("- eeeeeeee"))).toHaveLength(20);
+        expect(result.text).toContain(`- ${ids[19]}\n- and 5 more, not listed\n`);
+      });
+
+      it("rows the walk did not reach are counted as kept", async () => {
+        // D is in no log and next to B alone: with B's graph not read it is
+        // not reached, and its row was removed.
+        const D = "abababab-0000-4000-8000-000000000007";
+        const linked = (fails: (url: URL) => unknown): Route[] => [
+          ["GET /modifications", () => [A, B].map((id, i) => created(id, i))],
+          ["GET /api/brains/", () => ({ id: BRAIN, name: "Test brain", homeThoughtId: A })],
+          [
+            "GET /graph",
+            (url) =>
+              fails(url) ?? {
+                ...graph(thought(NAMES[idOf(url)] ?? "Dense retrieval", { id: idOf(url) })),
+                jumps: idOf(url) === B ? [thought("Dense retrieval", { id: D })] : null,
+              },
+          ],
+        ];
+        const store = new VectorStore(":memory:");
+        await run(store, "rebuild", linked(() => undefined));
+        expect(store.size()).toBe(3);
+
+        const result = await run(store, "rebuild", linked(when(graphOf(B), boom)));
+        expect(result.text).toContain("- removed from index: 0\n");
+        expect(result.text).toContain(
+          `${UNWALKED} 1 row of a thought the walk did not reach was left in the index, not removed.`,
+        );
+        expect(store.contentHashes().has(D)).toBe(true);
+      });
+    });
+
+    describe("a sync", () => {
+      it("with one thought not read says so, and that the watermark was not moved", async () => {
+        const store = await built();
+        const result = await run(store, "sync", three(when(graphOf(B), boom)));
+        expect(result.isError).toBe(true);
+        expect(result.text).toBe(
+          "## Index refreshed in part\n" +
+            "- thoughts read: 2 of 3\n" +
+            "- thoughts encoded: 0\n" +
+            "- skipped unchanged: 2\n" +
+            "- removed from index: 0\n" +
+            "- took: T s\n\n" +
+            "## Not read\n" +
+            "1 of the 3 thoughts the sync asked TheBrain for could not be read. What the " +
+            `index holds for it ${AS_BEFORE} ${GRAPH_500}\n- ${B}\n\n` +
+            `## What to do\n${SYNC_AGAIN}`,
+        );
+        expect(store.getMeta()!.syncedThrough).toBe(THROUGH);
+      });
+
+      it("with no thought read is an error, not a refresh", async () => {
+        const store = await built();
+        const result = await run(store, "sync", three(when(anyGraph, generic403)));
+        expect(result.isError).toBe(true);
+        expect(result.text).toBe(
+          "## Index not refreshed\n" +
+            "- thoughts read: 0 of 3\n" +
+            "- written to the index: nothing, it is as it was\n" +
+            "- took: T s\n\n" +
+            "## Not read\n" +
+            "None of the 3 thoughts the sync asked TheBrain for could be read. The read of " +
+            "the graph failed: TheBrain answered 403 and named no cause, while the thought " +
+            `itself reads.\n- RAG — ${A}\n- Retrieval — ${B}\n- Embeddings — ${C}\n\n` +
+            `## What to do\n${SYNC_AGAIN}`,
+        );
+        expect(store.getMeta()!.syncedThrough).toBe(THROUGH);
+      });
+
+      it("with every thought read it reads as it did, and moves the watermark", async () => {
+        const store = await built();
+        const result = await run(store, "sync", three());
+        expect(result.isError).toBe(false);
+        expect(result.text).toBe(
+          "## Index refreshed\n- thoughts encoded: 0\n- skipped unchanged: 3\n" +
+            "- removed from index: 0\n- took: T s",
+        );
+        expect(store.getMeta()!.syncedThrough).not.toBe(THROUGH);
+      });
+
+      it("with no finished index it is a rebuild, and is told as one", async () => {
+        const store = new VectorStore(":memory:");
+        const result = await run(store, "sync", three(when(graphOf(B), boom)));
+        expect(result.isError).toBe(true);
+        expect(result.text).toContain("## Index rebuilt in part\n- thoughts read: 2 of 3\n");
+        expect(result.text).toContain(`## What to do\n${UNBUILT}`);
+      });
+    });
+
+    describe("a failure that is not one thought's", () => {
+      const STOPPED = (action: string): string =>
+        ` The ${action} stopped at that request and wrote nothing: the index is as it was.`;
+
+      it.each(["rebuild", "sync"] as const)(
+        "TheBrain not answering at a graph stops the %s, which says the index is as it was",
+        async (action) => {
+          const store = await built();
+          const result = await run(store, action, three(when(graphOf(B), dropped)));
+          expect(result.isError).toBe(true);
+          expect(result.text).toBe(
+            "could not reach http://localhost:11522 — is TheBrain running? Check that the " +
+              `TheBrain desktop app is running and its local API is enabled.${STOPPED(action)}`,
+          );
+          expect(store.getMeta()!.syncedThrough).toBe(THROUGH);
+          expect(store.size()).toBe(3);
+        },
+      );
+
+      it("the log failing to read stops a rebuild before it has written the metadata of a build", async () => {
+        const store = new VectorStore(":memory:");
+        const fails = when((url) => url.pathname.endsWith("/modifications"), boom);
+        const result = await run(store, "rebuild", three(fails));
+        expect(result.isError).toBe(true);
+        expect(result.text).toBe(
+          `TheBrain failed with a 500 (GET /api/brains/${BRAIN}/modifications): Internal ` +
+            "Server Error. The fault is inside the app, not in the arguments of this call. A " +
+            `read is safe to repeat; before repeating a write, check what it left.${STOPPED("rebuild")}`,
+        );
+        expect(store.getMeta()).toBeNull();
+      });
+
+      it("a key rejected in the middle of a run stops it", async () => {
+        const store = new VectorStore(":memory:");
+        const fails = when(anyGraph, () => text(401, "Invalid API Key"));
+        const result = await run(store, "rebuild", three(fails));
+        expect(result.isError).toBe(true);
+        expect(result.text).toBe(
+          "TheBrain rejected the key. Check THEBRAIN_API_KEY: find it under Settings > User > " +
+            `Local API Key.${STOPPED("rebuild")}`,
+        );
+        expect(store.getMeta()).toBeNull();
+      });
+    });
+
+    describe("without the embeddings package", () => {
+      /** As the local embedder reports the package that is not installed. */
+      class NoPackage extends FakeEmbedder {
+        async isAvailable(): Promise<boolean> {
+          return false;
+        }
+      }
+
+      it.each(["rebuild", "sync"] as const)(
+        "%s says so after the one request for the brain, and status has no build to speak of",
+        async (action) => {
+          // A rebuild read the whole log and walked the graph first: 13
+          // requests on a brain of one thought, minutes on a real one.
+          const store = new VectorStore(":memory:");
+          const { call, calls } = await connect(three(), indexing(store, new NoPackage()).context);
+          const result = await call("brain_index", { brainId: BRAIN, action });
+          expect(result.isError).toBe(true);
+          expect(result.text).toMatch(/@huggingface\/transformers package is not installed/);
+          expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([BRAINS]);
+
+          const after = await call("brain_index", { brainId: BRAIN, action: "status" });
+          expect(after.text).toBe(
+            `${status([
+              "built: no",
+              "usable: no",
+              "thoughts indexed: 0",
+              "model: —",
+              "synced through: —",
+            ])}\n\n${REBUILD}`,
+          );
+        },
+      );
+    });
+  });
+
+  describe("brain_list and an index that is not one", () => {
+    const fake = new FakeEmbedder();
+    const meta = {
+      brainId: BRAIN,
+      model: indexModelId(fake.id),
+      dimensions: fake.dimensions,
+      syncedThrough: null,
+    };
+    const row = {
+      thoughtId: THOUGHT,
+      name: "RAG",
+      kind: 1,
+      contentHash: "h",
+      vector: new Float32Array([1, 0]),
+    };
+    const cell = async (store: VectorStore): Promise<string> => {
+      const { call } = await connect(
+        [
+          ["GET /api/app/state", () => ({ currentBrainId: null })],
+          ["GET /api/brains", () => [{ id: BRAIN, name: "Work" }]],
+        ],
+        indexing(store).context,
+      );
+      const result = await call("brain_list", {});
+      expect(result.isError).toBe(false);
+      return result.text.split("\n")[3]!.split(BRAIN)[1]!.trim();
+    };
+
+    it("no index at all", async () => {
+      expect(await cell(new VectorStore(":memory:"))).toBe("no index");
+    });
+
+    it("an index that was built", async () => {
+      const store = new VectorStore(":memory:");
+      store.setMeta({ ...meta, syncedThrough: "2026-10-10T20:00:00.000Z" });
+      store.upsert([row]);
+      expect(await cell(store)).toBe("index: 1");
+    });
+
+    it("a build that never finished is not an index of no thoughts", async () => {
+      // It printed "index: 0".
+      const store = new VectorStore(":memory:");
+      store.setMeta(meta);
+      expect(await cell(store)).toBe("build not finished");
+    });
+
+    it("a build that did not finish and holds thoughts is what search ranks by, and is said to be unfinished", async () => {
+      const store = new VectorStore(":memory:");
+      store.setMeta(meta);
+      store.upsert([row]);
+      expect(await cell(store)).toBe("index: 1, build not finished");
+    });
+
+    it("an index built with another model is none that can be used", async () => {
+      const store = new VectorStore(":memory:");
+      store.setMeta({ ...meta, model: "other@v2#doc3", syncedThrough: "2026-10-10T20:00:00.000Z" });
+      store.upsert([row]);
+      expect(await cell(store)).toBe("no index");
+    });
+  });
 });
 
 describe("an identifier that is not a tag", () => {

@@ -6,10 +6,18 @@
  * more importantly for an npx install, needs no native extension.
  *
  * Loading into memory is lazy, so the server's cold start stays fast.
+ *
+ * So is the file. A store is named by a brain's identifier and is opened for
+ * a look as often as for a build: `brain_list` asks every brain's, and
+ * `brain_search` asks before it knows the brain is there. Opening used to
+ * create the file, three of them with the journal, so a look left an empty
+ * index behind for every brain listed and for a `brainId` that is no brain.
+ * Now only a write creates it, and a read of a file that is not there answers
+ * what an empty index would.
  */
 
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 export interface StoredVector {
@@ -52,25 +60,49 @@ CREATE TABLE IF NOT EXISTS vectors (
 `;
 
 export class VectorStore {
-  readonly #db: DatabaseSync;
+  readonly #path: string;
+  /** Null until the file is there: opened by the first write, or found by a read. */
+  #db: DatabaseSync | null = null;
   /** In-memory cache: filled on first search, not on open. */
   #cache: StoredVector[] | null = null;
 
   constructor(path: string) {
-    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-    this.#db = new DatabaseSync(path);
-    this.#db.exec("PRAGMA journal_mode = WAL");
-    this.#db.exec(SCHEMA);
+    this.#path = path;
+    if (path === ":memory:") this.#open();
   }
 
   close(): void {
-    this.#db.close();
+    this.#db?.close();
+    this.#db = null;
+  }
+
+  /** The database for a write: created, with its directory, when it is not there. */
+  #open(): DatabaseSync {
+    if (this.#db !== null) return this.#db;
+    if (this.#path !== ":memory:") mkdirSync(dirname(this.#path), { recursive: true });
+    const db = new DatabaseSync(this.#path);
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec(SCHEMA);
+    this.#db = db;
+    return db;
+  }
+
+  /**
+   * The database for a read, or null while there is no file: nothing is
+   * created to be looked at. Asked each time, since another process sharing
+   * the data directory may have built the index meanwhile.
+   */
+  #existing(): DatabaseSync | null {
+    if (this.#db !== null) return this.#db;
+    return existsSync(this.#path) ? this.#open() : null;
   }
 
   // ---------------------------------------------------------------- metadata
 
   getMeta(): IndexMeta | null {
-    const rows = this.#db.prepare("SELECT key, value FROM meta").all() as Array<{
+    const db = this.#existing();
+    if (db === null) return null;
+    const rows = db.prepare("SELECT key, value FROM meta").all() as Array<{
       key: string;
       value: string;
     }>;
@@ -91,7 +123,7 @@ export class VectorStore {
   }
 
   setMeta(meta: IndexMeta): void {
-    const stmt = this.#db.prepare(
+    const stmt = this.#open().prepare(
       "INSERT INTO meta(key, value) VALUES(?, ?) " +
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     );
@@ -102,7 +134,7 @@ export class VectorStore {
   }
 
   setSyncedThrough(iso: string): void {
-    this.#db
+    this.#open()
       .prepare(
         "INSERT INTO meta(key, value) VALUES('syncedThrough', ?) " +
           "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -125,7 +157,7 @@ export class VectorStore {
   }
 
   clear(): void {
-    this.#db.exec("DELETE FROM vectors; DELETE FROM meta;");
+    this.#existing()?.exec("DELETE FROM vectors; DELETE FROM meta;");
     this.#cache = null;
   }
 
@@ -133,13 +165,14 @@ export class VectorStore {
 
   upsert(entries: readonly StoredVector[]): void {
     if (entries.length === 0) return;
-    const stmt = this.#db.prepare(
+    const db = this.#open();
+    const stmt = db.prepare(
       "INSERT INTO vectors(thought_id, name, kind, content_hash, vector) " +
         "VALUES(?, ?, ?, ?, ?) ON CONFLICT(thought_id) DO UPDATE SET " +
         "name = excluded.name, kind = excluded.kind, " +
         "content_hash = excluded.content_hash, vector = excluded.vector",
     );
-    this.#db.exec("BEGIN");
+    db.exec("BEGIN");
     try {
       for (const e of entries) {
         stmt.run(
@@ -150,9 +183,9 @@ export class VectorStore {
           Buffer.from(e.vector.buffer, e.vector.byteOffset, e.vector.byteLength),
         );
       }
-      this.#db.exec("COMMIT");
+      db.exec("COMMIT");
     } catch (error) {
-      this.#db.exec("ROLLBACK");
+      db.exec("ROLLBACK");
       throw error;
     }
     this.#cache = null;
@@ -166,13 +199,16 @@ export class VectorStore {
    */
   setKinds(kinds: ReadonlyMap<string, number>): void {
     if (kinds.size === 0) return;
-    const stmt = this.#db.prepare("UPDATE vectors SET kind = ? WHERE thought_id = ?");
-    this.#db.exec("BEGIN");
+    // With no file there is no row to set a kind on.
+    const db = this.#existing();
+    if (db === null) return;
+    const stmt = db.prepare("UPDATE vectors SET kind = ? WHERE thought_id = ?");
+    db.exec("BEGIN");
     try {
       for (const [id, kind] of kinds) stmt.run(kind, id);
-      this.#db.exec("COMMIT");
+      db.exec("COMMIT");
     } catch (error) {
-      this.#db.exec("ROLLBACK");
+      db.exec("ROLLBACK");
       throw error;
     }
     this.#cache = null;
@@ -180,13 +216,17 @@ export class VectorStore {
 
   remove(thoughtIds: readonly string[]): void {
     if (thoughtIds.length === 0) return;
-    const stmt = this.#db.prepare("DELETE FROM vectors WHERE thought_id = ?");
-    this.#db.exec("BEGIN");
+    // Nor one to remove: `brain_delete_thought` calls this for a brain that
+    // may never have been indexed.
+    const db = this.#existing();
+    if (db === null) return;
+    const stmt = db.prepare("DELETE FROM vectors WHERE thought_id = ?");
+    db.exec("BEGIN");
     try {
       for (const id of thoughtIds) stmt.run(id);
-      this.#db.exec("COMMIT");
+      db.exec("COMMIT");
     } catch (error) {
-      this.#db.exec("ROLLBACK");
+      db.exec("ROLLBACK");
       throw error;
     }
     this.#cache = null;
@@ -195,7 +235,9 @@ export class VectorStore {
   // ------------------------------------------------------------------- reads
 
   size(): number {
-    const row = this.#db.prepare("SELECT COUNT(*) AS n FROM vectors").get() as {
+    const db = this.#existing();
+    if (db === null) return 0;
+    const row = db.prepare("SELECT COUNT(*) AS n FROM vectors").get() as {
       n: number;
     };
     return row.n;
@@ -203,7 +245,9 @@ export class VectorStore {
 
   /** Hashes of what is already indexed, so unchanged entries can be skipped. */
   contentHashes(): Map<string, string> {
-    const rows = this.#db
+    const db = this.#existing();
+    if (db === null) return new Map();
+    const rows = db
       .prepare("SELECT thought_id, content_hash FROM vectors")
       .all() as Array<{ thought_id: string; content_hash: string }>;
     return new Map(rows.map((r) => [r.thought_id, r.content_hash]));
@@ -214,7 +258,9 @@ export class VectorStore {
    * hash says nothing of it and it is compared on its own.
    */
   kinds(): Map<string, number> {
-    const rows = this.#db.prepare("SELECT thought_id, kind FROM vectors").all() as Array<{
+    const db = this.#existing();
+    if (db === null) return new Map();
+    const rows = db.prepare("SELECT thought_id, kind FROM vectors").all() as Array<{
       thought_id: string;
       kind: number;
     }>;
@@ -249,7 +295,10 @@ export class VectorStore {
 
   #load(): StoredVector[] {
     if (this.#cache !== null) return this.#cache;
-    const rows = this.#db
+    const db = this.#existing();
+    // Not cached: the file may be there by the next search.
+    if (db === null) return [];
+    const rows = db
       .prepare("SELECT thought_id, name, kind, content_hash, vector FROM vectors")
       .all() as Array<{
       thought_id: string;

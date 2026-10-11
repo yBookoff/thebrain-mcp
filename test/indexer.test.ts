@@ -8,6 +8,7 @@ import {
   linkEndIds,
   logThoughtId,
   mapWithConcurrency,
+  noteStates,
 } from "../src/semantic/indexer.js";
 import {
   EmptyQueryError,
@@ -58,6 +59,11 @@ interface FakeThought {
   /** Tag names, or ids of tags that are thoughts of this fake brain. */
   tags?: string[];
   note?: string;
+  /**
+   * The graph lists no Notes attachment although the note is there, as it
+   * does at one read within 0.2 s of a change to the note (L32).
+   */
+  noteUnlisted?: boolean;
   /**
    * Left out, the graph carries no `aliases` field at all, as on builds before
    * 15.0.621. The current one always sends a list, empty when there are none.
@@ -126,33 +132,95 @@ const linkLog = (
   extraBType: 2,
 });
 
-/** Minimal fake API: only what the indexer and search actually touch. */
+/** What the API answers for the graph of an identifier nobody has, and for much else. */
+const GENERIC_403 =
+  "To use the TheBrain API, make requests to /api (e.g. /api/brains). " +
+  "An API key is required via the Authorization header.";
+
+/** A failure a test puts in the way of a read, or nothing to let the read through. */
+interface Faults {
+  log?: () => unknown;
+  brain?: () => unknown;
+  graph?: (id: string) => unknown;
+  thought?: (id: string) => unknown;
+  note?: (id: string) => unknown;
+}
+
+/**
+ * Minimal fake API: only what the indexer and search actually touch.
+ *
+ * It answers as the API does where the indexer goes by the answer
+ * (docs/api-map.md, L3). The brain is always there and names a home thought:
+ * `home`, or the first thought the fake holds. An identifier no thought has is
+ * the catch-all 403 from its graph and a 404 from its own read. And a
+ * neighbour comes with the kind it has, where every one used to be kind 1.
+ *
+ * `faults` puts a failure in the way of a read: a function there returns what
+ * to throw, or nothing to let that read through.
+ */
 function fakeApi(
   thoughts: Map<string, FakeThought>,
   logs: ModificationLogDto[],
   searchResults: Map<string, string[]> = new Map(),
   home: string | null = null,
 ) {
-  const calls = { graph: 0, graphIds: [] as string[], notes: 0, modifications: 0, search: 0 };
-  const ref = (id: string) => ({ id, name: thoughts.get(id)?.name ?? null, kind: 1 });
+  const calls = {
+    graph: 0,
+    graphIds: [] as string[],
+    thought: 0,
+    notes: 0,
+    modifications: 0,
+    search: 0,
+  };
+  const faults: Faults = {};
+  const fault = (failure: unknown): void => {
+    if (failure !== undefined) throw failure;
+  };
+  const ref = (id: string) => ({
+    id,
+    name: thoughts.get(id)?.name ?? null,
+    kind: thoughts.get(id)?.kind ?? 1,
+  });
   const api = {
     brains: {
       async get(brainId: string) {
-        if (home === null) throw new Error("no home thought");
-        return { id: brainId, name: "brain", homeThoughtId: home };
+        fault(faults.brain?.());
+        const [first] = thoughts.keys();
+        return { id: brainId, name: "brain", homeThoughtId: home ?? first ?? "no-thought" };
       },
       async allModifications(_brainId: string, options?: { since?: string }) {
         calls.modifications += 1;
+        fault(faults.log?.());
         if (options?.since === undefined) return logs;
         return logs.filter((l) => l.modificationDateTime >= options.since!);
       },
     },
     thoughts: {
-      async getGraph(_brainId: string, id: string) {
+      async get(brainId: string, id: string) {
+        calls.thought += 1;
+        fault(faults.thought?.(id));
+        const t = thoughts.get(id);
+        if (t === undefined) {
+          throw new TheBrainError("not_found", "Not Found", {
+            status: 404,
+            method: "GET",
+            path: `/api/thoughts/${brainId}/${id}`,
+          });
+        }
+        return { id: t.id, name: t.name, kind: t.kind ?? 1, label: t.label ?? null };
+      },
+      async getGraph(brainId: string, id: string) {
         calls.graph += 1;
         calls.graphIds.push(id);
+        fault(faults.graph?.(id));
         const t = thoughts.get(id);
-        if (t === undefined) throw new Error(`no thought ${id}`);
+        if (t === undefined) {
+          throw new TheBrainError("forbidden", GENERIC_403, {
+            status: 403,
+            method: "GET",
+            path: `/api/thoughts/${brainId}/${id}/graph`,
+          });
+        }
         return {
           thought: {
             id: t.id,
@@ -172,20 +240,22 @@ function fakeApi(
             t.typeId !== undefined
               ? ref(t.typeId)
               : t.typeName
-                ? { id: `type-${t.typeName}`, name: t.typeName }
+                ? { id: `type-${t.typeName}`, name: t.typeName, kind: 2 }
                 : null,
           tags: (t.tags ?? []).map((tag) =>
-            thoughts.has(tag) ? ref(tag) : { id: `tag-${tag}`, name: tag },
+            thoughts.has(tag) ? ref(tag) : { id: `tag-${tag}`, name: tag, kind: 4 },
           ),
           // The real API reports a note as an attachment flagged `isNotes`.
           // Omitting it here is what let the note-indexing bug through.
-          attachments: t.note ? [{ id: `att-${t.id}`, isNotes: true, type: 1 }] : [],
+          attachments:
+            t.note && !t.noteUnlisted ? [{ id: `att-${t.id}`, isNotes: true, type: 1 }] : [],
         };
       },
     },
     notes: {
       async get(_brainId: string, id: string) {
         calls.notes += 1;
+        fault(faults.note?.(id));
         return thoughts.get(id)?.note ?? "";
       },
     },
@@ -197,7 +267,7 @@ function fakeApi(
       },
     },
   };
-  return { api: api as unknown as TheBrainApi, calls };
+  return { api: api as unknown as TheBrainApi, calls, faults };
 }
 
 describe("helpers", () => {
@@ -438,8 +508,16 @@ describe("initial indexing", () => {
       store.close();
     });
 
-    it("without a home thought it still indexes what the log knows", async () => {
-      const { api } = fakeApi(imported(), [log("y", 101, "2026-08-11T09:00:00")]);
+    it("with a home thought that is not there it still indexes what the log knows", async () => {
+      // The brain names a home thought nobody has: its graph is the 403 and
+      // its own read a 404, which is an answer, and the walk goes on from
+      // the log. The brain's read failing is another matter, and stops the run.
+      const { api } = fakeApi(
+        imported(),
+        [log("y", 101, "2026-08-11T09:00:00")],
+        new Map(),
+        "home-that-is-gone",
+      );
       const store = new VectorStore(":memory:");
       const result = await new SemanticIndexer(api, store, new FakeEmbedder()).rebuild(BRAIN);
       // y, then z by its jump and home by y's parent link, then x as home's child.
@@ -1563,6 +1641,656 @@ describe("search: a phrasing TheBrain's search does not answer", () => {
         SearchFailedError,
       );
       expect(asked.sort()).toEqual(["Unity", "soup"]);
+      store.close();
+    });
+  });
+});
+
+describe("a read that fails while the index is built or refreshed", () => {
+  // A failed read used to stand for a thought that is not there
+  // (`.catch(() => null)` on a graph and on the brain) or for one with no note
+  // (`.catch(() => "")`). What the live API answered through `brain_index`
+  // with the same failures put in is in ARCHITECTURE.md §8.
+  const failed = (kind: ApiErrorKind, status?: number, message = `refused as ${kind}`) =>
+    new TheBrainError(kind, message, {
+      ...(status !== undefined ? { status } : {}),
+      method: "GET",
+      path: `/api/thoughts/${BRAIN}/x/graph`,
+    });
+  const boom = (): TheBrainError => failed("server", 500, "Internal Server Error");
+  const generic403 = (): TheBrainError => failed("forbidden", 403, GENERIC_403);
+  const rows = (store: VectorStore): string[] => [...store.contentHashes().keys()].sort();
+
+  /** Three logged thoughts, the first with a note. */
+  function three(embedder: FakeEmbedder = new FakeEmbedder()) {
+    const thoughts = new Map<string, FakeThought>([
+      ["a", { id: "a", name: "Unity", note: "game engine" }],
+      ["b", { id: "b", name: "borscht recipe" }],
+      ["c", { id: "c", name: "vector databases" }],
+    ]);
+    const logs = [
+      log("a", 101, "2026-08-11T09:00:00"),
+      log("b", 101, "2026-08-11T09:01:00"),
+      log("c", 101, "2026-08-11T09:02:00"),
+      noteLog("a", 801, "2026-08-11T09:03:00"),
+    ];
+    const fake = fakeApi(thoughts, logs);
+    const store = new VectorStore(":memory:");
+    const indexer = new SemanticIndexer(fake.api, store, embedder);
+    return { thoughts, logs, ...fake, store, embedder, indexer };
+  }
+
+  /** An imported brain: nothing in the log, `z` reached through `y` alone. */
+  function imported() {
+    const thoughts = new Map<string, FakeThought>([
+      ["home", { id: "home", name: "Life areas", children: ["x", "y"] }],
+      ["x", { id: "x", name: "Health", parents: ["home"] }],
+      ["y", { id: "y", name: "Stress management", parents: ["home"], jumps: ["z"] }],
+      ["z", { id: "z", name: "Relaxation techniques", jumps: ["y"] }],
+    ]);
+    const fake = fakeApi(thoughts, [], new Map(), "home");
+    const store = new VectorStore(":memory:");
+    const indexer = new SemanticIndexer(fake.api, store, new FakeEmbedder());
+    return { thoughts, ...fake, store, indexer };
+  }
+
+  it("mapWithConcurrency starts no item after a worker has thrown", async () => {
+    // The other runners went on to the end of the list: against a TheBrain
+    // that is not answering, a request per item with nobody to read it.
+    const started: number[] = [];
+    const failure = new Error("stop");
+    const items = Array.from({ length: 50 }, (_, i) => i);
+    await expect(
+      mapWithConcurrency(items, 3, async (n) => {
+        started.push(n);
+        await new Promise((r) => setTimeout(r, 1));
+        if (n === 4) throw failure;
+        return n;
+      }),
+    ).rejects.toBe(failure);
+    const atFailure = started.length;
+    await new Promise((r) => setTimeout(r, 30));
+    expect(started.length).toBe(atFailure);
+    expect(started.length).toBeLessThan(10);
+  });
+
+  describe("a rebuild", () => {
+    it("with no graph read it writes nothing, and is no build", async () => {
+      // It answered as a build that finished, with a watermark set.
+      const { faults, store, embedder, indexer } = three();
+      faults.graph = boom;
+      const result = await indexer.rebuild(BRAIN);
+
+      expect(result).toMatchObject({ ran: "rebuild", indexed: 0, skipped: 0, removed: 0, asked: 3 });
+      expect(result.unread.map((u) => [u.id, u.read])).toEqual([
+        ["a", "graph"],
+        ["b", "graph"],
+        ["c", "graph"],
+      ]);
+      expect(embedder.calls).toBe(0);
+      expect(store.getMeta()).toBeNull();
+      expect(indexer.status(BRAIN)).toMatchObject({ exists: false, size: 0, syncedThrough: null });
+      store.close();
+    });
+
+    it("with one graph not read it indexes the rest, names the one, and is not finished", async () => {
+      const { faults, store, indexer } = three();
+      faults.graph = (id) => (id === "b" ? boom() : undefined);
+      const result = await indexer.rebuild(BRAIN);
+
+      expect(result).toMatchObject({ indexed: 2, asked: 3, removed: 0 });
+      expect(result.unread).toEqual([
+        { id: "b", name: null, read: "graph", error: expect.any(TheBrainError) },
+      ]);
+      expect(rows(store)).toEqual(["a", "c"]);
+      // No watermark: a sync from one would never go back for `b`, which
+      // nothing in the log says has changed.
+      expect(indexer.status(BRAIN)).toMatchObject({ exists: true, size: 2, syncedThrough: null });
+
+      // With no watermark the next sync is a rebuild, and it finishes the build.
+      delete faults.graph;
+      const next = await indexer.sync(BRAIN);
+      expect(next).toMatchObject({ ran: "rebuild", indexed: 1, skipped: 2, unread: [] });
+      expect(indexer.status(BRAIN).syncedThrough).not.toBeNull();
+      store.close();
+    });
+
+    it("removes no row for a thought the walk did not reach, when a graph on the way was not read", async () => {
+      // `z` is next to `y` and in no log. With y's graph not read it was not
+      // reached, and its row was removed along with y's own.
+      const { faults, store, indexer } = imported();
+      await indexer.rebuild(BRAIN);
+      expect(rows(store)).toEqual(["home", "x", "y", "z"]);
+      const through = store.getMeta()!.syncedThrough;
+
+      faults.graph = (id) => (id === "y" ? boom() : undefined);
+      const result = await indexer.rebuild(BRAIN);
+
+      expect(result).toMatchObject({ indexed: 0, skipped: 2, removed: 0, keptUnreached: 1, asked: 3 });
+      expect(result.unread.map((u) => u.id)).toEqual(["y"]);
+      expect(rows(store)).toEqual(["home", "x", "y", "z"]);
+      expect(store.getMeta()!.syncedThrough).toBe(through);
+      store.close();
+    });
+
+    it("stops when the brain's own read fails, where it walked nowhere and emptied the index", async () => {
+      // The failure was taken for "no home thought". Nothing is in this
+      // brain's log, so nothing was walked, every row was removed as stale,
+      // and the result was a build that finished.
+      const { faults, calls, store, indexer } = imported();
+      await indexer.rebuild(BRAIN);
+      const graphs = calls.graph;
+
+      const failure = boom();
+      faults.brain = () => failure;
+      await expect(indexer.rebuild(BRAIN)).rejects.toBe(failure);
+      expect(rows(store)).toEqual(["home", "x", "y", "z"]);
+      expect(calls.graph).toBe(graphs);
+      store.close();
+    });
+
+    it("stops when the log's read fails, with nothing written", async () => {
+      // It stopped then too, having written the metadata of a build first.
+      const { faults, store, indexer } = three();
+      const failure = boom();
+      faults.log = () => failure;
+      await expect(indexer.rebuild(BRAIN)).rejects.toBe(failure);
+      expect(store.getMeta()).toBeNull();
+      store.close();
+    });
+
+    it.each<[ApiErrorKind, number | undefined]>([
+      ["network", undefined],
+      ["auth", 401],
+      ["unknown_brain", 401],
+    ])("%s at one graph stops the run: every read after it would get the same", async (kind, status) => {
+      const thoughts = new Map<string, FakeThought>(
+        Array.from({ length: 40 }, (_, i) => [`t${i}`, { id: `t${i}`, name: `thought ${i}` }]),
+      );
+      const logs = [...thoughts.keys()].map((id, i) =>
+        log(id, 101, `2026-08-11T09:00:${String(i).padStart(2, "0")}`),
+      );
+      const { api, calls, faults } = fakeApi(thoughts, logs);
+      const store = new VectorStore(":memory:");
+      const embedder = new FakeEmbedder();
+      const failure = failed(kind, status);
+      faults.graph = (id) => (id === "t3" ? failure : undefined);
+
+      const indexer = new SemanticIndexer(api, store, embedder, { concurrency: 2 });
+      await expect(indexer.rebuild(BRAIN)).rejects.toBe(failure);
+      expect(store.getMeta()).toBeNull();
+      expect(embedder.calls).toBe(0);
+      // And the 36 thoughts after it are not asked for.
+      await new Promise((r) => setTimeout(r, 20));
+      expect(calls.graph).toBeLessThan(10);
+      store.close();
+    });
+
+    it("a thought that is gone is no failure: its row goes, and the build finishes", async () => {
+      // The log has its creation and nothing since. Its graph is the
+      // catch-all 403 and its own read a 404: that read is what says gone.
+      // Being logged it stayed in the index for good.
+      const { thoughts, calls, store, indexer } = three();
+      await indexer.rebuild(BRAIN);
+
+      thoughts.delete("b");
+      const result = await indexer.rebuild(BRAIN);
+      expect(result).toMatchObject({ indexed: 0, skipped: 2, removed: 1, asked: 3, unread: [] });
+      expect(rows(store)).toEqual(["a", "c"]);
+      expect(calls.thought).toBe(1);
+      expect(indexer.status(BRAIN).syncedThrough).not.toBeNull();
+      store.close();
+    });
+
+    it("a 403 on the graph of a thought that reads is a failed read, and its row stays", async () => {
+      const { faults, store, indexer } = three();
+      await indexer.rebuild(BRAIN);
+
+      faults.graph = (id) => (id === "b" ? generic403() : undefined);
+      const result = await indexer.rebuild(BRAIN);
+      expect(result).toMatchObject({ removed: 0, skipped: 2 });
+      expect(result.unread).toEqual([
+        // The thought's own read answered, and gave its name.
+        { id: "b", name: "borscht recipe", read: "graph", error: expect.objectContaining({ kind: "forbidden" }) },
+      ]);
+      expect(rows(store)).toEqual(["a", "b", "c"]);
+      store.close();
+    });
+
+    it("a 403 on the graph and a failure of the thought's own read is neither gone nor read", async () => {
+      const { faults, store, indexer } = three();
+      await indexer.rebuild(BRAIN);
+
+      faults.graph = (id) => (id === "b" ? generic403() : undefined);
+      faults.thought = boom;
+      const result = await indexer.rebuild(BRAIN);
+      expect(result.unread).toEqual([
+        { id: "b", name: null, read: "thought", error: expect.objectContaining({ kind: "server" }) },
+      ]);
+      expect(rows(store)).toEqual(["a", "b", "c"]);
+      store.close();
+    });
+
+    it("the failure that stops the run stops it at the thought's own read as well", async () => {
+      const { faults, store, indexer } = three();
+      const failure = failed("network");
+      faults.graph = (id) => (id === "b" ? generic403() : undefined);
+      faults.thought = () => failure;
+      await expect(indexer.rebuild(BRAIN)).rejects.toBe(failure);
+      expect(store.getMeta()).toBeNull();
+      store.close();
+    });
+
+    it("an identifier that is none is taken for no thought, and asked nothing", async () => {
+      // The client refuses it before any request. One thought's identifier
+      // being malformed says nothing of the next.
+      const { faults, store, indexer } = three();
+      faults.graph = (id) => (id === "b" ? failed("invalid_uuid") : undefined);
+      const result = await indexer.rebuild(BRAIN);
+      expect(result).toMatchObject({ indexed: 2, unread: [] });
+      expect(rows(store)).toEqual(["a", "c"]);
+      store.close();
+    });
+
+    it("an error that is not the API's leaves the thought unread", async () => {
+      const { faults, store, indexer } = three();
+      faults.graph = (id) => (id === "b" ? new TypeError("cannot read properties") : undefined);
+      const result = await indexer.rebuild(BRAIN);
+      expect(result.unread).toEqual([
+        { id: "b", name: null, read: "graph", error: expect.any(TypeError) },
+      ]);
+      expect(rows(store)).toEqual(["a", "c"]);
+      store.close();
+    });
+
+    it("does not index a thought without the note it could not read", async () => {
+      // `.catch(() => "")`: the thought went in as one with no note, and the
+      // row it had was replaced with one built from its name.
+      const { faults, store, embedder, indexer } = three();
+      await indexer.rebuild(BRAIN);
+      const hash = store.contentHashes().get("a");
+      const encoded = embedder.calls;
+
+      faults.note = boom;
+      const result = await indexer.rebuild(BRAIN);
+      expect(result).toMatchObject({ indexed: 0, skipped: 2, removed: 0, keptUnreached: 0 });
+      expect(result.unread).toEqual([
+        { id: "a", name: "Unity", read: "note", error: expect.any(TheBrainError) },
+      ]);
+      expect(store.contentHashes().get("a")).toBe(hash);
+      expect(embedder.calls).toBe(encoded);
+      store.close();
+    });
+
+    it("a note not read leaves the walk whole: a row whose thought is gone still goes", async () => {
+      const { thoughts, faults, store, indexer } = three();
+      await indexer.rebuild(BRAIN);
+      const through = store.getMeta()!.syncedThrough;
+      store.setSyncedThrough("2026-08-20T00:00:00.000Z");
+
+      thoughts.delete("c");
+      faults.note = boom;
+      const result = await indexer.rebuild(BRAIN);
+      expect(result).toMatchObject({ removed: 1, keptUnreached: 0 });
+      expect(result.unread.map((u) => u.id)).toEqual(["a"]);
+      expect(rows(store)).toEqual(["a", "b"]);
+      // The watermark it had is left: this run did not finish.
+      expect(store.getMeta()!.syncedThrough).toBe("2026-08-20T00:00:00.000Z");
+      expect(through).not.toBeNull();
+      store.close();
+    });
+
+    it("the failure that stops the run stops it at a note as well", async () => {
+      const { faults, store, indexer } = three();
+      const failure = failed("auth", 401);
+      faults.note = () => failure;
+      await expect(indexer.rebuild(BRAIN)).rejects.toBe(failure);
+      expect(store.getMeta()).toBeNull();
+      store.close();
+    });
+
+    it("with no thought read it leaves an index built with another model as it is", async () => {
+      // A rebuild cleared such an index before its first request.
+      class OtherEmbedder extends FakeEmbedder {
+        override readonly id = "other@v2";
+      }
+      const { api, faults, store } = three();
+      await new SemanticIndexer(api, store, new OtherEmbedder()).rebuild(BRAIN);
+
+      faults.graph = boom;
+      const result = await new SemanticIndexer(api, store, new FakeEmbedder()).rebuild(BRAIN);
+      expect(result.unread).toHaveLength(3);
+      expect(rows(store)).toEqual(["a", "b", "c"]);
+      expect(store.getMeta()!.model).toBe("other@v2#doc3");
+      store.close();
+    });
+  });
+
+  describe("an embedder that cannot embed", () => {
+    /** The optional package that is not installed, as the local embedder reports it. */
+    class AbsentPackage extends FakeEmbedder {
+      async isAvailable(): Promise<boolean> {
+        return false;
+      }
+    }
+
+    it.each(["rebuild", "sync"] as const)(
+      "%s says so before it reads the brain, and writes nothing",
+      async (action) => {
+        // A rebuild read the whole log and walked the whole graph, and failed
+        // at its first document with the metadata of a build written.
+        const { calls, store, indexer } = three(new AbsentPackage());
+        await expect(indexer[action](BRAIN)).rejects.toBeInstanceOf(EmbedderUnavailableError);
+        expect(calls).toMatchObject({ modifications: 0, graph: 0, notes: 0 });
+        expect(store.getMeta()).toBeNull();
+        store.close();
+      },
+    );
+
+    it("a sync of a built index says so as well, before it reads the changes", async () => {
+      const { api, calls, store, indexer } = three();
+      await indexer.rebuild(BRAIN);
+      const read = { ...calls };
+
+      const without = new SemanticIndexer(api, store, new AbsentPackage());
+      await expect(without.sync(BRAIN)).rejects.toBeInstanceOf(EmbedderUnavailableError);
+      expect(calls.modifications).toBe(read.modifications);
+      store.close();
+    });
+
+    it("one that says it can, or says nothing, is taken at its word", async () => {
+      class Present extends FakeEmbedder {
+        async isAvailable(): Promise<boolean> {
+          return true;
+        }
+      }
+      for (const embedder of [new Present(), new FakeEmbedder()]) {
+        const { store, indexer } = three(embedder);
+        expect((await indexer.rebuild(BRAIN)).indexed).toBe(3);
+        store.close();
+      }
+    });
+  });
+
+  describe("a sync", () => {
+    /** Where the index was synced through: after the fixtures, long before now. */
+    const THROUGH = "2026-08-20T00:00:00.000Z";
+    /** A change after that, and far outside the overlap of a sync run today. */
+    const CHANGED = "2026-09-01T00:00:00";
+    const through = (store: VectorStore): string | null => store.getMeta()!.syncedThrough;
+
+    /** An index of `three()` and a tag on `c`, built and synced through `THROUGH`. */
+    async function built() {
+      const fixture = three();
+      fixture.thoughts.set("c", { id: "c", name: "vector databases", tags: ["g"] });
+      fixture.thoughts.set("g", { id: "g", name: "data", kind: 4, children: ["c"] });
+      fixture.logs.push(log("g", 101, "2026-08-11T09:04:00"));
+      await fixture.indexer.rebuild(BRAIN);
+      fixture.store.setSyncedThrough(THROUGH);
+      return fixture;
+    }
+
+    it("with no graph read it writes nothing and leaves the watermark, so the next sync reads the changes again", async () => {
+      // It answered as a sync that had caught up, and moved the watermark
+      // past the changes: the sync after it read nothing, and they were lost.
+      const { thoughts, logs, faults, store, embedder, indexer } = await built();
+      thoughts.set("b", { id: "b", name: "solyanka recipe" });
+      thoughts.set("d", { id: "d", name: "a new thought" });
+      logs.push(log("b", 103, CHANGED), log("d", 101, CHANGED));
+      const encoded = embedder.calls;
+
+      faults.graph = boom;
+      const result = await indexer.sync(BRAIN);
+      expect(result).toMatchObject({ ran: "sync", indexed: 0, removed: 0, asked: 2 });
+      expect(result.unread.map((u) => u.id).sort()).toEqual(["b", "d"]);
+      expect(through(store)).toBe(THROUGH);
+      expect(embedder.calls).toBe(encoded);
+
+      delete faults.graph;
+      const next = await indexer.sync(BRAIN);
+      expect(next).toMatchObject({ indexed: 2, unread: [] });
+      expect(embedder.documents.slice(-2).sort()).toEqual(["a new thought", "solyanka recipe"]);
+      expect(through(store)).not.toBe(THROUGH);
+      store.close();
+    });
+
+    it("with one graph not read it writes the rest and still leaves the watermark", async () => {
+      const { thoughts, logs, faults, store, indexer } = await built();
+      const hash = store.contentHashes().get("b");
+      thoughts.set("b", { id: "b", name: "solyanka recipe" });
+      thoughts.set("d", { id: "d", name: "a new thought" });
+      logs.push(log("b", 103, CHANGED), log("d", 101, CHANGED));
+
+      faults.graph = (id) => (id === "b" ? boom() : undefined);
+      const result = await indexer.sync(BRAIN);
+      expect(result).toMatchObject({ indexed: 1, asked: 2 });
+      expect(result.unread.map((u) => [u.id, u.read])).toEqual([["b", "graph"]]);
+      expect(store.contentHashes().has("d")).toBe(true);
+      expect(store.contentHashes().get("b")).toBe(hash);
+      expect(through(store)).toBe(THROUGH);
+
+      // The next one reads both again: what was written is skipped by hash.
+      delete faults.graph;
+      expect(await indexer.sync(BRAIN)).toMatchObject({ indexed: 1, skipped: 1, unread: [] });
+      expect(through(store)).not.toBe(THROUGH);
+      store.close();
+    });
+
+    it("does not replace a row with one built without the note it could not read", async () => {
+      const { thoughts, logs, faults, store, embedder, indexer } = await built();
+      const hash = store.contentHashes().get("a");
+      thoughts.set("a", { id: "a", name: "Unity", note: "a 3D game engine" });
+      logs.push(noteLog("a", 803, CHANGED));
+      const encoded = embedder.calls;
+
+      faults.note = boom;
+      const result = await indexer.sync(BRAIN);
+      expect(result).toMatchObject({ indexed: 0, asked: 1 });
+      expect(result.unread).toEqual([
+        { id: "a", name: "Unity", read: "note", error: expect.any(TheBrainError) },
+      ]);
+      expect(store.contentHashes().get("a")).toBe(hash);
+      expect(embedder.calls).toBe(encoded);
+      expect(through(store)).toBe(THROUGH);
+
+      delete faults.note;
+      expect((await indexer.sync(BRAIN)).indexed).toBe(1);
+      expect(embedder.documents.at(-1)).toBe("Unity\na 3D game engine");
+      store.close();
+    });
+
+    it("a renamed tag whose graph is not read keeps the watermark: its carriers are not known", async () => {
+      // The log names the tag alone. Its carriers were not marked, and the
+      // watermark moved past the rename.
+      const { thoughts, logs, faults, store, embedder, indexer } = await built();
+      thoughts.set("g", { id: "g", name: "datasets", kind: 4, children: ["c"] });
+      logs.push(log("g", 103, CHANGED));
+
+      faults.graph = (id) => (id === "g" ? boom() : undefined);
+      const result = await indexer.sync(BRAIN);
+      expect(result).toMatchObject({ indexed: 0, asked: 1 });
+      expect(result.unread.map((u) => u.id)).toEqual(["g"]);
+      expect(through(store)).toBe(THROUGH);
+
+      delete faults.graph;
+      expect((await indexer.sync(BRAIN)).indexed).toBe(2);
+      expect(embedder.documents.slice(-2).sort()).toEqual([
+        "datasets",
+        "vector databases\ntags: datasets",
+      ]);
+      store.close();
+    });
+
+    it("a changed thought that is gone, with no deletion in the log yet, loses its row", async () => {
+      const { thoughts, logs, calls, store, indexer } = await built();
+      thoughts.delete("b");
+      logs.push(log("b", 103, CHANGED));
+
+      const result = await indexer.sync(BRAIN);
+      expect(result).toMatchObject({ indexed: 0, removed: 1, unread: [] });
+      expect(store.contentHashes().has("b")).toBe(false);
+      expect(calls.thought).toBe(1);
+      expect(through(store)).not.toBe(THROUGH);
+      store.close();
+    });
+
+    it("a deletion the log names and a thought not read: the row goes, the watermark stays", async () => {
+      const { thoughts, logs, faults, store, indexer } = await built();
+      thoughts.delete("c");
+      thoughts.set("d", { id: "d", name: "a new thought" });
+      logs.push(log("c", 102, CHANGED), log("b", 103, CHANGED), log("d", 101, CHANGED));
+
+      faults.graph = (id) => (id === "b" ? boom() : undefined);
+      const result = await indexer.sync(BRAIN);
+      expect(result).toMatchObject({ indexed: 1, removed: 1 });
+      expect(result.unread.map((u) => u.id)).toEqual(["b"]);
+      expect(store.contentHashes().has("c")).toBe(false);
+      expect(through(store)).toBe(THROUGH);
+
+      // Read again by the next sync, the deletion is not counted twice.
+      delete faults.graph;
+      expect(await indexer.sync(BRAIN)).toMatchObject({ removed: 0, unread: [] });
+      store.close();
+    });
+
+    it("with no thought read not even a deletion the log names is written", async () => {
+      const { thoughts, logs, faults, store, indexer } = await built();
+      thoughts.delete("c");
+      logs.push(log("c", 102, CHANGED), log("b", 103, CHANGED));
+
+      faults.graph = boom;
+      const result = await indexer.sync(BRAIN);
+      expect(result).toMatchObject({ indexed: 0, removed: 0, asked: 1 });
+      expect(store.contentHashes().has("c")).toBe(true);
+      expect(through(store)).toBe(THROUGH);
+
+      delete faults.graph;
+      expect(await indexer.sync(BRAIN)).toMatchObject({ removed: 1, unread: [] });
+      store.close();
+    });
+
+    it.each<[ApiErrorKind, number | undefined]>([
+      ["network", undefined],
+      ["auth", 401],
+      ["unknown_brain", 401],
+    ])("%s stops it, with nothing written and the watermark where it was", async (kind, status) => {
+      const { thoughts, logs, faults, store, indexer } = await built();
+      thoughts.delete("c");
+      logs.push(log("c", 102, CHANGED), log("b", 103, CHANGED));
+
+      const failure = failed(kind, status);
+      faults.graph = () => failure;
+      await expect(indexer.sync(BRAIN)).rejects.toBe(failure);
+      expect(store.contentHashes().has("c")).toBe(true);
+      expect(through(store)).toBe(THROUGH);
+      store.close();
+    });
+
+    it("stops when the log's read fails", async () => {
+      const { faults, store, indexer } = await built();
+      const failure = boom();
+      faults.log = () => failure;
+      await expect(indexer.sync(BRAIN)).rejects.toBe(failure);
+      expect(through(store)).toBe(THROUGH);
+      store.close();
+    });
+
+    it("with nothing changed it is complete, and moves the watermark", async () => {
+      const { store, indexer } = await built();
+      expect(await indexer.sync(BRAIN)).toMatchObject({
+        ran: "sync",
+        indexed: 0,
+        asked: 0,
+        unread: [],
+      });
+      expect(through(store)).not.toBe(THROUGH);
+      store.close();
+    });
+  });
+
+  describe("a note the graph is wrong about for a moment", () => {
+    const THROUGH = "2026-08-20T00:00:00.000Z";
+    const CHANGED = "2026-09-01T00:00:00";
+
+    it("noteStates takes the latest note entry about each thought, by its time", () => {
+      const entries = [
+        noteLog("a", 801, "2026-08-11T09:00:01"),
+        noteLog("a", 803, "2026-08-11T09:00:05"),
+        noteLog("b", 801, "2026-08-11T09:00:01"),
+        noteLog("b", 802, "2026-08-11T09:00:07"),
+        // Deleted and written again: a new attachment with its own 801.
+        noteLog("c", 802, "2026-08-11T09:00:02.000001"),
+        noteLog("c", 801, "2026-08-11T09:00:02.00001", "att-c-2"),
+        // A note on a link is no thought's.
+        { ...noteLog("l", 801, "2026-08-11T09:00:03"), extraAType: 3 },
+        log("d", 103, "2026-08-11T09:00:04"),
+      ];
+      const expected = new Map([
+        ["a", true],
+        ["b", false],
+        ["c", true],
+      ]);
+      expect(noteStates(entries)).toEqual(expected);
+      // The API returns the log newest first.
+      expect(noteStates([...entries].reverse())).toEqual(expected);
+      expect(noteStates([])).toEqual(new Map());
+    });
+
+    it("a sync reads a note the log says was changed, though the graph lists none", async () => {
+      // At one read within 0.2 s of a change the graph lists no Notes
+      // attachment (L32). The thought was indexed by its name alone.
+      const { thoughts, logs, store, embedder, indexer } = three();
+      await indexer.rebuild(BRAIN);
+      store.setSyncedThrough(THROUGH);
+
+      thoughts.set("a", { id: "a", name: "Unity", note: "a 3D game engine", noteUnlisted: true });
+      logs.push(noteLog("a", 803, CHANGED));
+      const result = await indexer.sync(BRAIN);
+      expect(result).toMatchObject({ indexed: 1, unread: [] });
+      expect(embedder.documents.at(-1)).toBe("Unity\na 3D game engine");
+      store.close();
+    });
+
+    it("a sync does not read a note the log says was deleted, though the graph still lists it", async () => {
+      // The graph lists it for a moment more, and its read is then a 403.
+      const { logs, calls, faults, store, embedder, indexer } = three();
+      await indexer.rebuild(BRAIN);
+      store.setSyncedThrough(THROUGH);
+      const notes = calls.notes;
+
+      logs.push(noteLog("a", 802, CHANGED));
+      faults.note = generic403;
+      const result = await indexer.sync(BRAIN);
+      expect(result).toMatchObject({ indexed: 1, unread: [] });
+      expect(embedder.documents.at(-1)).toBe("Unity");
+      expect(calls.notes).toBe(notes);
+      store.close();
+    });
+
+    it("a rebuild goes by the whole log in the same way", async () => {
+      const { thoughts, store, embedder, indexer } = three();
+      thoughts.set("a", { id: "a", name: "Unity", note: "game engine", noteUnlisted: true });
+      await indexer.rebuild(BRAIN);
+      expect(embedder.documents).toContain("Unity\ngame engine");
+      store.close();
+    });
+
+    it("a note that does not read yet is indexed by the next sync: its entry is inside the overlap", async () => {
+      // A note written for the first time reads as no note for up to 0.15 s
+      // (L32). The run that meets that leaves its watermark ten seconds
+      // before its own start, which is before the note's entry.
+      const { thoughts, logs, store, embedder, indexer } = three();
+      await indexer.rebuild(BRAIN);
+
+      // Stamped now and without an offset, as the log writes it.
+      logs.push(noteLog("b", 801, new Date().toISOString().slice(0, -1)));
+      const early = await indexer.sync(BRAIN);
+      expect(early).toMatchObject({ indexed: 0, skipped: 1 });
+
+      thoughts.set("b", { id: "b", name: "borscht recipe", note: "beetroot soup" });
+      const late = await indexer.sync(BRAIN);
+      expect(late.indexed).toBe(1);
+      expect(embedder.documents.at(-1)).toBe("borscht recipe\nbeetroot soup");
       store.close();
     });
   });

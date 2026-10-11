@@ -24,6 +24,12 @@ describe("optional dependency", () => {
     await expect(isLocalEmbedderAvailable()).resolves.toBeTypeOf("boolean");
   });
 
+  it("the local embedder says whether the package is there, asked before a build", async () => {
+    // What a rebuild asks before it reads a brain: without the package it
+    // used to read all of it and fail at the first document.
+    await expect(new LocalEmbedder().isAvailable()).resolves.toBe(packageInstalled);
+  });
+
   it("the missing-package error explains why it is not bundled", () => {
     const error = new EmbedderUnavailableError();
     expect(error.message).toMatch(/380 MB/);

@@ -883,9 +883,9 @@ answered "This brain has no types or tags yet". `supportsAliases()` answers
 yes when it cannot ask, and the write goes ahead (§7, on aliases). The read
 that waits for an alias or a type to read back takes a failure for "not yet"
 (above). `brain_recent_changes` prints "(name not read)" for a thought whose
-read failed. The indexer still skips a thought it cannot read (§8, "Not
-guarded"). And one thing about notes that is no read: a note written to an
-identifier nobody has is stored, and reported as written (L3).
+read failed. The indexer's own reads are in §8, *A read that fails while the
+index is built*. And one thing about notes that is no read: a note written to
+an identifier nobody has is stored, and reported as written (L3).
 
 ---
 
@@ -1120,6 +1120,10 @@ Measured against a live API by polling until the result appeared:
 | `create` with a type → `get(id)` shows it | instant |
 | the first `PATCH` after a burst of creates → `get(id)` | 0.6–0.8 s after 150, 2.6 s after 300 with a type |
 | `set note` → `get note` | ~0.2 s |
+| first note → `get note` | up to 0.15 s when the note had been read before: 8 first reads of 30 had none. At once when it had not |
+| first note → the thought's `graph` lists it | up to 0.15 s for a graph read before: a copy, 10 first reads of 50 without it. Live on its first read |
+| a note changed → the thought's `graph` | lists no Notes attachment at one read within 0.2 s of the change, then lists it again; the note itself reads at once |
+| a note deleted → the thought's `graph` | still lists it for up to 0.2 s, while the note's read is a 403 |
 | `attachTag` → `graph.tags` | ~0.1–0.5 s |
 | `create` next to a thought → that thought's `graph` lists it | 10–205 ms, about 80 ms at the median: a copy refreshed about every 0.1 s. Live on its first read |
 | `attach URL` → `by-location` | instant |
@@ -1409,7 +1413,7 @@ looked at. It was not taken: all that status can recommend is a rebuild, a
 rebuild needs TheBrain and the brain, and "not checked" would leave the model
 to find that out by calling it. What fails there fails the call, with the
 failure's own message. Status also reported a build that never finished as
-"built: yes, usable: yes" with no thought in it, because a rebuild writes its
+"built: yes, usable: yes" with no thought in it, because a rebuild wrote its
 metadata before its first request: after a rebuild that failed on the missing
 embeddings package, for one. Built is now a build that finished, and usable
 is what `brain_search` asks of an index before it ranks by it.
@@ -1419,10 +1423,168 @@ created, before any request could refuse the identifier: `status` for
 `my-brain` made `index-my-brain.sqlite`, and for `x/../../name` a file outside
 the data directory. `indexPath()` refuses what is not a UUID.
 
-**Not guarded.** A rebuild and a sync still skip a thought whose graph they
-cannot read, whatever the reason. With the log answered and every graph a 500
-they reported "Index built" and "Index refreshed" with nothing encoded, and
-the sync moved its watermark past the changes it had not read.
+A well-formed identifier that names no brain still left an index behind:
+`brain_search` opens the store before the request that says so, and opening
+created the file, three with the journal's. So did `brain_list` for every
+brain it listed, and `brain_delete_thought` for a brain never indexed. A
+store now makes its file at its first write, and reads as an empty index
+until then (`VectorStore`): nothing is created to be looked at.
+
+### A read that fails while the index is built
+
+> **Correction.** The indexer dropped the failure of every read but the
+> log's: `.catch(() => null)` on a thought's graph and on the brain,
+> `.catch(() => "")` on a note. Measured through `brain_index` on 15.0.640,
+> over a brain of seven thoughts, the log and the brain answered by the live
+> API and the failures put in on the way to it:
+>
+> - **A rebuild with every graph failing** (a 500, the catch-all 403, a
+>   dropped connection, a timeout, once each) answered "Index built",
+>   `thoughts encoded: 0`, no error, after asking for each graph twice, and
+>   set its watermark. Status then said "built: yes, usable: no", and
+>   `brain_list` "index: 0".
+> - **With one thought's graph a 500** it answered "Index built" with six
+>   encoded and the seventh nowhere, and no sync would come back for it:
+>   nothing in the log says it changed.
+> - **With that thought's note a 500** the thought was encoded from its name
+>   alone, and over an index that had it right the row was replaced.
+> - **A sync** was given a new thought, a rename and a changed note, each
+>   eleven seconds old. With every graph a 500, the 403 or a dropped
+>   connection it answered "Index refreshed", nothing encoded, and moved its
+>   watermark on: the sync after it, with nothing in its way, made two
+>   requests and found nothing to do. None of the three was in the index.
+>   With the note's read a 500, or the 403 it gets for a moment after a note
+>   is deleted, the thought's row was replaced by one built from its name,
+>   and the next sync left it so.
+> - **With the same changes half a second old** the next sync read them
+>   again, inside the watermark's overlap. That is why a test that changes a
+>   thought and syncs at once never showed any of this.
+> - Read from the code and shown with a fake, since every thought of the
+>   test brain is in its log: with the brain's own read failing, a rebuild of
+>   a brain the log does not list walked nowhere, removed every row as stale
+>   and answered "Index built"; with one graph failing it removed the rows of
+>   the thoughts that are reached through that graph alone.
+
+A run makes thousands of reads and then writes. What it does with a read that
+fails goes by the same question as in the fan-out, whether the next request
+could have got past it, and by one thing more: what it is about to write.
+
+- **It reads first and writes after.** The log, the brain, every graph and
+  every note are read before the index is touched: the metadata of a build,
+  a row, a removal, the watermark. So a run that a request stops has written
+  nothing, and the tool says so: the failure's own message, then "The rebuild
+  stopped at that request and wrote nothing: the index is as it was." A
+  rebuild used to clear an index of another model and write a build's
+  metadata before its first request.
+- **A failure every read would get stops the run at once**: a key TheBrain
+  rejects, a `brainId` that is no brain, and TheBrain not answering, which is
+  a refused or dropped connection and a timeout. The log's read and the
+  brain's stop it whatever they fail with: there is no thought to leave for
+  later. A dropped connection or a timeout may be one request's, and stops
+  the run all the same. Going on costs a request per thought against an app
+  that is gone, thirty seconds each against one that hangs, and stopping
+  costs nothing: the next run starts where this one did. `mapWithConcurrency`
+  starts no item after one has thrown; its other runners used to go on to
+  the end of the list.
+- **Any other failure is the thought's own, and leaves it for the next
+  run**: a 5xx, the catch-all 403, an answer that does not parse. The thought
+  is returned in `unread` with the read that failed, and its row is left as
+  it was: not removed, and not replaced by a document built without its
+  note. The rest are read and written.
+- **Only a read that says the thought is gone removes its row.** The graph
+  of an identifier nobody has is the catch-all 403, which a request that
+  failed for a reason of its own gets too (`docs/api-map.md`, L3). So after
+  that 403 the indexer asks for the thought itself: a 404 is a thought that
+  is not there, and its row goes, in a sync as in a rebuild. Any other answer
+  leaves the thought unread, a 200 included: the graph of a thought deleted a
+  moment ago is a 403 while the thought still reads. The cost is one request
+  per 403.
+- **A rebuild that left a graph unread removes no row for what its walk did
+  not reach.** The thoughts the log does not list are found through graphs
+  alone (§7), so with one unread the walk is not whole, and "not reached" is
+  not "gone". Rows of thoughts read as gone still go. A note that failed to
+  read leaves the walk whole.
+- **The watermark moves only for a run that read everything it asked for.**
+  A sync that left a thought unread keeps the watermark it had, so the next
+  one reads the same changes again and the hash skips what was written. That
+  holds for a renamed tag or type whose graph was not read: its carriers are
+  not known, and the rename has to be read again. A rebuild that left a
+  thought unread sets no watermark: over no index it is a build that did not
+  finish, which status says and which makes the next sync a rebuild; over a
+  built index the old watermark stays.
+- **A run that read no thought writes nothing at all**, the deletions the log
+  names included: they are read again next time.
+
+**The result of a run that left anything is an error**, and its title does
+not say built or refreshed: "Index rebuilt in part" or "Index refreshed in
+part", and "Index not rebuilt" or "Index not refreshed" when no thought was
+read. It gives the counts of what was written, a "Not read" section, and
+"What to do". "Not read" names each thought by identifier, with its name
+where a read had given one, the read that failed and what TheBrain answered,
+once when it is the same for all; the first twenty are listed and the rest
+counted. The 403's own text is about the key and is not passed on. "What to
+do" is the same action again, and why the other would not do: after a
+rebuild over a built index, that a sync reads only what changed since the
+watermark, which the run did not move. Read as a success, "Not read" would
+be one more section under "Index built".
+
+With the same failures put in again, all sixteen runs were errors. Four
+stopped at the request, on a dropped connection, a timeout and the brain's
+own read, and said the index was as it was; twelve named the thoughts they
+had not read. A rebuild with nothing read left "built: no" and `brain_list`
+"no index", and after each of the six syncs all three changes were in the
+index once the next one had run with nothing in its way.
+
+**A rebuild that cannot embed says so before it reads the brain.** Without
+the optional package it read the whole log and walked the whole graph, 13
+requests on a brain of one thought and minutes on a real one, and failed at
+its first document with a build's metadata written. `Embedder` has an
+optional `isAvailable()`, which the local one answers by looking for the
+package (`isLocalEmbedderAvailable()`), and both runs ask it first: the
+refusal is `EmbedderUnavailableError`, in the result as any error is, after
+the one request `brain_index` makes for the brain. The package stays
+optional, and nothing else asks.
+
+**A note is read on the log's word where the log has one.** The indexer
+took "has a note" from the graph alone, and for a moment the graph is wrong
+both ways. Measured on 15.0.640 (`docs/api-map.md`, L32): after a change to a
+note that is there, one read of the graph within 0.2 s lists no Notes
+attachment, after 44 of 60 `update`s and 27 of 60 `append`s watched every 10
+ms, while the note's own read had the new text at its first read 200 times
+of 200. Under bursts of a hundred creates it was 8 single reads of 150. Read
+then, a thought with a note was embedded as its name alone: that is the
+contract test that once failed with "expected 'zz-it-note-run-sync' to
+contain 'word0'", and it needs no second session to happen. And for up to
+0.2 s after a note is deleted the graph still lists it, while its read is the
+403: 30 deletions of 30, both at the first read. So the latest note entry
+about a thought in the log the run has read decides (`noteStates()`): written
+or changed, the note is read whatever the graph lists; deleted, it is not
+asked for. With no entry there the graph decides, as before.
+
+**What the overlap already covered, and what it does not.** A note written
+for the first time reads as no note for up to 0.15 s where the note had been
+read before (8 first reads of 30), and the graph of a thought read before
+lacks the attachment as long (10 of 50). A run that meets that indexes the
+thought without its note. Its watermark is ten seconds before its own start
+and its reads come after its start, so an entry that a read is less than ten
+seconds behind is after the watermark, and the next sync reads it again: a
+unit test pins that. The limit is a read more than ten seconds behind its
+entry in the log. None was measured: the longest lags are 0.2 s for a note,
+0.5 s for a tag and 5.3 s for the first patch after 600 creates (§7). Such a
+change would stay out of the index until the thought changes again or a
+rebuild.
+
+**Left as they are.** A thought that never reads keeps a build unfinished
+and a sync's watermark where it was, and every run says so by name: nothing
+measured reads that way for good, and passing over it in silence is what
+this replaced. Status has no memory of a rebuild over a built index that
+left a thought unread: the run's own result is where that is said. Nor does
+status say that a row indexed before kinds were compared may hold a stale
+one (below): it cannot tell which index has such a row, so it would send
+every index built before then to a rebuild, and it is read when a search
+complains of no index, which is not when a stale kind shows. `isAvailable()`
+looks for the package and not for the model, whose download can still fail
+at the first document, with the build's metadata written.
 
 ### Variants in vector mode
 
@@ -1505,6 +1667,9 @@ has already fetched it, so collecting reuses it.
 **A note is fetched only when that graph reports an attachment flagged
 `isNotes`** — so the extra request is spent exactly on the thoughts that have a
 note, and never on the ones that do not.
+Where the log the run has read has a note entry about the thought, that entry
+is taken over the graph, which is wrong for a moment after a note changes
+(*A read that fails while the index is built*, above).
 
 > The first version of this decided which notes to fetch from the modification
 > log, looking for `801`/`802`/`803` events. That was wrong in a way that
@@ -1542,6 +1707,7 @@ entry, fetches the old graph and skips it by hash; with the watermark at the
 run's own start, that change then stayed out of the index until a rebuild.
 Measured: of four tags each followed at once by a sync, one was lost. Reading
 the tail twice costs a graph request per thought, and the hash drops the rest.
+The watermark is moved only by a run that read every thought it asked for.
 
 Everything that goes into a document has a signal in the log. Each row was
 measured and has a contract test:

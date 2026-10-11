@@ -377,6 +377,52 @@ suite("resource layer against the live API", () => {
     expect(subjectIds(event!)).toEqual([id]);
   }, 30_000);
 
+  it("after a note is changed its graph lists no Notes attachment for a moment, while the note reads", async () => {
+    // What the semantic indexer must not go by alone (docs/api-map.md, L32).
+    // Measured on 15.0.640, the graph read about every 10 ms for 0.4 s after
+    // each change: after 44 of 60 `update`s and 27 of 60 `append`s one read
+    // listed no Notes attachment, 0 to 183 ms after the change, and the
+    // thought's own attachment list had it each time. The note's read had the
+    // new text at its first read 200 times of 200. Read at that moment, the
+    // thought was indexed as one with no note.
+    const id = await make("note-graph-gap");
+    await api.notes.set(brainId, id, "one");
+    const listsNote = (g: { attachments: Array<{ isNotes: boolean }> }): boolean =>
+      g.attachments.some((a) => a.isNotes);
+    await eventually(() => api.thoughts.getGraph(brainId, id), listsNote);
+
+    const CHANGES = 25;
+    const WATCH_MS = 250;
+    let without = 0;
+    for (let i = 0; i < CHANGES; i++) {
+      await api.notes.set(brainId, id, `text ${i}`);
+      const changed = performance.now();
+      while (performance.now() - changed < WATCH_MS) {
+        if (!listsNote(await api.thoughts.getGraph(brainId, id))) {
+          without += 1;
+          // The copy the graph answers from, not the thought: its own list has the note.
+          const own = await api.attachments.ofThought(brainId, id);
+          expect(own.some((a) => a.isNotes)).toBe(true);
+        }
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      // The note itself reads, with the text just written.
+      const text = await eventually(
+        () => api.notes.get(brainId, id),
+        (t) => t === `text ${i}`,
+        { timeoutMs: 2000, stepMs: 20 },
+      );
+      expect(text).toBe(`text ${i}`);
+      // And the graph lists it again once the moment has passed.
+      const again = await eventually(() => api.thoughts.getGraph(brainId, id), listsNote, {
+        timeoutMs: 2000,
+        stepMs: 20,
+      });
+      expect(listsNote(again)).toBe(true);
+    }
+    expect(without).toBeGreaterThan(0);
+  }, 60_000);
+
   describe("a run of note changes in the log", () => {
     // Measured on TheBrain 15.0.640: the log is not append-only. While a
     // note's 803 is the newest entry TheBrain has logged, the next change to
@@ -610,7 +656,9 @@ suite("resource layer against the live API", () => {
         );
 
         const from = documents.length;
-        await indexer.sync(brainId);
+        const synced = await indexer.sync(brainId);
+        // A read that failed is named here, where it used to be an empty note.
+        expect(synced.unread).toEqual([]);
         const embedded = documents.slice(from);
         expect(embedded).toHaveLength(1);
         expect(embedded[0]).toContain(word);

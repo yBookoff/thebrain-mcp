@@ -10,9 +10,18 @@
  * from every logged thought, because the log alone misses thoughts that were
  * never created in this brain (imports, old brains). The log still supplies
  * incremental sync signals.
+ *
+ * A run reads first and writes after. Every request it makes is a read, and
+ * the last of them is answered before the index is touched, so a run that a
+ * failed request stops has written nothing. A read that fails is not an
+ * answer: it is never taken for a thought that is gone or for one with no
+ * note. What a run does with it goes by whether the next read could have got
+ * past it (`STOPS_THE_RUN`, `#graph`).
  */
 
+import { TheBrainError, type ApiErrorKind } from "../api/errors.js";
 import type { TheBrainApi } from "../api/index.js";
+import { compareLogTime, logTime } from "../api/log.js";
 import type { CleanGraph } from "../api/resources/thoughts.js";
 import {
   EntityType,
@@ -30,7 +39,7 @@ import {
   indexModelId,
   type IndexableThought,
 } from "./document.js";
-import type { Embedder } from "./embedder.js";
+import { EmbedderUnavailableError, type Embedder } from "./embedder.js";
 import type { StoredVector, VectorStore } from "./store.js";
 
 export interface IndexProgress {
@@ -40,7 +49,25 @@ export interface IndexProgress {
   message: string;
 }
 
+/**
+ * A thought a run asked TheBrain for and got no answer about. Its row in the
+ * index, if it has one, is left as it was.
+ */
+export interface UnreadThought {
+  id: string;
+  /** Its name, when an earlier read of the run had given one. */
+  name: string | null;
+  /**
+   * The read that failed: the thought's graph; the thought itself, asked for
+   * after a 403 on its graph; or its note.
+   */
+  read: "graph" | "thought" | "note";
+  error: unknown;
+}
+
 export interface IndexResult {
+  /** What was run. A sync with no finished index to refresh is a rebuild. */
+  ran: "rebuild" | "sync";
   indexed: number;
   /**
    * Rows given the kind their thought has now, with the vector left as it
@@ -49,6 +76,23 @@ export interface IndexResult {
   kindUpdated: number;
   skipped: number;
   removed: number;
+  /**
+   * The thoughts the run asked TheBrain for: every one a rebuild found, or
+   * the ones a sync found changed.
+   */
+  asked: number;
+  /**
+   * Those it could not read. With any, the run is not complete: the
+   * watermark is where it was, so the next run reads for them again. When
+   * none of `asked` was read, nothing was written at all.
+   */
+  unread: UnreadThought[];
+  /**
+   * Rows a rebuild left in place although its walk did not reach their
+   * thoughts, because a graph on the way was not read: what lies beyond that
+   * graph was not walked, and a row is not removed on that account.
+   */
+  keptUnreached: number;
   elapsedMs: number;
 }
 
@@ -83,6 +127,39 @@ const DEFAULT_EMBED_BATCH = 64;
  * drops what it has already seen.
  */
 const SYNC_OVERLAP_MS = 10_000;
+
+/**
+ * Failures that are not one thought's own, so the first is the run's: a key
+ * TheBrain rejects, a `brainId` that is no brain, and TheBrain not answering,
+ * which is a refused or dropped connection and a request that timed out.
+ * Every read after it would get the same, and a run makes thousands of them:
+ * against an app that hangs, each waits out its thirty seconds.
+ *
+ * A dropped connection or a timeout may be one request's. It stops the run
+ * all the same, because nothing is lost by that: the run has written nothing
+ * yet, and the next one starts where this one did.
+ *
+ * Anything else is taken for the thought's own: a 5xx, the catch-all 403, an
+ * answer that does not parse. That thought is left for the next run and the
+ * rest are read.
+ */
+const STOPS_THE_RUN: readonly ApiErrorKind[] = ["auth", "unknown_brain", "network"];
+
+function stopsTheRun(error: unknown): boolean {
+  return error instanceof TheBrainError && STOPS_THE_RUN.includes(error.kind);
+}
+
+/** What the read of one thought's graph came to. */
+type GraphRead = { graph: CleanGraph } | { gone: true } | { unread: UnreadThought };
+
+/** The same for the thought as it goes into the index, its note read too. */
+type ThoughtRead = { thought: IndexableThought } | { gone: true } | { unread: UnreadThought };
+
+interface Collected {
+  thoughts: IndexableThought[];
+  gone: string[];
+  unread: UnreadThought[];
+}
 
 /** Thought kinds we skip: system and internal ones. */
 const SKIP_KINDS: ReadonlySet<number> = new Set([ThoughtKind.System]);
@@ -134,13 +211,58 @@ export class SemanticIndexer {
    * compared apart from the hash and corrected in place, with nothing encoded:
    * that is what repairs an index whose thoughts changed kind before a sync
    * read `304`.
+   *
+   * Throws `EmbedderUnavailableError` before the first request when nothing
+   * could be encoded, and the failure of a read that stops the run (see
+   * `STOPS_THE_RUN`; the log's and the brain's own reads always do). The
+   * index is then as it was. A thought that could not be read is returned in
+   * `unread`, and the build is not finished: no watermark is set.
    */
   async rebuild(
     brainId: string,
     onProgress: (p: IndexProgress) => void = (): void => undefined,
   ): Promise<IndexResult> {
-    const startedAt = Date.now();
-    const watermark = watermarkAt(startedAt);
+    await this.#requireEmbedder();
+    return this.#rebuild(brainId, onProgress, Date.now());
+  }
+
+  async #rebuild(
+    brainId: string,
+    onProgress: (p: IndexProgress) => void,
+    startedAt: number,
+  ): Promise<IndexResult> {
+    onProgress({ phase: "enumerate", done: 0, total: 0, message: "reading the log" });
+    const logs = await this.#api.brains.allModifications(brainId);
+    const logged = replayThoughtIds(logs);
+
+    onProgress({ phase: "enumerate", done: 0, total: 0, message: "walking the graph" });
+    const reads = await this.#walk(brainId, logged);
+    const { thoughts, gone, unread } = await this.#collect(
+      brainId,
+      reads,
+      noteStates(logs),
+      onProgress,
+    );
+    const done = (
+      written: { indexed: number; kindUpdated: number; skipped: number },
+      removed: number,
+      keptUnreached: number,
+    ): IndexResult => ({
+      ran: "rebuild",
+      ...written,
+      removed,
+      asked: reads.size,
+      unread,
+      keptUnreached,
+      elapsedMs: Date.now() - startedAt,
+    });
+
+    // Every read is made. A run that read no thought writes nothing: not the
+    // metadata either, which is what says a build was started.
+    if (unread.length === reads.size && unread.length > 0) {
+      onProgress({ phase: "done", done: 0, total: reads.size, message: "no thought was read" });
+      return done(NOTHING_WRITTEN, 0, 0);
+    }
 
     if (
       !this.#store.isCompatible(
@@ -158,31 +280,31 @@ export class SemanticIndexer {
       syncedThrough: null,
     });
 
-    onProgress({ phase: "enumerate", done: 0, total: 0, message: "reading the log" });
-    const logs = await this.#api.brains.allModifications(brainId);
-    const logged = replayThoughtIds(logs);
-
-    onProgress({ phase: "enumerate", done: 0, total: 0, message: "walking the graph" });
-    const graphs = await this.#walk(brainId, logged);
-    // A union, not a replacement: a logged thought whose graph failed to load
-    // keeps its old behaviour — fetched once more, dropped only if it is gone.
-    const alive = new Set([...logged, ...graphs.keys()]);
-
-    // Drop anything that no longer exists in the brain.
+    // A row goes when its thought was read as gone, or when the walk did not
+    // reach it and was whole. With a graph not read the walk is not whole:
+    // what lies beyond that graph was never asked for, and the thoughts the
+    // log does not list are reached through graphs alone. A failed note read
+    // leaves the walk as it is.
+    const walked = unread.every((u) => u.read === "note");
+    const leaving = new Set(gone);
     const known = [...this.#store.contentHashes().keys()];
-    const stale = known.filter((id) => !alive.has(id));
+    const unreached = known.filter((id) => !reads.has(id));
+    const stale = known.filter((id) => leaving.has(id) || (walked && !reads.has(id)));
     this.#store.remove(stale);
 
-    const result = await this.#indexThoughts(brainId, [...alive], onProgress, graphs);
-    this.#store.setSyncedThrough(watermark);
+    const written = await this.#write(thoughts, onProgress);
+    // The watermark is what says a build finished, and what a sync reads
+    // from. One that left a thought unread is not finished, and a sync would
+    // not go back for that thought: nothing in the log says it changed.
+    if (unread.length === 0) this.#store.setSyncedThrough(watermarkAt(startedAt));
 
     onProgress({
       phase: "done",
-      done: result.indexed + result.skipped,
-      total: alive.size,
-      message: "index built",
+      done: written.indexed + written.skipped,
+      total: reads.size,
+      message: unread.length === 0 ? "index built" : `${unread.length} thoughts not read`,
     });
-    return { ...result, removed: stale.length, elapsedMs: Date.now() - startedAt };
+    return done(written, stale.length, walked ? 0 : unreached.length);
   }
 
   /**
@@ -193,26 +315,33 @@ export class SemanticIndexer {
    * filtered out by document hash. Every change since the watermark is read,
    * however many: the API alone would keep only the newest page and drop the
    * oldest changes while the watermark moved past them.
+   *
+   * The watermark moves only when every changed thought was read. With one
+   * left in `unread` it stays where it was, and the next sync reads the same
+   * changes again: moved, it would pass that thought's change for good. What
+   * was read is written all the same, and the hash skips it next time.
+   *
+   * Throws as `rebuild` does, the index then being as it was.
    */
   async sync(
     brainId: string,
     onProgress: (p: IndexProgress) => void = (): void => undefined,
   ): Promise<IndexResult> {
+    await this.#requireEmbedder();
     const startedAt = Date.now();
     const meta = this.#store.getMeta();
     if (
       meta === null ||
+      meta.syncedThrough === null ||
       !this.#store.isCompatible(
         brainId,
         indexModelId(this.#embedder.id),
         this.#embedder.dimensions,
       )
     ) {
-      return this.rebuild(brainId, onProgress);
+      return this.#rebuild(brainId, onProgress, startedAt);
     }
-    if (meta.syncedThrough === null) return this.rebuild(brainId, onProgress);
 
-    const watermark = watermarkAt(startedAt);
     onProgress({ phase: "enumerate", done: 0, total: 0, message: "reading changes" });
     const logs = await this.#api.brains.allModifications(brainId, {
       since: meta.syncedThrough,
@@ -239,50 +368,133 @@ export class SemanticIndexer {
 
     // A renamed tag or type sits in the document of every thought that carries
     // it, and the log names only the tag or type itself. Its graph lists the
-    // carriers as children.
-    const graphs = await this.#graphs(
+    // carriers as children. When that graph is not read the carriers are not
+    // known: the renamed thought stands in `unread`, the watermark stays, and
+    // the next sync reads its rename again.
+    const reads = new Map<string, GraphRead>();
+    await this.#graphs(
       brainId,
       [...renamed].filter((id) => touched.has(id)),
+      reads,
     );
-    for (const graph of graphs.values()) {
-      if (!CARRIED_KINDS.has(graph.thought.kind)) continue;
-      for (const carrier of graph.children) {
+    for (const read of reads.values()) {
+      if (!("graph" in read) || !CARRIED_KINDS.has(read.graph.thought.kind)) continue;
+      for (const carrier of read.graph.children) {
         if (!deleted.has(carrier.id)) touched.add(carrier.id);
       }
+    }
+    await this.#graphs(
+      brainId,
+      [...touched].filter((id) => !reads.has(id)),
+      reads,
+    );
+
+    const { thoughts, gone, unread } = await this.#collect(
+      brainId,
+      reads,
+      noteStates(logs),
+      onProgress,
+    );
+    const done = (
+      written: { indexed: number; kindUpdated: number; skipped: number },
+      removed: number,
+    ): IndexResult => ({
+      ran: "sync",
+      ...written,
+      removed,
+      asked: reads.size,
+      unread,
+      keptUnreached: 0,
+      elapsedMs: Date.now() - startedAt,
+    });
+
+    // As in a rebuild: no thought read, nothing written. The deletions the
+    // log names are read again by the next sync, the watermark being where
+    // it was.
+    if (unread.length === reads.size && unread.length > 0) {
+      onProgress({ phase: "done", done: 0, total: reads.size, message: "no thought was read" });
+      return done(NOTHING_WRITTEN, 0);
     }
 
     // Only what was indexed counts as removed: the overlap reads a deletion
     // twice, and a thought created and deleted between two runs never got in.
+    // A row goes on the log's word that its thought was deleted, or on a read
+    // that said the thought is gone. Never on a read that failed.
     const known = this.#store.contentHashes();
-    const gone = [...deleted].filter((id) => known.has(id));
-    this.#store.remove(gone);
-    const result = await this.#indexThoughts(brainId, [...touched], onProgress, graphs);
-    this.#store.setSyncedThrough(watermark);
+    const leaving = [...new Set([...deleted, ...gone])].filter((id) => known.has(id));
+    this.#store.remove(leaving);
+    const written = await this.#write(thoughts, onProgress);
+    if (unread.length === 0) this.#store.setSyncedThrough(watermarkAt(startedAt));
 
     onProgress({
       phase: "done",
-      done: result.indexed,
-      total: touched.size,
-      message: "synced",
+      done: written.indexed,
+      total: reads.size,
+      message: unread.length === 0 ? "synced" : `${unread.length} thoughts not read`,
     });
-    return { ...result, removed: gone.length, elapsedMs: Date.now() - startedAt };
+    return done(written, leaving.length);
   }
 
-  /** The graphs of the given thoughts, minus any that could not be read. */
-  async #graphs(brainId: string, ids: readonly string[]): Promise<Map<string, CleanGraph>> {
+  /**
+   * Refuses a run that could encode nothing, before it reads a brain to find
+   * that out at its first document. Without the optional package a rebuild
+   * read the whole log and walked the whole graph first: 13 requests on a
+   * brain of one thought, minutes on a real one.
+   */
+  async #requireEmbedder(): Promise<void> {
+    if ((await this.#embedder.isAvailable?.()) === false) throw new EmbedderUnavailableError();
+  }
+
+  /**
+   * One thought's graph, or what stands in its place.
+   *
+   * The graph of an identifier no thought has is a 403 in the API's catch-all
+   * words, which a request that failed for a reason of its own gets too
+   * (docs/api-map.md, L3). The thought's own read tells the two apart: it is a
+   * 404 only when the thought is not there. So a thought is `gone` on that 404
+   * alone, and any other failure leaves it `unread`.
+   *
+   * Throws the failure that stops the run.
+   */
+  async #graph(brainId: string, id: string): Promise<GraphRead> {
+    try {
+      return { graph: await this.#api.thoughts.getGraph(brainId, id) };
+    } catch (error) {
+      if (stopsTheRun(error)) throw error;
+      const unread: GraphRead = { unread: { id, name: null, read: "graph", error } };
+      if (!(error instanceof TheBrainError)) return unread;
+      // Refused before any request: what is no identifier names no thought.
+      if (error.kind === "invalid_uuid") return { gone: true };
+      if (error.kind !== "forbidden") return unread;
+      try {
+        const thought = await this.#api.thoughts.get(brainId, id);
+        // It is there, and its graph was refused: for a moment after it is
+        // deleted, or for a reason the answer does not give.
+        return { unread: { id, name: thought.name, read: "graph", error } };
+      } catch (second) {
+        if (stopsTheRun(second)) throw second;
+        if (second instanceof TheBrainError && second.kind === "not_found") return { gone: true };
+        return { unread: { id, name: null, read: "thought", error: second } };
+      }
+    }
+  }
+
+  /** Reads the graphs of `ids` into `reads`, a bounded number at a time. */
+  async #graphs(
+    brainId: string,
+    ids: readonly string[],
+    reads: Map<string, GraphRead>,
+  ): Promise<void> {
     const fetched = await mapWithConcurrency(ids, this.#concurrency, (id) =>
-      this.#api.thoughts.getGraph(brainId, id).catch(() => null),
+      this.#graph(brainId, id),
     );
-    const graphs = new Map<string, CleanGraph>();
-    fetched.forEach((graph, i) => {
-      if (graph !== null) graphs.set(ids[i]!, graph);
-    });
-    return graphs;
+    fetched.forEach((read, i) => reads.set(ids[i]!, read));
   }
 
   /**
    * Every thought reachable from the home thought or from a logged thought,
-   * with its graph, so indexing can reuse what the walk already fetched.
+   * with what the read of its graph came to, so indexing can reuse what the
+   * walk already fetched.
    *
    * The log alone undercounts. Measured on a live TheBrain 15 against
    * `statistics.thoughts`: one brain with 56 thoughts had no `created` events at
@@ -290,55 +502,58 @@ export class SemanticIndexer {
    * home thought found 56, 46 and 184 (types and tags included, unlinked
    * thoughts excluded). Seeding from the log as well keeps islands that are
    * cut off from home but were created here.
+   *
+   * The brain's own read is not caught. It names the home thought, and a brain
+   * the log does not list is walked from there alone: with that read's failure
+   * taken for "no home thought", such a brain was walked nowhere, reported as
+   * built, and lost every row it had.
    */
-  async #walk(brainId: string, logged: ReadonlySet<string>): Promise<Map<string, CleanGraph>> {
-    const home = await this.#api.brains
-      .get(brainId)
-      .then((b) => b.homeThoughtId)
-      .catch(() => null);
+  async #walk(brainId: string, logged: ReadonlySet<string>): Promise<Map<string, GraphRead>> {
+    const home = (await this.#api.brains.get(brainId)).homeThoughtId;
 
-    const graphs = new Map<string, CleanGraph>();
+    const reads = new Map<string, GraphRead>();
     const queued = new Set<string>(logged);
-    if (home !== null) queued.add(home);
+    if (typeof home === "string" && home !== "") queued.add(home);
 
     let frontier = [...queued];
     while (frontier.length > 0) {
       const level = frontier;
-      const fetched = await mapWithConcurrency(level, this.#concurrency, (id) =>
-        this.#api.thoughts.getGraph(brainId, id).catch(() => null),
-      );
+      await this.#graphs(brainId, level, reads);
       const next: string[] = [];
-      fetched.forEach((graph, i) => {
-        if (graph === null) return;
-        graphs.set(level[i]!, graph);
-        for (const neighbour of neighbourIds(graph)) {
+      for (const id of level) {
+        const read = reads.get(id)!;
+        // A graph that was not read lists nothing: what is next to it is
+        // reached some other way or not at all, and the rebuild says so.
+        if (!("graph" in read)) continue;
+        for (const neighbour of neighbourIds(read.graph)) {
           if (queued.has(neighbour)) continue;
           queued.add(neighbour);
           next.push(neighbour);
         }
-      });
+      }
       frontier = next;
     }
-    return graphs;
+    return reads;
   }
 
-  async #indexThoughts(
+  /**
+   * Turns the graphs a run has read into the thoughts to index, reading each
+   * one's note where it has one.
+   */
+  async #collect(
     brainId: string,
-    ids: readonly string[],
+    reads: ReadonlyMap<string, GraphRead>,
+    notes: ReadonlyMap<string, boolean>,
     onProgress: (p: IndexProgress) => void,
-    graphs: ReadonlyMap<string, CleanGraph> = new Map(),
-  ): Promise<{ indexed: number; kindUpdated: number; skipped: number }> {
-    if (ids.length === 0) return { indexed: 0, kindUpdated: 0, skipped: 0 };
-
-    const existing = this.#store.contentHashes();
-    const kinds = this.#store.kinds();
+  ): Promise<Collected> {
+    const ids = [...reads.keys()];
     const total = ids.length;
     let fetched = 0;
 
     // The graph returns a thought, its tags and its type in one request —
     // cheaper than fetching them separately.
     const collected = await mapWithConcurrency(ids, this.#concurrency, async (id) => {
-      const item = await this.#collect(brainId, id, graphs.get(id));
+      const item = await this.#thought(brainId, id, reads.get(id)!, notes);
       fetched += 1;
       if (fetched % 50 === 0 || fetched === total) {
         onProgress({
@@ -351,6 +566,72 @@ export class SemanticIndexer {
       return item;
     });
 
+    const out: Collected = { thoughts: [], gone: [], unread: [] };
+    collected.forEach((item, i) => {
+      if ("thought" in item) out.thoughts.push(item.thought);
+      else if ("gone" in item) out.gone.push(ids[i]!);
+      else out.unread.push(item.unread);
+    });
+    return out;
+  }
+
+  async #thought(
+    brainId: string,
+    thoughtId: string,
+    read: GraphRead,
+    notes: ReadonlyMap<string, boolean>,
+  ): Promise<ThoughtRead> {
+    if (!("graph" in read)) return read;
+    const graph = read.graph;
+    // A note shows up as an attachment flagged `isNotes`, so the graph we
+    // already fetched says whether reading the note is worth a request. The
+    // modification log cannot answer this for every thought: its note events
+    // are keyed by the attachment, and old ones fall outside whatever window
+    // we asked for.
+    //
+    // Where the log this run read does say, it is taken over the graph. For a
+    // moment after a note is changed the graph lists no Notes attachment, at
+    // one read within 0.2 s of the change (docs/api-map.md, L32), and for a
+    // moment after a note is deleted it still lists one, whose read is a 403.
+    // Read then, a thought with a note was indexed as one without.
+    const hasNote = notes.get(thoughtId) ?? graph.attachments.some((a) => a.isNotes);
+    let note = "";
+    if (hasNote) {
+      try {
+        note = await this.#api.notes.get(brainId, thoughtId);
+      } catch (error) {
+        if (stopsTheRun(error)) throw error;
+        // Not `""`: a thought with no note is a 200 from this read, so a
+        // failure is never that answer. Indexed without the note it has, the
+        // thought would lose the text it is found by, and its row would be
+        // replaced with one built from the name.
+        return { unread: { id: thoughtId, name: graph.thought.name, read: "note", error } };
+      }
+    }
+    return {
+      thought: {
+        id: graph.thought.id,
+        name: graph.thought.name ?? "",
+        kind: graph.thought.kind,
+        aliases: aliasesOf(graph.thought),
+        label: graph.thought.label,
+        typeName: graph.type?.name ?? null,
+        tagNames: graph.tags.map((t) => t.name ?? "").filter((n) => n.length > 0),
+        note,
+      },
+    };
+  }
+
+  /** Encodes what changed and writes it. No request to TheBrain is made here. */
+  async #write(
+    thoughts: readonly IndexableThought[],
+    onProgress: (p: IndexProgress) => void,
+  ): Promise<{ indexed: number; kindUpdated: number; skipped: number }> {
+    if (thoughts.length === 0) return { ...NOTHING_WRITTEN };
+
+    const existing = this.#store.contentHashes();
+    const kinds = this.#store.kinds();
+
     const pending: Array<{ thought: IndexableThought; doc: string; hash: string }> = [];
     // The kind is stored beside the document and is no part of it, so a row
     // can have the right hash and the wrong kind. An ordinary thought turned
@@ -358,8 +639,7 @@ export class SemanticIndexer {
     // sync and by a rebuild alike, and a default search went on returning it.
     const rekinded = new Map<string, number>();
     let skipped = 0;
-    for (const item of collected) {
-      if (item === null) continue;
+    for (const item of thoughts) {
       if (SKIP_KINDS.has(item.kind)) continue;
       const doc = buildDocument(item);
       const hash = documentHash(doc);
@@ -395,38 +675,9 @@ export class SemanticIndexer {
 
     return { indexed, kindUpdated: rekinded.size, skipped };
   }
-
-  async #collect(
-    brainId: string,
-    thoughtId: string,
-    cached?: CleanGraph,
-  ): Promise<IndexableThought | null> {
-    try {
-      const graph = cached ?? (await this.#api.thoughts.getGraph(brainId, thoughtId));
-      // A note shows up as an attachment flagged `isNotes`, so the graph we
-      // already fetched says whether reading the note is worth a request. The
-      // modification log cannot answer this: its note events are keyed by the
-      // attachment, and old ones fall outside whatever window we asked for.
-      const hasNote = graph.attachments.some((a) => a.isNotes);
-      const note = hasNote
-        ? await this.#api.notes.get(brainId, thoughtId).catch(() => "")
-        : "";
-      return {
-        id: graph.thought.id,
-        name: graph.thought.name ?? "",
-        kind: graph.thought.kind,
-        aliases: aliasesOf(graph.thought),
-        label: graph.thought.label,
-        typeName: graph.type?.name ?? null,
-        tagNames: graph.tags.map((t) => t.name ?? "").filter((n) => n.length > 0),
-        note,
-      };
-    } catch {
-      // The thought may have vanished between reading the log and loading it.
-      return null;
-    }
-  }
 }
+
+const NOTHING_WRITTEN = { indexed: 0, kindUpdated: 0, skipped: 0 } as const;
 
 /** Where the next sync starts reading for a run that began at `startedAt`. */
 function watermarkAt(startedAt: number): string {
@@ -501,6 +752,29 @@ export function neighbourIds(graph: CleanGraph): string[] {
   return ids;
 }
 
+/**
+ * What the given log says of each thought's note: true when the latest note
+ * entry about the thought is its note written or changed, false when it is
+ * the note deleted. A thought the log has no note entry for is not in the
+ * map, and its graph is what says.
+ *
+ * The latest by `logTime`, not by position: a run of changes is one `803`
+ * that moves, and it carries the time of the last change.
+ */
+export function noteStates(logs: readonly ModificationLogDto[]): Map<string, boolean> {
+  const latest = new Map<string, ModificationLogDto>();
+  for (const log of logs) {
+    if (!isNoteMod(log.modType) || log.extraAType !== EntityType.Thought) continue;
+    const seen = latest.get(log.extraAId);
+    if (seen === undefined || compareLogTime(logTime(log), logTime(seen)) > 0) {
+      latest.set(log.extraAId, log);
+    }
+  }
+  return new Map(
+    [...latest].map(([id, log]) => [id, log.modType !== ModType.NoteDeleted] as const),
+  );
+}
+
 /** Note lifecycle events: created, changed, deleted. */
 export function isNoteMod(modType: number): boolean {
   return (
@@ -510,7 +784,14 @@ export function isNoteMod(modType: number): boolean {
   );
 }
 
-/** Bounded-concurrency map: the API is fast, but there is no need to flood it. */
+/**
+ * Bounded-concurrency map: the API is fast, but there is no need to flood it.
+ *
+ * A worker that throws ends the map: it rejects with that error, and no item
+ * is started after it. The other runners used to go on to the end of the
+ * list with nobody to read what they fetched, which against a TheBrain that
+ * is not answering is a request per item, each waiting out its timeout.
+ */
 export async function mapWithConcurrency<T, R>(
   items: readonly T[],
   limit: number,
@@ -518,12 +799,19 @@ export async function mapWithConcurrency<T, R>(
 ): Promise<R[]> {
   const results = new Array<R>(items.length);
   let cursor = 0;
+  let failed = false;
   const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
     for (;;) {
+      if (failed) return;
       const index = cursor;
       cursor += 1;
       if (index >= items.length) return;
-      results[index] = await worker(items[index]!, index);
+      try {
+        results[index] = await worker(items[index]!, index);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
     }
   });
   await Promise.all(runners);
