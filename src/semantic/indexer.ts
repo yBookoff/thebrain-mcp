@@ -110,6 +110,11 @@ export interface IndexerOptions {
   concurrency?: number;
   /** How many documents to encode per batch before writing to storage. */
   embedBatch?: number;
+  /**
+   * How long a run waits for another run that holds the index, in
+   * milliseconds, before it is refused. The store's `RUN_WAIT_MS` by default.
+   */
+  runWaitMs?: number;
 }
 
 const DEFAULT_CONCURRENCY = 12;
@@ -173,6 +178,7 @@ export class SemanticIndexer {
   readonly #embedder: Embedder;
   readonly #concurrency: number;
   readonly #embedBatch: number;
+  readonly #runWaitMs: number | undefined;
 
   constructor(
     api: TheBrainApi,
@@ -185,6 +191,7 @@ export class SemanticIndexer {
     this.#embedder = embedder;
     this.#concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
     this.#embedBatch = options.embedBatch ?? DEFAULT_EMBED_BATCH;
+    this.#runWaitMs = options.runWaitMs;
   }
 
   status(brainId: string): IndexStatus {
@@ -217,13 +224,52 @@ export class SemanticIndexer {
    * `STOPS_THE_RUN`; the log's and the brain's own reads always do). The
    * index is then as it was. A thought that could not be read is returned in
    * `unread`, and the build is not finished: no watermark is set.
+   *
+   * Throws `IndexRunningError` when another run holds the index and is not
+   * done within the wait (`#alone`). Nothing was read or written then.
    */
   async rebuild(
     brainId: string,
     onProgress: (p: IndexProgress) => void = (): void => undefined,
   ): Promise<IndexResult> {
     await this.#requireEmbedder();
-    return this.#rebuild(brainId, onProgress, Date.now());
+    return this.#alone(() => this.#rebuild(brainId, onProgress, Date.now()));
+  }
+
+  /**
+   * One run at a time over an index, whichever process it is in.
+   *
+   * A run looks at the index when it starts, reads TheBrain for seconds or
+   * minutes, and writes what it decided by that look. Every client session
+   * runs a server of its own over the same file, so another run can start and
+   * finish in between. Measured with real processes, before runs were kept
+   * apart (ARCHITECTURE.md, §8):
+   *
+   * - A sync that ran inside a rebuild's reads wrote the new name of a
+   *   thought renamed meanwhile; the rebuild then wrote the name it had read
+   *   earlier over it. It also put the watermark back to before its own
+   *   start, so the next sync read the rename again. That much mended itself.
+   * - When the rebuild had left one thought unread it moved no watermark, and
+   *   the one the sync had set stayed, past the rename, over the old row.
+   * - With a second sync that started before the rebuild wrote and ended
+   *   after, all three runs read everything and reported success, and the
+   *   same row was left old with the watermark past its change. No sync goes
+   *   back for such a row.
+   *
+   * So the run is held from before its first look at the index to its last
+   * write. A second run waits, since the one in its way is most often a sync
+   * of a second or two, and reads the index as that run left it. One that is
+   * still waiting after `runWaitMs` is refused: it read nothing, so there is
+   * nothing of it to undo. The run's own start, which its watermark is taken
+   * from, is counted from when it got the index.
+   */
+  async #alone<T>(run: () => Promise<T>): Promise<T> {
+    const release = await this.#store.claim(this.#runWaitMs);
+    try {
+      return await run();
+    } finally {
+      release();
+    }
   }
 
   async #rebuild(
@@ -264,21 +310,20 @@ export class SemanticIndexer {
       return done(NOTHING_WRITTEN, 0, 0);
     }
 
-    if (
-      !this.#store.isCompatible(
-        brainId,
-        indexModelId(this.#embedder.id),
-        this.#embedder.dimensions,
-      )
-    ) {
-      this.#store.clear();
-    }
-    this.#store.setMeta({
+    // An index of another model goes with its metadata and its watermark,
+    // and the new build's metadata comes in, all in one transaction: a
+    // process killed between them left the old watermark over no rows.
+    const meta = {
       brainId,
       model: indexModelId(this.#embedder.id),
       dimensions: this.#embedder.dimensions,
       syncedThrough: null,
-    });
+    };
+    if (this.#store.isCompatible(brainId, meta.model, meta.dimensions)) {
+      this.#store.setMeta(meta);
+    } else {
+      this.#store.startOver(meta);
+    }
 
     // A row goes when its thought was read as gone, or when the walk did not
     // reach it and was whole. With a graph not read the walk is not whole:
@@ -328,6 +373,10 @@ export class SemanticIndexer {
     onProgress: (p: IndexProgress) => void = (): void => undefined,
   ): Promise<IndexResult> {
     await this.#requireEmbedder();
+    return this.#alone(() => this.#sync(brainId, onProgress));
+  }
+
+  async #sync(brainId: string, onProgress: (p: IndexProgress) => void): Promise<IndexResult> {
     const startedAt = Date.now();
     const meta = this.#store.getMeta();
     if (

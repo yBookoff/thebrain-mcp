@@ -2027,6 +2027,161 @@ Measured: **20,000 vectors × 384 dimensions scans in under 200 ms** — a test
 enforces it. Real brains are far smaller than that. An ANN index would add build
 complexity and a dependency to save time nobody is spending.
 
+### One index file, several server processes
+
+> **Correction.** Every client session starts a server process of its own,
+> and they all open the one index file of a brain. The store was written as
+> if it had the file to itself. Measured with two and three real server
+> processes over one scratch data directory: the server as `src/index.ts`
+> starts it, over stdio, with a deterministic embedder in place of the
+> package, which was not installed, and a local stand-in for TheBrain, so
+> that the brain could be changed between calls and one session's requests
+> held back. Node 22.15, SQLite 3.49.1, the journal in WAL mode.
+>
+> - **A process ranked by the rows it had loaded.** A built, B searched, and
+>   A's sync then added two thoughts, renamed one and removed one. B's status
+>   said "thoughts indexed: 7" and B's search ranked its six old rows: no hit
+>   for a thought that was new, the renamed one found by its old text and
+>   listed under its new name at 1.000, the removed one left out only by the
+>   read behind every hit. So it stayed three seconds later, and after a sync
+>   of B's own that had nothing to encode. B read the file again when B
+>   itself wrote a row, or was started again.
+> - **A process that searched while another built the first index kept the
+>   first batch**: 64 rows of 2,001, under a status of "built: yes, usable:
+>   yes, thoughts indexed: 2001".
+> - **Of two runs started together, one answered `database is locked`**,
+>   SQLite's words and the whole `isError` result: in 6 pairs of 6 with the
+>   writes back to back (3,000 thoughts renamed, both sync), and in 5 of 7
+>   with 20 ms of encoding ahead of each batch. A status asked for at the
+>   moment another process was making the file got the same answer.
+> - **A sync that ran inside a rebuild's reads was written over.** The
+>   rebuild had read a thought; the thought was renamed; another process's
+>   sync wrote the new name; the rebuild then wrote the name it had read over
+>   it, and put the watermark back to before its own start, so that the next
+>   sync read the rename again. That much mended itself. When the rebuild had
+>   left one other thought unread it moved no watermark: the one the sync had
+>   set stayed, a second past the rename, the sync having started eleven
+>   seconds after it, and the next sync encoded nothing. With a third
+>   process's sync started before the rebuild wrote and ended after it, all
+>   three runs read everything and answered "Index built" and "Index
+>   refreshed", and the row was left old under a watermark past its change. A
+>   new session's search for the new name scored that row 0.516.
+> - **A writer killed at its tenth batch of 32 left nothing that reads
+>   wrong.** A first build read as "built: no — a build was started and did
+>   not finish", 576 rows; a rebuild over a built index left its 2,001 rows,
+>   576 of them new, under the old watermark, and the next sync wrote the
+>   rest; a rebuild by another model read as not finished for that model and
+>   as no index for the first. `PRAGMA integrity_check` was `ok` each time.
+>   Read from the code and not reached by a kill: `clear()` deleted the rows
+>   and the metadata as two statements, and the new metadata went in as
+>   three more. Stopped after the first, the file held the old model's
+>   metadata, watermark included, over no rows.
+
+**The rows in memory follow the file.** A search asks SQLite for `PRAGMA
+data_version` before it ranks, and reads the rows again when the number has
+changed. It is SQLite's own count of the commits other connections have made,
+another process's among them; the store's own writes drop the rows
+themselves, as before. The candidates, each timed over 20,000 calls against a
+file of 20,000 rows that a second connection had open:
+
+| Asked with each search | Median | Moves when another process commits |
+|---|---|---|
+| `PRAGMA data_version` | 0.9 µs, 1.3 µs prepared each time | yes; for a checkpoint with no write as well |
+| a counter row of the store's own | 1.0 µs | only where every writer adds to it, which a server of an older version does not |
+| `stat` of the file and of its `-wal` | 1.8 µs | the file: no, a commit goes to the journal beside it; the `-wal`: its time, its size only while the journal grows, and it is gone when the last connection closes |
+
+Against that, the scan of 20,000 vectors takes 6.0 ms as a bare loop and 7.4
+ms through the store, before and after. The count is asked for ahead of the
+rows: a commit that lands between the two is read once more for nothing,
+where the other way round it would never be read. What it costs is the
+search after another process's write, which reads the rows again: 41 ms more
+for 20,000. During another session's rebuild that is every search, a batch
+of rows having been committed since the last one.
+
+**A write is all in the file or not there.** Each write of the store is one
+`BEGIN IMMEDIATE` transaction, and an index of another model is replaced in
+one, rows, metadata and watermark together (`startOver`). So a process killed
+part of the way leaves the rows of the batches it had finished and nothing of
+the one it was in. What a killed run leaves is then one of two things: an
+index with no watermark, which status calls a build that did not finish, or
+the index as it was with some rows newer, under the watermark it had, from
+which the next sync reads on. Never a watermark over rows that are not there:
+the watermark is the last thing a run writes.
+
+**A statement waits for another connection's write**, two seconds
+(`BUSY_TIMEOUT_MS`); SQLite's default is not to wait at all. A reader is not
+kept waiting by a writer, and sees the rows as they were before the write
+began. No write is longer than a batch, a few milliseconds, so the two
+seconds are for a process that hangs with a write open. Waited out, it is
+`IndexBusyError`, whose message is a sentence: "Another server process had
+the semantic index of this brain locked, and had not let go of it after 2 s.
+Every client session runs a server process of its own, and they share one
+index file. This write to the index was not made." The wait blocks the
+process, which is why it is not longer. A look that finds the file half made
+waits the same way.
+
+**One run at a time over an index.** A rebuild and a sync hold the index
+from before their first look at it to their last write (`VectorStore.claim`,
+taken in `SemanticIndexer`). The other ways were weighed against the three
+runs above, and neither was built. Letting both runs write needs every run's
+writes in one transaction at its end, decided against the index as it then
+is, and a rule for the watermark when it is not the one the run started
+from; a run would still write an older reading over a newer one, and count
+on the next sync to read it again. Refusing a run whose index changed under
+it throws away minutes of reading, and a rebuild would lose to every sync
+that ends inside it. With one run at a time the three cases cannot arise,
+and what a run does is what it did with the file to itself, which is what
+every test of it was written against.
+
+- **A second run waits ten seconds** (`RUN_WAIT_MS`), asking every 50 ms,
+  with the process free meanwhile. The run in its way is most often a sync
+  after an ingest, a tenth of a second to a few seconds. It then reads the
+  index as that run left it, and its own start, which its watermark is taken
+  from, is counted from when it got the index. Of thirteen pairs of runs
+  started together all 26 got through, the second of each pair 0.3 to 0.8 s
+  behind the first and encoding nothing.
+- **Still waiting after that, it is refused**, as `isError`: "Another rebuild
+  or sync of this brain's semantic index is running, and had not finished
+  after 10 s of waiting. Every client session runs a server process of its
+  own, and they share one index file, which one run writes at a time. This
+  sync read nothing and wrote nothing. brain_search ranks by the index as it
+  stands meanwhile. Call this tool with action=sync again once that run is
+  done." It read nothing, so there is nothing of it to undo. That is what a
+  sync started inside another session's rebuild now gets, and the sync after
+  the rebuild reads from the rebuild's watermark, which is before anything
+  the rebuild did not see.
+- **What is held is a lock on a file beside the index**, `<index>.lock`,
+  taken through SQLite (`BEGIN EXCLUSIVE`, the journal in memory) because
+  that is the lock Node has without a native module. The operating system
+  drops it when the process dies: after a `SIGKILL` of the holder the next
+  run started at once. Nothing is written to that file. The first run makes
+  it and it stays, empty; a look makes none. A refused attempt costs 4 µs.
+- **Reads and single writes do not ask for it.** A search, a status and
+  `brain_list` are answered while a run holds the index, and so is the row
+  `brain_delete_thought` removes. A rebuild that had read that thought
+  before it was deleted writes the row back, with a watermark before the
+  deletion, so the next sync takes it out; a search meanwhile leaves the hit
+  out by the read behind every hit.
+
+**What is not guaranteed.**
+
+- A server from before this change takes no claim and does not wait. Next to
+  a current one it is the one that fails: `database is locked` 7 times of 7,
+  the current server through each time. Two of them are as they were.
+- A run that never ends, on an embedder that hangs, holds the index until
+  its process does: every other session's rebuild and sync is refused, with
+  the sentence above, and searches go on.
+- During a run's writes a search ranks by the rows written so far: a mix of
+  old and new, each a row some run read whole, and for a first build the
+  part of the brain that is in yet, which status calls not finished.
+- Sessions with different models take the index from each other: each finds
+  it "built with a different model" and is told to rebuild.
+- A run that stops before its first write leaves the empty lock file, and
+  the data directory if it made it.
+- `took` in a result is the run's own time, without the wait for the index.
+- None of this was run on Windows or over a network file system, where
+  SQLite's locks are another matter.
+
 ### Quantization: q8
 
 `multilingual-e5-small` through transformers.js. Benchmarked over 48 thoughts and

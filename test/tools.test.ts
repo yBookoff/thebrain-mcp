@@ -2,6 +2,11 @@
  * Tools end to end: a real MCP client talking to the registered handlers over
  * an in-memory transport, with only HTTP faked.
  */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+
 import { describe, expect, it, vi } from "vitest";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -3756,6 +3761,93 @@ describe("brain_index and a brain it has not been shown", () => {
       store.setMeta({ ...meta, model: "other@v2#doc3", syncedThrough: "2026-10-10T20:00:00.000Z" });
       store.upsert([row]);
       expect(await cell(store)).toBe("no index");
+    });
+  });
+
+  describe("an index another server process is at", () => {
+    // Every client session runs a server of its own over the same index
+    // file. Of two runs started together one answered `database is locked`,
+    // SQLite's words and the whole result, in 11 pairs of 13 with two real
+    // processes (ARCHITECTURE §8).
+    const fake = new FakeEmbedder();
+    const built = {
+      brainId: BRAIN,
+      model: indexModelId(fake.id),
+      dimensions: fake.dimensions,
+      syncedThrough: "2026-10-10T20:00:00.000Z",
+    };
+    /** A server whose runs wait 30 ms for another's. */
+    const impatient = (store: VectorStore) => (api: TheBrainApi) => ({
+      indexer: () => new SemanticIndexer(api, store, fake, { runWaitMs: 30 }),
+    });
+    const SHARED =
+      "Every client session runs a server process of its own, and they share one index file";
+
+    it.each(["rebuild", "sync"] as const)(
+      "a %s while another run holds the index says so, having read nothing and written nothing",
+      async (action) => {
+        const store = new VectorStore(":memory:");
+        store.setMeta(built);
+        const release = await store.claim();
+        const { call, calls } = await connect(brain, impatient(store));
+
+        const result = await call("brain_index", { brainId: BRAIN, action });
+        expect(result.isError).toBe(true);
+        expect(result.text).toBe(
+          "Another rebuild or sync of this brain's semantic index is running, and had not " +
+            `finished after 0.03 s of waiting. ${SHARED}, which one run writes at a time. ` +
+            `This ${action} read nothing and wrote nothing. brain_search ranks by the index ` +
+            `as it stands meanwhile. Call this tool with action=${action} again once that ` +
+            "run is done.",
+        );
+        // The brain was asked for, as for every action, and nothing after it.
+        expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([BRAINS]);
+        expect(store.getMeta()).toEqual(built);
+        expect(store.size()).toBe(0);
+
+        // A look is not a run: status is answered while the index is held.
+        const looked = await call("brain_index", { brainId: BRAIN, action: "status" });
+        expect(looked.isError).toBe(false);
+        expect(looked.text).toContain("- built: yes\n");
+
+        release();
+        const again = await call("brain_index", { brainId: BRAIN, action });
+        expect(again.isError).toBe(false);
+        expect(again.text).toMatch(/^## Index (built|refreshed)\n/);
+      },
+    );
+
+    it("a write that waits out another process's lock on the file is told as that, not as `database is locked`", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "thebrain-mcp-tools-"));
+      const path = join(dir, `index-${BRAIN}.sqlite`);
+      const store = new VectorStore(path, { busyTimeoutMs: 30 });
+      store.setMeta(built);
+      // Some other process, part of the way through a write of its own.
+      const writing = new DatabaseSync(path);
+      writing.exec("BEGIN IMMEDIATE");
+      try {
+        const { call } = await connect(brain, impatient(store));
+        const result = await call("brain_index", { brainId: BRAIN, action: "rebuild" });
+        expect(result.isError).toBe(true);
+        expect(result.text).toBe(
+          "Another server process had the semantic index of this brain locked, and had not " +
+            `let go of it after 0.03 s. ${SHARED}. This write to the index was not made. ` +
+            "The rebuild stopped there: what it had already written stays in the index, and " +
+            "the index is not marked as synced any further than it was. Call this tool with " +
+            "action=rebuild again: it encodes only what is still missing.",
+        );
+        expect(store.size()).toBe(0);
+
+        // The run gave the index back when it stopped: the next one is not kept waiting.
+        writing.exec("ROLLBACK");
+        const again = await call("brain_index", { brainId: BRAIN, action: "rebuild" });
+        expect(again.isError).toBe(false);
+        expect(again.text).toContain("## Index built\n- thoughts encoded: 1\n");
+      } finally {
+        writing.close();
+        store.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 });

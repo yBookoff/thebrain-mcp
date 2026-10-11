@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TheBrainError, type ApiErrorKind, type TheBrainApi } from "../src/api/index.js";
 import type { ModificationLogDto } from "../src/api/types.js";
@@ -16,7 +20,7 @@ import {
   SemanticSearch,
   dedupeVariants,
 } from "../src/semantic/search.js";
-import { VectorStore, normalize } from "../src/semantic/store.js";
+import { IndexRunningError, VectorStore, normalize } from "../src/semantic/store.js";
 
 const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
 
@@ -2538,5 +2542,242 @@ describe("a read that fails while the index is built or refreshed", () => {
       expect(embedder.documents.at(-1)).toBe("borscht recipe\nbeetroot soup");
       store.close();
     });
+  });
+});
+
+describe("two server processes over one index", () => {
+  // Every client session runs a server of its own, and they share the index
+  // file of a brain. A session here is an indexer with its own store over one
+  // file and its own API over one brain. What real processes did before runs
+  // were kept apart is in ARCHITECTURE.md §8: a rebuild wrote the name it had
+  // read over the one a sync had written since, and with a thought unread, or
+  // with a third run, the watermark was left past that change for good.
+  let dir: string;
+  const stores: VectorStore[] = [];
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "thebrain-mcp-runs-"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    for (const s of stores.splice(0)) s.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Where the index was synced through: after the fixtures, long before now. */
+  const THROUGH = "2026-08-20T00:00:00.000Z";
+  /** A log time as the log writes it: UTC, no offset. */
+  const stamp = (ms: number): string => new Date(ms).toISOString().slice(0, -1);
+  const boom = (): TheBrainError =>
+    new TheBrainError("server", "Internal Server Error", {
+      status: 500,
+      method: "GET",
+      path: "/x",
+    });
+
+  /** Three logged thoughts, two with a note: a rebuild asks for notes after every graph. */
+  function brain() {
+    const thoughts = new Map<string, FakeThought>([
+      ["a", { id: "a", name: "Unity", note: "game engine" }],
+      ["b", { id: "b", name: "borscht recipe", note: "beetroot soup" }],
+      ["c", { id: "c", name: "vector databases" }],
+    ]);
+    const logs = [
+      log("a", 101, "2026-08-11T09:00:00"),
+      log("b", 101, "2026-08-11T09:01:00"),
+      log("c", 101, "2026-08-11T09:02:00"),
+      noteLog("a", 801, "2026-08-11T09:03:00"),
+      noteLog("b", 801, "2026-08-11T09:04:00"),
+    ];
+    const rename = (at: string): void => {
+      thoughts.set("a", { id: "a", name: "Unreal", note: "game engine" });
+      logs.push(log("a", 103, at));
+    };
+    return { thoughts, logs, rename };
+  }
+
+  function session(shared: ReturnType<typeof brain>, options: { runWaitMs?: number } = {}) {
+    const fake = fakeApi(shared.thoughts, shared.logs);
+    const store = new VectorStore(join(dir, `index-${BRAIN}.sqlite`));
+    stores.push(store);
+    const embedder = new FakeEmbedder();
+    const indexer = new SemanticIndexer(fake.api, store, embedder, options);
+    /** Every request this session's server has made to TheBrain. */
+    const requests = (): number =>
+      fake.calls.modifications + fake.calls.graph + fake.calls.thought + fake.calls.notes;
+    /**
+     * Keeps this session's reads of notes waiting until `release()`. They come
+     * after the graphs, so a rebuild held here has read every name already.
+     */
+    const hold = (): { reached: Promise<void>; release: () => void } => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let arrive!: () => void;
+      const reached = new Promise<void>((r) => (arrive = r));
+      type Notes = { get(brainId: string, id: string): Promise<string> };
+      const notes = (fake.api as unknown as { notes: Notes }).notes;
+      const read = notes.get;
+      notes.get = async (b, id) => {
+        arrive();
+        await gate;
+        return read(b, id);
+      };
+      return { reached, release };
+    };
+    /** The name in the row of thought `a`. */
+    const indexedName = (): string | undefined =>
+      store.search(new Float32Array(8).fill(1), { limit: 10 }).find((h) => h.thoughtId === "a")
+        ?.name;
+    return { ...fake, store, embedder, indexer, requests, hold, indexedName };
+  }
+
+  /** Two sessions over an index of the brain, built and synced through `THROUGH`. */
+  async function two(options: { runWaitMs?: number } = {}) {
+    const shared = brain();
+    const A = session(shared);
+    const B = session(shared, options);
+    await A.indexer.rebuild(BRAIN);
+    A.store.setSyncedThrough(THROUGH);
+    return { shared, A, B };
+  }
+  const moment = (ms = 120): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  it("a sync that comes while a rebuild is reading waits for it, and reads the index it left", async () => {
+    const { shared, A, B } = await two();
+    const held = A.hold();
+    const order: string[] = [];
+    const rebuild = A.indexer.rebuild(BRAIN).finally(() => order.push("rebuild"));
+    await held.reached;
+    // Renamed after the rebuild read its graph, and stamped now.
+    shared.rename(stamp(Date.now()));
+
+    const sync = B.indexer.sync(BRAIN).finally(() => order.push("sync"));
+    await moment();
+    // It used to run at once, and the rebuild then wrote "Unity" over its row.
+    expect(B.requests()).toBe(0);
+
+    const letGo = Date.now();
+    held.release();
+    expect(await rebuild).toMatchObject({ ran: "rebuild", indexed: 0, skipped: 3, unread: [] });
+    // From the watermark the rebuild left, which is before the rename.
+    expect(await sync).toMatchObject({ ran: "sync", indexed: 1, unread: [] });
+    expect(order).toEqual(["rebuild", "sync"]);
+    expect(B.embedder.documents).toEqual(["Unreal\ngame engine"]);
+    expect(A.indexedName()).toBe("Unreal");
+    // Its start, which its watermark is ten seconds before, is when it got the index.
+    expect(Date.parse(B.store.getMeta()!.syncedThrough!) + 10_000).toBeGreaterThanOrEqual(letGo);
+  });
+
+  it("a rebuild that left a thought unread leaves no old row under a watermark past its change", async () => {
+    // The sync wrote the new name and set its watermark; the rebuild, with a
+    // note unread, wrote the old name back and moved no watermark. Thirty
+    // seconds lie between the rename and the sync, more than the overlap, so
+    // no later sync read the rename again.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const T = Date.parse("2026-10-11T12:00:00.000Z");
+    vi.setSystemTime(T);
+    const { shared, A, B } = await two();
+    const held = A.hold();
+    A.faults.note = (id) => (id === "b" ? boom() : undefined);
+    const rebuild = A.indexer.rebuild(BRAIN);
+    await held.reached;
+    shared.rename(stamp(T + 1_000));
+
+    vi.setSystemTime(T + 30_000);
+    const sync = B.indexer.sync(BRAIN);
+    await moment();
+    held.release();
+    expect((await rebuild).unread.map((u) => u.id)).toEqual(["b"]);
+    expect(await sync).toMatchObject({ ran: "sync", indexed: 1, unread: [] });
+
+    expect(await B.indexer.sync(BRAIN)).toMatchObject({ indexed: 0, unread: [] });
+    expect(B.indexedName()).toBe("Unreal");
+    expect(A.indexedName()).toBe("Unreal");
+  });
+
+  it("a run that is still waiting after its wait is refused, with nothing read and nothing written", async () => {
+    const { shared, A, B } = await two({ runWaitMs: 40 });
+    const held = A.hold();
+    const rebuild = A.indexer.rebuild(BRAIN);
+    await held.reached;
+    shared.rename(stamp(Date.now()));
+
+    for (const run of ["sync", "rebuild"] as const) {
+      const refusal: unknown = await B.indexer[run](BRAIN).catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(IndexRunningError);
+      expect((refusal as IndexRunningError).waitedMs).toBe(40);
+    }
+    expect(B.requests()).toBe(0);
+    expect(B.embedder.calls).toBe(0);
+    expect(B.store.getMeta()!.syncedThrough).toBe(THROUGH);
+    expect(B.indexedName()).toBe("Unity");
+    // A look is not a run, and is answered meanwhile.
+    expect(B.indexer.status(BRAIN)).toMatchObject({ exists: true, size: 3 });
+
+    held.release();
+    await rebuild;
+    expect(await B.indexer.sync(BRAIN)).toMatchObject({ ran: "sync", indexed: 1 });
+    expect(B.indexedName()).toBe("Unreal");
+  });
+
+  it("two rebuilds started together are one after the other, and the second encodes nothing", async () => {
+    const shared = brain();
+    const A = session(shared);
+    const B = session(shared);
+    const [first, second] = await Promise.all([A.indexer.rebuild(BRAIN), B.indexer.rebuild(BRAIN)]);
+    expect(first).toMatchObject({ ran: "rebuild", indexed: 3, skipped: 0 });
+    expect(second).toMatchObject({ ran: "rebuild", indexed: 0, skipped: 3 });
+    expect(B.embedder.calls).toBe(0);
+    expect(B.store.size()).toBe(3);
+  });
+
+  it("a run that a failed read stops gives the index back, and so does one that left a thought unread", async () => {
+    const { A, B } = await two({ runWaitMs: 0 });
+    A.faults.log = boom;
+    await expect(A.indexer.rebuild(BRAIN)).rejects.toMatchObject({ kind: "server" });
+    expect(await B.indexer.sync(BRAIN)).toMatchObject({ ran: "sync", unread: [] });
+
+    delete A.faults.log;
+    A.faults.note = boom;
+    expect((await A.indexer.rebuild(BRAIN)).unread).toHaveLength(2);
+    expect(await B.indexer.rebuild(BRAIN)).toMatchObject({ ran: "rebuild", unread: [] });
+  });
+
+  it("a row removed while a rebuild was reading comes back with the rebuild, and goes with the next sync", async () => {
+    // `brain_delete_thought` removes the row of the thought it deleted, and
+    // that is a single write: it does not wait for a run. The rebuild had
+    // read the thought before, and its watermark is before the deletion.
+    const { shared, A, B } = await two();
+    const held = A.hold();
+    const rebuild = A.indexer.rebuild(BRAIN);
+    await held.reached;
+
+    shared.thoughts.delete("c");
+    shared.logs.push(log("c", 102, stamp(Date.now())));
+    B.store.remove(["c"]);
+    expect(B.store.size()).toBe(2);
+
+    held.release();
+    expect(await rebuild).toMatchObject({ indexed: 1, skipped: 2, unread: [] });
+    expect(B.store.size()).toBe(3);
+    expect(await B.indexer.sync(BRAIN)).toMatchObject({ ran: "sync", removed: 1, unread: [] });
+    expect([...B.store.contentHashes().keys()].sort()).toEqual(["a", "b"]);
+  });
+
+  it("a run that cannot embed is refused before it asks for the index", async () => {
+    const { shared, A } = await two();
+    const release = await A.store.claim();
+    class NoPackage extends FakeEmbedder {
+      async isAvailable(): Promise<boolean> {
+        return false;
+      }
+    }
+    const fake = fakeApi(shared.thoughts, shared.logs);
+    const store = new VectorStore(join(dir, `index-${BRAIN}.sqlite`));
+    stores.push(store);
+    // Not kept waiting for a run it could never make.
+    await expect(
+      new SemanticIndexer(fake.api, store, new NoPackage()).sync(BRAIN),
+    ).rejects.toBeInstanceOf(EmbedderUnavailableError);
+    release();
   });
 });

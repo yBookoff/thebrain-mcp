@@ -26,6 +26,7 @@ import {
   type PhrasingFailure,
   type SearchOutcome,
 } from "../../semantic/search.js";
+import { IndexBusyError, IndexRunningError } from "../../semantic/store.js";
 import type { ServerContext } from "../context.js";
 import {
   bullet,
@@ -443,6 +444,35 @@ function leftUnread(r: IndexResult, after: IndexStatus): string {
     section("Not read", `${lead}${list}${unwalked}`),
     section("What to do", next),
   ]);
+}
+
+/**
+ * What `brain_index` answers when another run has the index and this one
+ * gave up waiting for it. Every client session runs its own server over the
+ * same index file, and a run holds the index from its first look at it to
+ * its last write (`SemanticIndexer`), so this run did nothing at all.
+ */
+function heldByAnotherRun(error: IndexRunningError, action: "rebuild" | "sync"): string {
+  return (
+    `${error.message} This ${action} read nothing and wrote nothing. brain_search ranks by ` +
+    `the index as it stands meanwhile. Call this tool with action=${action} again once that ` +
+    "run is done."
+  );
+}
+
+/**
+ * And when a statement of the run waited out a lock on the index file. No run
+ * holds that: it is a single write of another process, a thought's row
+ * removed after its deletion, or a server from before runs were kept apart.
+ * The run stopped where it was, with its earlier batches written and the
+ * watermark, which is written last, not moved.
+ */
+function stoppedAtLock(error: IndexBusyError, action: "rebuild" | "sync"): string {
+  return (
+    `${error.message} The ${action} stopped there: what it had already written stays in the ` +
+    "index, and the index is not marked as synced any further than it was. Call this tool " +
+    `with action=${action} again: it encodes only what is still missing.`
+  );
 }
 
 export function registerReadTools(server: McpServer, ctx: ServerContext): void {
@@ -905,6 +935,10 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       try {
         result = action === "rebuild" ? await indexer.rebuild(bid) : await indexer.sync(bid);
       } catch (error) {
+        // Not SQLite's own words for either: `database is locked` was the
+        // whole result of one of two runs started together.
+        if (error instanceof IndexRunningError) return fail(heldByAnotherRun(error, action));
+        if (error instanceof IndexBusyError) return fail(stoppedAtLock(error, action));
         // A request that stops a run is a read, and every read of a run comes
         // before its first write: the index is as it was. Said, because the
         // failure's own words are about the request and not about the index.
