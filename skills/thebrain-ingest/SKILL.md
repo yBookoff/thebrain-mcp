@@ -242,6 +242,19 @@ that runs across the tree. Jumps are what make a graph a graph.
 between them already exists, and the call merely renames it. The tool reports this
 under "Links that already existed".
 
+**Two thoughts share one link, and a link has one label.** Give a pair one link
+in a plan. Of two between the same two thoughts only the first is sent; the
+other is listed under "Links not added", its label unwritten. Pick the relation
+before you send: no tool changes a link that is there.
+
+A label given for a link that has another one replaces it, from `brain_link`
+and from a plan alike, and the result quotes both: `label updated: it was "…"
+and is now "…"`. Read that line. If the label it replaced was the person's
+wording, tell them, or put it back with `brain_link` and its `name`. A label
+the link already has is left as it is and reported as `label already "…"`, as
+on a repeat run; so is a tag that is on its thought, counted under "tags
+already attached".
+
 ## Types and tags
 
 Take them from `brain_list_types_and_tags`. Do not invent new ones when a suitable

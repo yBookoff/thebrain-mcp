@@ -4,6 +4,7 @@ import { TheBrainApi } from "../src/api/index.js";
 import {
   LOG_PAGE_SIZE,
   compareLogTime,
+  linkNameAsStored,
   logEntryKey,
   logTime,
   normalizeAliases,
@@ -1012,6 +1013,32 @@ describe("tags", () => {
       expect(writes(calls), what).toEqual([]);
     }
   });
+
+  it("a tag is on a thought when the link they share is the tag's, with the tag at its head", async () => {
+    // What `detachTag` deletes, asked about with one read and no write. A
+    // second attach is a 200 that logs a `402` against the attachment.
+    for (const meaning of [5, 7]) {
+      const { api, calls } = brain({ a: TAG, b: THOUGHT, relation: 1, meaning });
+      await expect(api.links.hasTag(BRAIN, THOUGHT, TAG.toUpperCase())).resolves.toBe(true);
+      expect(sent(calls)).toEqual([`GET /api/links/${BRAIN}/${THOUGHT}/${TAG.toUpperCase()}`]);
+    }
+    // No link at all, and each link that is not this tag on this thought.
+    await expect(brain().api.links.hasTag(BRAIN, THOUGHT, TAG)).resolves.toBe(false);
+    for (const [what, other, link] of [
+      ["the thought's type", TYPE, { a: TYPE, b: THOUGHT, relation: 1, meaning: 2 }],
+      ["a parent", PLAIN, { a: PLAIN, b: THOUGHT, relation: 1, meaning: 1 }],
+      ["a jump to a tag", TAG, { a: THOUGHT, b: TAG, relation: 3, meaning: 1 }],
+      ["a tag made the thought's child", TAG, { a: THOUGHT, b: TAG, relation: 1, meaning: 1 }],
+      ["a thought this one is a tag of", PLAIN, { a: THOUGHT, b: PLAIN, relation: 1, meaning: 5 }],
+    ] as const) {
+      await expect(brain(link).api.links.hasTag(BRAIN, THOUGHT, other), what).resolves.toBe(false);
+    }
+  });
+
+  it("a lookup that fails is not the answer that the tag is not there", async () => {
+    const { api } = apiWith([["GET /api/links", () => 500]]);
+    await expect(api.links.hasTag(BRAIN, THOUGHT, TAG)).rejects.toMatchObject({ kind: "server" });
+  });
 });
 
 describe("a type named as a parent", () => {
@@ -1278,6 +1305,153 @@ describe("a link the API does not make", () => {
     ).resolves.toBe(LINK);
     await expect(api.links.attachTag(BRAIN, THOUGHT, TAG)).resolves.toBe(LINK);
     await expect(api.thoughts.create(BRAIN, { name: "RAG" })).resolves.toBe(LINK);
+  });
+});
+
+describe("the identifier of zeros, sent by a caller", () => {
+  const ZEROS = "00000000-0000-0000-0000-000000000000";
+  const LINK = "99999999-0000-4000-8000-000000000009";
+
+  /** A brain that would answer anything with a 200, were it asked. */
+  const willing = () =>
+    apiWith([
+      ["POST /api/", () => ({ id: LINK })],
+      ["PATCH /api/", () => 200],
+      ["DELETE /api/", () => 200],
+      ["/api/", () => thought(THOUGHT, "RAG")],
+    ]);
+
+  it("is refused before any request, wherever an identifier goes", async () => {
+    // Measured: a create with it for a source or for a type answers 200 and
+    // makes the thought with no link and no type; a note written to it is a
+    // 200 and a note that never reads back. A well-formed UUID, so the check
+    // for a malformed one let it through.
+    const { api, fetchImpl } = willing();
+    const sends: Array<[string, () => Promise<unknown>]> = [
+      ["a brain", () => api.brains.get(ZEROS)],
+      ["a brain's statistics", () => api.brains.statistics(ZEROS)],
+      ["a brain's log", () => api.brains.modifications(ZEROS, { maxLogs: 1 })],
+      ["a brain to open", () => api.app.openBrain(ZEROS)],
+      ["a thought to activate", () => api.app.activateThought(BRAIN, ZEROS)],
+      ["a search's brain", () => api.search.inBrain(ZEROS, "RAG")],
+      ["a thought", () => api.thoughts.get(BRAIN, ZEROS)],
+      ["a thought's brain", () => api.thoughts.get(ZEROS, THOUGHT)],
+      ["a graph", () => api.thoughts.getGraph(BRAIN, ZEROS)],
+      ["a name's brain", () => api.thoughts.findByName(ZEROS, "RAG")],
+      ["a source", () => api.thoughts.create(BRAIN, { name: "RAG", sourceThoughtId: ZEROS })],
+      [
+        "a source to be the parent of",
+        () =>
+          api.thoughts.create(BRAIN, {
+            name: "RAG",
+            sourceThoughtId: ZEROS,
+            relation: Relation.Parent,
+          }),
+      ],
+      ["a new thought's type", () => api.thoughts.create(BRAIN, { name: "RAG", typeId: ZEROS })],
+      [
+        // Ahead of the read of the source it stands beside.
+        "a type beside a source",
+        () => api.thoughts.create(BRAIN, { name: "RAG", sourceThoughtId: THOUGHT, typeId: ZEROS }),
+      ],
+      ["a thought to update", () => api.thoughts.update(BRAIN, ZEROS, { name: "RAG" })],
+      ["a type to set", () => api.thoughts.update(BRAIN, THOUGHT, { typeId: ZEROS })],
+      ["a thought's aliases", () => api.thoughts.changeAliases(BRAIN, ZEROS, { add: ["a"] })],
+      ["a thought to delete", () => api.thoughts.delete(BRAIN, ZEROS)],
+      ["a thought to pin", () => api.thoughts.pin(BRAIN, ZEROS)],
+      ["a thought's history", () => api.thoughts.modifications(BRAIN, ZEROS)],
+      ["a note to read", () => api.notes.get(BRAIN, ZEROS)],
+      ["a note to write", () => api.notes.set(BRAIN, ZEROS, "text")],
+      ["a note to add to", () => api.notes.append(BRAIN, ZEROS, "text")],
+      ["a link", () => api.links.get(BRAIN, ZEROS)],
+      ["a pair's first", () => api.links.between(BRAIN, ZEROS, THOUGHT)],
+      ["a pair's second", () => api.links.between(BRAIN, THOUGHT, ZEROS)],
+      [
+        "a link's source",
+        () => api.links.create(BRAIN, { thoughtIdA: ZEROS, thoughtIdB: THOUGHT, relation: 3 }),
+      ],
+      [
+        "a link's target",
+        () => api.links.create(BRAIN, { thoughtIdA: THOUGHT, thoughtIdB: ZEROS, relation: 1 }),
+      ],
+      ["a link to update", () => api.links.update(BRAIN, ZEROS, { name: "x" })],
+      ["a link to delete", () => api.links.delete(BRAIN, ZEROS)],
+      ["a tag", () => api.links.attachTag(BRAIN, THOUGHT, ZEROS)],
+      ["a thought to tag", () => api.links.attachTag(BRAIN, ZEROS, TAG)],
+      ["a tag to look for", () => api.links.hasTag(BRAIN, THOUGHT, ZEROS)],
+      ["a tag to take off", () => api.links.detachTag(BRAIN, ZEROS, TAG)],
+      ["a parent to check", () => api.links.requireParent(BRAIN, ZEROS, "parentId")],
+      ["an attachment", () => api.attachments.metadata(BRAIN, ZEROS)],
+      ["a thought's attachments", () => api.attachments.ofThought(BRAIN, ZEROS)],
+      ["a thought to attach to", () => api.attachments.attachUrl(BRAIN, ZEROS, "https://a.b/")],
+      ["an attachment to delete", () => api.attachments.delete(BRAIN, ZEROS)],
+    ];
+    for (const [what, send] of sends) {
+      await expect(send(), what).rejects.toMatchObject({
+        kind: "invalid_uuid",
+        message: expect.stringMatching(
+          new RegExp(`^\\w+ is the all-zero UUID \\(${ZEROS}\\), which names nothing\\. `),
+        ),
+      });
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("is named by the argument it came in", async () => {
+    const { api } = willing();
+    const field = (send: Promise<unknown>): Promise<string> =>
+      send.then(
+        () => "nothing thrown",
+        (error: unknown) => (error as Error).message.split(" ")[0]!,
+      );
+    expect(await field(api.thoughts.create(BRAIN, { name: "RAG", sourceThoughtId: ZEROS }))).toBe(
+      "sourceThoughtId",
+    );
+    expect(await field(api.links.requireParent(BRAIN, ZEROS, "parentId"))).toBe("parentId");
+    expect(await field(api.thoughts.requireType(BRAIN, ZEROS))).toBe("typeId");
+    expect(await field(api.links.requireTag(BRAIN, ZEROS))).toBe("tagId");
+    expect(await field(api.notes.set(ZEROS, THOUGHT, "text"))).toBe("brainId");
+  });
+
+  it("is not what an answer of zeros is: that one is zero_id, after the request", async () => {
+    const { api, fetchImpl } = apiWith([
+      ["POST /api/links", () => ({ id: ZEROS })],
+      ["/api/", () => thought(THOUGHT, "RAG")],
+    ]);
+    await expect(
+      api.links.create(BRAIN, { thoughtIdA: THOUGHT, thoughtIdB: TAG, relation: 3 }),
+    ).rejects.toMatchObject({ kind: "zero_id", status: 200 });
+    expect(fetchImpl).toHaveBeenCalled();
+  });
+
+  it("any other identifier that names nothing is still sent, for the API to answer", async () => {
+    // All of `f`, and a random one: each gets the API's own 404, 403 or 400.
+    const { api, calls } = willing();
+    await api.thoughts.get(BRAIN, "ffffffff-ffff-ffff-ffff-ffffffffffff");
+    await api.thoughts.get(BRAIN, "00000000-0000-0000-0000-000000000001");
+    expect(calls).toHaveLength(2);
+  });
+});
+
+describe("a link's name as TheBrain stores it", () => {
+  it("has a tab and a line feed for a space each, and no blanks at either end", () => {
+    // Measured on 15.0.640, by a POST and by a PATCH alike (contract test).
+    for (const [sent, stored] of [
+      ["motivates", "motivates"],
+      ["  padded  ", "padded"],
+      ["tab\tinside", "tab inside"],
+      ["line\nbreak", "line break"],
+      ["\nleading and trailing\n", "leading and trailing"],
+      ["a \n b", "a   b"],
+      [" nbsp ends ", "nbsp ends"],
+      // Kept as they are: a run of spaces, a carriage return, a no-break space inside.
+      ["two  spaces", "two  spaces"],
+      ["crlf\r\nbreak", "crlf\r break"],
+      ["nbsp inside", "nbsp inside"],
+      ["", ""],
+    ] as const) {
+      expect(linkNameAsStored(sent), JSON.stringify(sent)).toBe(stored);
+    }
   });
 });
 

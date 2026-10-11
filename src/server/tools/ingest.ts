@@ -218,6 +218,11 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
                 ? [`notes kept: ${outcome.notesKept.length}`]
                 : []),
               `tags attached: ${outcome.tagsAttached}`,
+              // Only where there is one, as with the notes kept: a plan that
+              // found no tag in place reads as it did.
+              ...(outcome.tagsAlreadyThere > 0
+                ? [`tags already attached: ${outcome.tagsAlreadyThere}`]
+                : []),
               ...(thoughts.some((t) => t.aliases !== undefined)
                 ? [`thoughts given aliases: ${outcome.aliasesWritten}`]
                 : []),

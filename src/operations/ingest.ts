@@ -41,14 +41,24 @@
  *     fail its own thought in the middle of the batch, with the branches
  *     beside it written and what hung on it skipped, though the read that
  *     checks a parent's kind had the answer before the first write.
+ * 11. What is there already is not written again. A second run of a plan
+ *     used to attach every tag once more, which logs a `402` against the
+ *     attachment each time, and to send every label, which changes nothing.
+ * 12. One write to a pair of thoughts at a time. Two posts sent at once for a
+ *     pair with no link made two links, 51 times in 60, where two thoughts
+ *     share one: so two links of a plan between the same two thoughts are not
+ *     both sent, and the first in the plan is the link.
+ * 13. A label that takes another's place is reported with the one it took.
  */
 
 import {
   ALIASES_UNSUPPORTED,
   TheBrainError,
+  ZERO_UUID,
   isStructuralLink,
   isTagLink,
   isTypeLink,
+  linkNameAsStored,
   mayHaveLanded,
   normalizeAliases,
   type CleanGraph,
@@ -163,6 +173,10 @@ export interface IngestOutcome {
    * thoughts: a tag on one of them, or its type. Nothing is posted here
    * either, since it would take the tag or the type away, and no label is
    * written. The note says which of the two it is.
+   *
+   * And each link of the plan between two thoughts that a link earlier in
+   * the plan joins: two thoughts share one link, so only the first is sent.
+   * The note names that first one, and the label that went unwritten.
    */
   linksNotAdded: Array<{ from: string; to: string; note: string }>;
   notesWritten: number;
@@ -178,6 +192,11 @@ export interface IngestOutcome {
    */
   notesKept: Array<{ tempId: string; thoughtId: string; same: boolean }>;
   tagsAttached: number;
+  /**
+   * Tags of the plan that were on their thought already, as a second run of
+   * a plan finds them. Nothing is sent for one.
+   */
+  tagsAlreadyThere: number;
   /** Thoughts whose alias list was written, at creation or by adding to it. */
   aliasesWritten: number;
   /**
@@ -301,6 +320,17 @@ export function planLevels(plan: IngestPlan): IngestThought[][] {
           "which is not in the batch and does not look like an existing thought's UUID",
       );
     }
+    // No request is needed to know that nobody has this one, and the API
+    // does not say so: a create under it answers 200 and makes the thought
+    // with no parent. `assertUuid` refuses it at the read below; here it is
+    // named with the plan item, as a reference to no `tempId` is.
+    if (!byTempId.has(t.parent) && t.parent === ZERO_UUID) {
+      throw new IngestMissingError(
+        `thought "${t.tempId}" references parent ${ZERO_UUID}, the all-zero UUID, ` +
+          "which names no thought",
+        [ZERO_UUID],
+      );
+    }
   }
 
   for (const link of plan.links ?? []) {
@@ -313,6 +343,15 @@ export function planLevels(plan: IngestPlan): IngestThought[][] {
         throw new IngestValidationError(
           `a link references "${ref}" in its ${side} field, ` +
             "but no such tempId is in the batch and it does not look like a UUID",
+        );
+      }
+      // The same for a link: it would be refused at its own turn, after
+      // everything else of the plan is written.
+      if (!byTempId.has(ref) && ref === ZERO_UUID) {
+        throw new IngestMissingError(
+          `the link ${link.from} -> ${link.to} references ${ZERO_UUID}, the all-zero UUID, ` +
+            `in its ${side} field, and it names no thought`,
+          [ZERO_UUID],
         );
       }
     }
@@ -431,6 +470,7 @@ export async function ingest(
     notesWrittenFor: [],
     notesKept: [],
     tagsAttached: 0,
+    tagsAlreadyThere: 0,
     aliasesWritten: 0,
     failures: [],
     skipped: [],
@@ -779,13 +819,38 @@ export async function ingest(
     }
   });
 
-  const tagJobs = plan.thoughts.flatMap((t) =>
-    (t.tagIds ?? []).map((tagId) => ({ t, tagId })),
-  );
-  await mapWithConcurrency(tagJobs, 6, async ({ t, tagId }) => {
+  // One job for a tag on a thought, the first plan item's: two items can be
+  // one thought, and a list can name a tag twice. Two attaches of one tag
+  // sent at once left two attachments 11 times in 20 on a live TheBrain
+  // 15.0.640, and the lookup that finds a tag's link answers 404 from then on.
+  const tagJobs = new Map<string, { t: IngestThought; id: string; tagId: string }>();
+  for (const t of plan.thoughts) {
     const id = resolved.get(t.tempId);
-    if (id === undefined) return;
+    if (id === undefined) continue;
+    for (const tagId of t.tagIds ?? []) {
+      const job = `${id}\0${tagId.toLowerCase()}`;
+      if (!tagJobs.has(job)) tagJobs.set(job, { t, id, tagId });
+    }
+  }
+  await mapWithConcurrency([...tagJobs.values()], 6, async ({ t, id, tagId }) => {
     try {
+      // A thought that was there may have the tag, as on a second run of the
+      // plan. Attached again it is a 200 that changes nothing and logs a
+      // `402` against the attachment, which a sync then reads both ends of.
+      // So the pair is looked up first, as a link's is. A thought the batch
+      // made has no tag, and is not asked.
+      if (!madeHere.has(id)) {
+        const there = await api.links.hasTag(brainId, id, tagId).catch((error: unknown) => {
+          throw new IngestReadError(
+            "not attached, because whether the thought has this tag already could not be read",
+            error,
+          );
+        });
+        if (there) {
+          outcome.tagsAlreadyThere += 1;
+          return;
+        }
+      }
       await api.links.attachTag(brainId, id, tagId);
       outcome.tagsAttached += 1;
     } catch (error) {
@@ -821,7 +886,19 @@ export async function ingest(
   });
   outcome.aliasesWritten = aliased.size;
 
-  await mapWithConcurrency(plan.links ?? [], 6, async (link) => {
+  // By the two thoughts a link joins, whichever end is named first and by
+  // whatever reference: a `tempId` can come to a thought the plan also names
+  // by its identifier. Two links of a plan between one pair both looked,
+  // both saw no link, and both posted. Sent at once like that, the two left
+  // two links between the pair 14 times in 20 on a live TheBrain 15.0.640,
+  // reported as "links created: 2", and where both go the same way the
+  // lookup answers 404 from then on and a further post is a 400. So one
+  // link a pair is sent, the first in the plan, and the others are listed
+  // as not added, on every run. Which of the two the plan means the server
+  // does not say otherwise either: the first of two namesakes is the one
+  // made, and the first of two notes for one thought the one written.
+  const pairs = new Map<string, Array<{ link: IngestLink; from: string; to: string }>>();
+  for (const link of plan.links ?? []) {
     const from = resolve(link.from);
     const to = resolve(link.to);
     if (from === null || to === null) {
@@ -829,8 +906,14 @@ export async function ingest(
         what: `link ${link.from} -> ${link.to}`,
         reason: needs([link.from, link.to]),
       });
-      return;
+      continue;
     }
+    const pair = [from.toLowerCase(), to.toLowerCase()].sort().join("\0");
+    pairs.set(pair, [...(pairs.get(pair) ?? []), { link, from, to }]);
+  }
+  await mapWithConcurrency([...pairs.values()], 6, async ([first, ...others]) => {
+    if (first === undefined) return;
+    const { link, from, to } = first;
     try {
       const existing = await api.links.between(brainId, from, to);
       if (existing !== null) {
@@ -843,9 +926,11 @@ export async function ingest(
             fromName: link.from,
             toName: link.to,
           },
-          link.name !== undefined,
+          link.name,
         );
-        if (link.name !== undefined && found.ordinary) {
+        // Not a label the link has already: that write is a 200 that changes
+        // nothing, and every run of a plan sent it for every link.
+        if (found.label?.write === true) {
           await api.links.update(brainId, existing.id, { name: link.name });
         }
         (found.ordinary ? outcome.linksReused : outcome.linksNotAdded).push({
@@ -853,17 +938,32 @@ export async function ingest(
           to: link.to,
           note: found.note,
         });
-        return;
+      } else {
+        await api.links.create(brainId, {
+          thoughtIdA: from,
+          thoughtIdB: to,
+          relation: RELATION_BY_NAME[link.relation ?? "jump"] as Relation,
+          ...(link.name !== undefined ? { name: link.name } : {}),
+        });
+        outcome.linksCreated += 1;
       }
-      await api.links.create(brainId, {
-        thoughtIdA: from,
-        thoughtIdB: to,
-        relation: RELATION_BY_NAME[link.relation ?? "jump"] as Relation,
-        ...(link.name !== undefined ? { name: link.name } : {}),
-      });
-      outcome.linksCreated += 1;
     } catch (error) {
       failed("link", `link ${link.from} -> ${link.to}`, error);
+    }
+    // Whatever became of the first: sent after one that failed, a second
+    // link is a second request for the same pair, and after one that got no
+    // answer it can be the second link.
+    for (const other of others) {
+      outcome.linksNotAdded.push({
+        from: other.link.from,
+        to: other.link.to,
+        note:
+          `the plan has a link between the same two thoughts ahead of this one, ` +
+          `${link.from} -> ${link.to}, and two thoughts share one link: this one was not sent` +
+          (other.link.name !== undefined
+            ? `, and its label ${JSON.stringify(other.link.name)} was not written`
+            : ""),
+      });
     }
   });
 
@@ -1090,8 +1190,23 @@ export interface FoundLink {
    * tag's attachment and a type's link are not, and are given none.
    */
   ordinary: boolean;
-  /** What to tell the caller. `named` says whether a label came with the request. */
+  /** What to tell the caller, of the link and of the label asked for it. */
   note: string;
+  /**
+   * What the label asked for comes to on the link that is there. Null when
+   * no label came with the request, and for a link that takes none.
+   */
+  label: FoundLabel | null;
+}
+
+export interface FoundLabel {
+  /** False when the link has that label already: there is nothing to send. */
+  write: boolean;
+  /**
+   * The same in words: `label updated` for a link that had none, `label
+   * already "…"`, or `label updated: it was "…" and is now "…"`.
+   */
+  said: string;
 }
 
 /**
@@ -1113,8 +1228,16 @@ export interface FoundLink {
  * two relate, and that link is the one place it can be kept. It does not go
  * onto a tag's attachment or a type's link, which are not links between two
  * thoughts and used to be labelled all the same.
+ *
+ * `name` is the label asked for, if any. A link has one label, so one that
+ * is there is replaced, and the note quotes it: "label updated" used to be
+ * the whole of it, and what a person had written there was gone with nobody
+ * told. Quoted, it can be put back by the call that set the new one. And a
+ * label the link has already is not written: it is set against the name as
+ * TheBrain stores it (`linkNameAsStored`).
  */
-export function linkFound(existing: LinkDto, asked: AskedLink, named: boolean): FoundLink {
+export function linkFound(existing: LinkDto, asked: AskedLink, name?: string): FoundLink {
+  const named = name !== undefined;
   const fromIsHead = existing.thoughtIdA.toLowerCase() === asked.from.toLowerCase();
   const [head, tail] = fromIsHead ? [asked.fromName, asked.toName] : [asked.toName, asked.fromName];
   const hierarchy = (upper: string): string => `parent-child with ${upper} above`;
@@ -1136,8 +1259,22 @@ export function linkFound(existing: LinkDto, asked: AskedLink, named: boolean): 
         `${what}, and two thoughts share one link: the requested ${wanted} was not ` +
         "added in its place" +
         (named ? ", and no label was written" : ""),
+      label: null,
     };
   }
+
+  // A link never named reads `null`, and one whose name was cleared `""`.
+  const was = existing.name ?? "";
+  const now = named ? linkNameAsStored(name) : was;
+  // Said only of a label that took another's place: one written where there
+  // was none reads as it did.
+  const quoted = JSON.stringify;
+  const replaced = was === "" ? "" : `: it was ${quoted(was)} and is now ${quoted(now)}`;
+  const label: FoundLabel | null = !named
+    ? null
+    : now === was
+      ? { write: false, said: `label already ${quoted(now)}` }
+      : { write: true, said: `label updated${replaced}` };
 
   const asAsked =
     existing.relation === Relation.Jump
@@ -1148,7 +1285,8 @@ export function linkFound(existing: LinkDto, asked: AskedLink, named: boolean): 
     return {
       asAsked,
       ordinary: true,
-      note: named ? "the link already existed, label updated" : "the link already existed",
+      note: "the link already existed" + (label === null ? "" : `, ${label.said}`),
+      label,
     };
   }
   const found =
@@ -1162,6 +1300,11 @@ export function linkFound(existing: LinkDto, asked: AskedLink, named: boolean): 
     ordinary: true,
     note:
       `the link already existed as ${found}, the requested ${wanted} was not added` +
-      (named ? " — only the label was updated" : ""),
+      (label === null
+        ? ""
+        : label.write
+          ? ` — only the label was updated${replaced}`
+          : `, and its label is already ${quoted(now)}`),
+    label,
   };
 }

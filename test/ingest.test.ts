@@ -93,6 +93,11 @@ function fakeBrain(
   /** The same for tags. TAG is one from the start. */
   const tags = new Set<string>([TAG]);
   const tagReads: string[] = [];
+  /** Each lookup that asked whether a tag is on a thought, and each attach sent. */
+  const tagLooks: string[] = [];
+  const tagAttaches: string[] = [];
+  /** Each label sent to a link that was there. */
+  const labelWrites: Array<{ id: string; name: string }> = [];
   /** Each read that asked whether something named as a parent is a type. */
   const parentReads: string[] = [];
   /** Each read of a thought by its identifier. */
@@ -416,7 +421,18 @@ function fakeBrain(
       },
       async update(_b: string, id: string, changes: { name?: string }) {
         const link = [...given, ...links].find((l) => linkId(l) === id);
+        if (changes.name !== undefined) labelWrites.push({ id, name: changes.name });
         if (link !== undefined && changes.name !== undefined) link.name = changes.name;
+      },
+      // As the real method: the pair's one link is the tag's, with the tag at
+      // its head. One read, and no write.
+      async hasTag(_b: string, thoughtId: string, tagId: string) {
+        tagLooks.push(`${tagId} on ${thoughtId}`);
+        if (failWith.has(`look for tag on ${thoughtId}`)) {
+          throw failWith.get(`look for tag on ${thoughtId}`)!;
+        }
+        const found = joining(thoughtId, tagId);
+        return found !== undefined && found.meaning === 5 && found.a === tagId;
       },
       // As the real method: throws unless the identifier names a tag.
       async requireTag(_b: string, tagId: string) {
@@ -431,6 +447,7 @@ function fakeBrain(
       async attachTag(_b: string, thoughtId: string, tagId: string) {
         if (failOn.has(`tag on ${thoughtId}`)) throw new Error("server refused");
         if (failWith.has(`tag on ${thoughtId}`)) throw failWith.get(`tag on ${thoughtId}`)!;
+        tagAttaches.push(`${tagId} on ${thoughtId}`);
         const carried = thoughts.get(thoughtId)?.tags;
         if (carried !== undefined && !carried.includes(tagId)) carried.push(tagId);
         const there = joining(thoughtId, tagId);
@@ -466,6 +483,9 @@ function fakeBrain(
     typeReads,
     tags,
     tagReads,
+    tagLooks,
+    tagAttaches,
+    labelWrites,
     parentReads,
     thoughtReads,
     vanishing,
@@ -2798,15 +2818,18 @@ describe("a type named as a parent in a batch", () => {
         { tempId: "above", name: "Above", parent: TYPE, relation: "parent" },
         { tempId: "beside", name: "Beside", parent: TYPE, relation: "jump" },
       ],
+      // Each between a pair of its own: two links of a plan between one pair
+      // are one link, the first.
       links: [
         { from: "a", to: TYPE },
-        { from: OTHER, to: TYPE, relation: "jump" },
+        { from: ROOT, to: TYPE, relation: "jump" },
         { from: OTHER, to: TYPE, relation: "child" },
         { from: TYPE, to: "above", relation: "parent" },
       ],
     });
 
     expect(outcome.failures).toEqual([]);
+    expect(outcome.linksNotAdded).toEqual([]);
     expect(outcome.created).toHaveLength(3);
     const a = outcome.created.find((c) => c.tempId === "a")!.thoughtId;
     expect(links).toContainEqual({ a, b: TYPE, relation: 3 });
@@ -3039,13 +3062,14 @@ describe("what joins two thoughts already, set against the link asked for", () =
   const A = "aaaaaaaa-1111-4000-8000-00000000000a";
   const B = "bbbbbbbb-1111-4000-8000-00000000000b";
   /** A link as the API returns it: stored with relation 1 or 3, head at `thoughtIdA`. */
-  const link = (head: string, relation: number, meaning = 1) =>
+  const link = (head: string, relation: number, meaning = 1, name: string | null = null) =>
     ({
       id: "link",
       thoughtIdA: head,
       thoughtIdB: head === A ? B : A,
       relation,
       meaning,
+      name,
     }) as unknown as Parameters<typeof linkFound>[0];
   const asked = (relation: "child" | "parent" | "jump") => ({
     from: A,
@@ -3066,12 +3090,13 @@ describe("what joins two thoughts already, set against the link asked for", () =
       // Case aside, as the API reads a UUID.
       ["parent", link(B.toUpperCase(), 1)],
     ] as const) {
-      expect(linkFound(found, asked(relation), false)).toEqual({
+      expect(linkFound(found, asked(relation))).toEqual({
         asAsked: true,
         ordinary: true,
         note: "the link already existed",
+        label: null,
       });
-      expect(linkFound(found, asked(relation), true).note).toBe(
+      expect(linkFound(found, asked(relation), "motivates").note).toBe(
         "the link already existed, label updated",
       );
     }
@@ -3097,12 +3122,13 @@ describe("what joins two thoughts already, set against the link asked for", () =
       // A relation past the three, which the API writes on a link no list shows.
       ["jump", link(A, 5), "as kind 5, the requested jump was not added"],
     ] as const) {
-      expect(linkFound(found, asked(relation), false)).toEqual({
+      expect(linkFound(found, asked(relation))).toEqual({
         asAsked: false,
         ordinary: true,
         note: `the link already existed ${note}`,
+        label: null,
       });
-      expect(linkFound(found, asked(relation), true).note).toBe(
+      expect(linkFound(found, asked(relation), "motivates").note).toBe(
         `the link already existed ${note} — only the label was updated`,
       );
     }
@@ -3133,14 +3159,106 @@ describe("what joins two thoughts already, set against the link asked for", () =
           `${over} jump was not added in its place`,
       ],
     ] as const) {
-      expect(linkFound(found, asked(relation), false)).toEqual({
+      expect(linkFound(found, asked(relation))).toEqual({
         asAsked: false,
         ordinary: false,
         note,
+        label: null,
       });
-      expect(linkFound(found, asked(relation), true).note).toBe(
-        `${note}, and no label was written`,
-      );
+      // Named or not, there is no label to write on it.
+      expect(linkFound(found, asked(relation), "motivates")).toEqual({
+        asAsked: false,
+        ordinary: false,
+        note: `${note}, and no label was written`,
+        label: null,
+      });
+    }
+  });
+
+  it("a label where the link had none is written, and reads as it did", () => {
+    // `null` on a link never named, `""` on one whose name was cleared.
+    for (const had of [null, ""]) {
+      expect(linkFound(link(A, 3, 1, had), asked("jump"), "motivates")).toEqual({
+        asAsked: true,
+        ordinary: true,
+        note: "the link already existed, label updated",
+        label: { write: true, said: "label updated" },
+      });
+      expect(linkFound(link(A, 3, 1, had), asked("child"), "motivates")).toMatchObject({
+        note:
+          "the link already existed as jump, the requested parent-child with from above " +
+          "was not added — only the label was updated",
+        label: { write: true, said: "label updated" },
+      });
+    }
+  });
+
+  it("a label that takes another's place is quoted, the one it took and the one it is now", () => {
+    // "label updated" was the whole of it, and what had been there was gone
+    // with nobody told.
+    expect(linkFound(link(A, 3, 1, "contradicts"), asked("jump"), "refines")).toEqual({
+      asAsked: true,
+      ordinary: true,
+      note: 'the link already existed, label updated: it was "contradicts" and is now "refines"',
+      label: {
+        write: true,
+        said: 'label updated: it was "contradicts" and is now "refines"',
+      },
+    });
+    expect(linkFound(link(B, 1, 1, "contradicts"), asked("jump"), "refines")).toMatchObject({
+      asAsked: false,
+      note:
+        "the link already existed as parent-child with to above, the requested jump was not " +
+        'added — only the label was updated: it was "contradicts" and is now "refines"',
+      label: { write: true },
+    });
+    // Quoted as JSON quotes it, so a label with a quote in it reads whole.
+    expect(linkFound(link(A, 3, 1, 'the "old" one'), asked("jump"), "new").note).toBe(
+      'the link already existed, label updated: it was "the \\"old\\" one" and is now "new"',
+    );
+    // An empty label asked for takes the one that is there away, and says so.
+    expect(linkFound(link(A, 3, 1, "contradicts"), asked("jump"), "").label).toEqual({
+      write: true,
+      said: 'label updated: it was "contradicts" and is now ""',
+    });
+  });
+
+  it("a label the link has already is not to be written, and is said to be there", () => {
+    expect(linkFound(link(A, 3, 1, "motivates"), asked("jump"), "motivates")).toEqual({
+      asAsked: true,
+      ordinary: true,
+      note: 'the link already existed, label already "motivates"',
+      label: { write: false, said: 'label already "motivates"' },
+    });
+    expect(linkFound(link(A, 1, 1, "motivates"), asked("jump"), "motivates")).toMatchObject({
+      note:
+        "the link already existed as parent-child with from above, the requested jump was " +
+        'not added, and its label is already "motivates"',
+      label: { write: false },
+    });
+    // Set against the name as TheBrain stores it: blanks at the ends dropped,
+    // a tab and a line feed a space each. Sent as given, each of these would
+    // pass for another label on every run.
+    for (const sent of [" motivates ", "motivates\n", "\tmotivates"]) {
+      expect(
+        linkFound(link(A, 3, 1, "motivates"), asked("jump"), sent).label,
+        JSON.stringify(sent),
+      ).toEqual({ write: false, said: 'label already "motivates"' });
+    }
+    // And what a new one is said to be is what will be stored.
+    expect(linkFound(link(A, 3, 1, "old"), asked("jump"), " a\tb\n").label?.said).toBe(
+      'label updated: it was "old" and is now "a b"',
+    );
+    // Another case is another label.
+    expect(linkFound(link(A, 3, 1, "Motivates"), asked("jump"), "motivates").label?.write).toBe(
+      true,
+    );
+    // No label asked for and none there is nothing to write either.
+    for (const had of [null, ""]) {
+      expect(linkFound(link(A, 3, 1, had), asked("jump"), "").label).toEqual({
+        write: false,
+        said: 'label already ""',
+      });
     }
   });
 });
@@ -3156,18 +3274,23 @@ describe("reporting links that already existed", () => {
     // The create makes the link, stored as a child's from the upper end, and
     // the plan's link then finds it. It was reported as "already existed as
     // parent-child, the requested parent-child was not added".
-    const { api, links } = fakeBrain([{ id: ROOT, name: "root" }]);
+    const { api, links, labelWrites } = fakeBrain([{ id: ROOT, name: "root" }]);
     const plan: IngestPlan = {
       thoughts: [{ tempId: "up", name: "Above", parent: ROOT, relation: "parent" }],
       links: [{ from: ROOT, to: "up", relation: "parent", name: "belongs to" }],
     };
-    for (const outcome of [await ingest(api, BRAIN, plan), await ingest(api, BRAIN, plan)]) {
+    // The second run finds the label the first wrote, and writes nothing.
+    for (const [outcome, label] of [
+      [await ingest(api, BRAIN, plan), "label updated"],
+      [await ingest(api, BRAIN, plan), 'label already "belongs to"'],
+    ] as const) {
       expect(outcome.linksReused).toEqual([
-        { from: ROOT, to: "up", note: "the link already existed, label updated" },
+        { from: ROOT, to: "up", note: `the link already existed, ${label}` },
       ]);
       expect(outcome.linksNotAdded).toEqual([]);
     }
     expect(links).toEqual([{ a: "new-1", b: ROOT, relation: 1, name: "belongs to" }]);
+    expect(labelWrites).toEqual([{ id: "link-0", name: "belongs to" }]);
   });
 
   it("a link the other way up is flagged, and so is a jump where a parent was asked for", async () => {
@@ -3218,16 +3341,27 @@ describe("reporting links that already existed", () => {
     ]);
     types.add(TYPE);
     const before = structuredClone(given);
-    const outcome = await ingest(api, BRAIN, {
-      thoughts: [{ tempId: "a", name: "A", parent: ROOT, tagIds: [TAG] }],
+    const thoughts = [{ tempId: "a", name: "A", parent: ROOT, tagIds: [TAG] }];
+    const first = await ingest(api, BRAIN, {
+      thoughts,
       links: [
         { from: OTHER, to: TAG, name: "about" },
         { from: OTHER, to: TYPE, relation: "jump", name: "an example of" },
-        { from: OTHER, to: TAG, relation: "child" },
         // The tag the plan itself attached a moment ago.
         { from: TAG, to: "a", name: "marks" },
       ],
     });
+    // In a plan of its own: a second link between one pair is not sent at all.
+    const second = await ingest(api, BRAIN, {
+      thoughts,
+      links: [{ from: OTHER, to: TAG, relation: "child" }],
+    });
+    const outcome = {
+      failures: [...first.failures, ...second.failures],
+      linksCreated: first.linksCreated + second.linksCreated,
+      linksReused: [...first.linksReused, ...second.linksReused],
+      linksNotAdded: [...first.linksNotAdded, ...second.linksNotAdded],
+    };
 
     expect(outcome.failures).toEqual([]);
     expect(outcome.linksCreated).toBe(0);
@@ -3283,7 +3417,411 @@ describe("reporting links that already existed", () => {
     };
     await ingest(api, BRAIN, plan);
     const second = await ingest(api, BRAIN, plan);
-    expect(second.linksReused[0]!.note).toMatch(/label updated/);
+    expect(second.linksReused[0]!.note).toBe('the link already existed, label already "related"');
     expect(second.linksReused[0]!.note).not.toMatch(/not added/);
+  });
+});
+
+describe("a label on a link that was there", () => {
+  const A = "dddddddd-0000-4000-8000-000000000004";
+  const B = "cccccccc-0000-4000-8000-000000000003";
+  /** Two thoughts under ROOT, joined by a jump from A that a person has labelled. */
+  const labelled = (name: string) => {
+    const fake = fakeBrain([
+      { id: ROOT, name: "root" },
+      { id: A, name: "Embeddings", parent: ROOT },
+      { id: B, name: "Vector store", jumpOf: A },
+    ]);
+    fake.given.find((l) => l.a === A && l.b === B)!.name = name;
+    return fake;
+  };
+  const plan = (name: string, relation: "jump" | "child" = "jump"): IngestPlan => ({
+    thoughts: [{ tempId: "x", name: "X", parent: ROOT }],
+    links: [{ from: A, to: B, relation, name }],
+  });
+
+  it("is replaced by the plan's, and the outcome quotes the one it took the place of", async () => {
+    // It was "the link already existed, label updated", and the label a
+    // person had written was gone with nobody told: 3 times of 3 on a live
+    // TheBrain 15.0.640, by a plan and by brain_link.
+    const { api, given, labelWrites } = labelled("contradicts");
+    const outcome = await ingest(api, BRAIN, plan("refines"));
+
+    expect(outcome.linksReused).toEqual([
+      {
+        from: A,
+        to: B,
+        note: 'the link already existed, label updated: it was "contradicts" and is now "refines"',
+      },
+    ]);
+    expect(labelWrites).toEqual([{ id: "link-1", name: "refines" }]);
+    expect(given.find((l) => l.b === B)).toMatchObject({ name: "refines" });
+  });
+
+  it("the same when the link is another kind than the one asked for", async () => {
+    const { api, labelWrites } = labelled("contradicts");
+    const outcome = await ingest(api, BRAIN, plan("refines", "child"));
+
+    expect(outcome.linksReused.map((l) => l.note)).toEqual([
+      `the link already existed as jump, the requested parent-child with ${A} above was not ` +
+        'added — only the label was updated: it was "contradicts" and is now "refines"',
+    ]);
+    expect(labelWrites).toHaveLength(1);
+  });
+
+  it("is not written when it is the plan's already, on a first run as on a second", async () => {
+    // That write is a 200 that changes nothing and logs nothing, and every
+    // run of a plan sent it for every link it had a label for.
+    const { api, labelWrites } = labelled("motivates");
+    for (const run of [1, 2]) {
+      const outcome = await ingest(api, BRAIN, plan("motivates"));
+      expect(outcome.linksReused.map((l) => l.note), `run ${run}`).toEqual([
+        'the link already existed, label already "motivates"',
+      ]);
+    }
+    expect(labelWrites).toEqual([]);
+  });
+
+  it("a label a person changed between two runs is replaced by the second, which says what it was", async () => {
+    // Replaced, where a note is kept: a link has one label and no way to add
+    // to it, and the one line of it is in the result to be put back.
+    const { api, links, labelWrites } = fakeBrain([
+      { id: ROOT, name: "root" },
+      { id: A, name: "Embeddings", parent: ROOT },
+      { id: B, name: "Vector store", parent: ROOT },
+    ]);
+    const first = await ingest(api, BRAIN, plan("motivates"));
+    expect(first.linksCreated).toBe(1);
+    expect(first.linksReused).toEqual([]);
+
+    // In TheBrain, by hand.
+    links.find((l) => l.a === A && l.b === B)!.name = "is written into";
+    const second = await ingest(api, BRAIN, plan("motivates"));
+    expect(second.linksReused.map((l) => l.note)).toEqual([
+      'the link already existed, label updated: it was "is written into" and is now "motivates"',
+    ]);
+    expect(labelWrites.map((w) => w.name)).toEqual(["motivates"]);
+    expect(links.find((l) => l.a === A && l.b === B)).toMatchObject({ name: "motivates" });
+  });
+});
+
+describe("a tag that is on its thought already", () => {
+  const OTHER = "dddddddd-0000-4000-8000-000000000004";
+  const SECOND_TAG = "ffffffff-0000-4000-8000-000000000006";
+  const plan: IngestPlan = {
+    thoughts: [
+      { tempId: "top", name: "Top", parent: ROOT, tagIds: [TAG] },
+      { tempId: "leaf", name: "Leaf", parent: "top", tagIds: [TAG, SECOND_TAG] },
+    ],
+  };
+  const brain = () => {
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    fake.tags.add(SECOND_TAG);
+    return fake;
+  };
+
+  it("is not attached again by a second run, which says it was there", async () => {
+    // Attached again it is a 200 with the attachment's own identifier, and a
+    // `402` in the log against it each time: 3 for each repeat of a plan with
+    // three tags, on a live TheBrain 15.0.640.
+    const { api, tagAttaches, tagLooks } = brain();
+    const first = await ingest(api, BRAIN, plan);
+    expect(first).toMatchObject({ tagsAttached: 3, tagsAlreadyThere: 0, failures: [] });
+    expect(tagAttaches).toHaveLength(3);
+    // A thought the batch made has no tag, and is not asked about one.
+    expect(tagLooks).toEqual([]);
+
+    tagAttaches.length = 0;
+    for (const run of [2, 3]) {
+      const again = await ingest(api, BRAIN, plan);
+      expect(again, `run ${run}`).toMatchObject({
+        tagsAttached: 0,
+        tagsAlreadyThere: 3,
+        failures: [],
+      });
+    }
+    expect(tagAttaches).toEqual([]);
+    // One lookup a tag on a thought that was there, each run.
+    expect(tagLooks).toHaveLength(6);
+  });
+
+  it("a thought that was there without the tag is given it, after the one lookup", async () => {
+    const { api, tagAttaches, tagLooks, thoughts } = fakeBrain([
+      { id: ROOT, name: "root" },
+      { id: OTHER, name: "Top", parent: ROOT },
+    ]);
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [{ tempId: "top", name: "Top", parent: ROOT, tagIds: [TAG] }],
+    });
+    expect(outcome).toMatchObject({ tagsAttached: 1, tagsAlreadyThere: 0, failures: [] });
+    expect(tagLooks).toEqual([`${TAG} on ${OTHER}`]);
+    expect(tagAttaches).toEqual([`${TAG} on ${OTHER}`]);
+    expect(thoughts.get(OTHER)!.tags).toEqual([TAG]);
+  });
+
+  it("only the tags that are missing are attached", async () => {
+    const { api, tagAttaches, tags } = fakeBrain([
+      { id: ROOT, name: "root" },
+      { id: OTHER, name: "Top", parent: ROOT, tags: [TAG] },
+    ]);
+    tags.add(SECOND_TAG);
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [{ tempId: "top", name: "Top", parent: ROOT, tagIds: [TAG, SECOND_TAG] }],
+    });
+    expect(outcome).toMatchObject({ tagsAttached: 1, tagsAlreadyThere: 1 });
+    expect(tagAttaches).toEqual([`${SECOND_TAG} on ${OTHER}`]);
+  });
+
+  it("a lookup that fails is not the answer that the tag is missing: the tag fails, unsent", async () => {
+    // A read that failed has shown nothing, here as for a note.
+    const { api, tagAttaches, failWith } = fakeBrain([
+      { id: ROOT, name: "root" },
+      { id: OTHER, name: "Top", parent: ROOT, tags: [TAG] },
+    ]);
+    failWith.set(`look for tag on ${OTHER}`, new TheBrainError("server", "boom", { status: 500 }));
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [{ tempId: "top", name: "Top", parent: ROOT, tagIds: [TAG] }],
+    });
+    expect(outcome).toMatchObject({ tagsAttached: 0, tagsAlreadyThere: 0 });
+    expect(tagAttaches).toEqual([]);
+    expect(outcome.failures).toHaveLength(1);
+    expect(outcome.failures[0]).toMatchObject({
+      of: "tag",
+      what: `tag ${TAG} on "Top" (${OTHER})`,
+      reason:
+        "not attached, because whether the thought has this tag already could not be read: boom",
+    });
+    expect(outcome.failures[0]!.error).toBeInstanceOf(IngestReadError);
+  });
+
+  it("a tag named twice for one thought is one attach, in one list or by two plan items", async () => {
+    // Two attaches of one tag sent at once left two attachments 11 times in
+    // 20 on a live TheBrain 15.0.640.
+    const { api, tagAttaches } = fakeBrain([{ id: ROOT, name: "root" }]);
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [
+        { tempId: "a", name: "Same", parent: ROOT, tagIds: [TAG, TAG] },
+        { tempId: "b", name: "Same", parent: ROOT, tagIds: [TAG] },
+      ],
+    });
+    expect(outcome.created).toHaveLength(1);
+    expect(outcome.reused).toHaveLength(1);
+    expect(outcome).toMatchObject({ tagsAttached: 1, tagsAlreadyThere: 0, failures: [] });
+    expect(tagAttaches).toEqual([`${TAG} on new-1`]);
+  });
+});
+
+describe("two links of a plan between the same two thoughts", () => {
+  const P = "dddddddd-0000-4000-8000-000000000004";
+  const Q = "cccccccc-0000-4000-8000-000000000003";
+  const existing = () =>
+    fakeBrain([
+      { id: ROOT, name: "root" },
+      { id: P, name: "P", parent: ROOT },
+      { id: Q, name: "Q", parent: ROOT },
+    ]);
+  const between = (links: ReadonlyArray<{ a: string; b: string }>, x: string, y: string) =>
+    links.filter((l) => [l.a, l.b].includes(x) && [l.a, l.b].includes(y));
+  const notSent = (first: string, label?: string): string =>
+    `the plan has a link between the same two thoughts ahead of this one, ${first}, and two ` +
+    "thoughts share one link: this one was not sent" +
+    (label === undefined ? "" : `, and its label ${JSON.stringify(label)} was not written`);
+
+  it("are one link, the first in the plan: the other is not sent, on every run", async () => {
+    // Both used to look, see no link, and post. Sent at once like that they
+    // left two links between the pair 14 times in 20 on a live TheBrain
+    // 15.0.640, under "links created: 2".
+    for (const [what, second] of [
+      ["the other way round", { from: "b", to: "a", name: "y" }],
+      ["another relation", { from: "a", to: "b", relation: "child", name: "y" }],
+      ["the same link again", { from: "a", to: "b", name: "x" }],
+    ] as const) {
+      const { api, links, labelWrites } = fakeBrain([{ id: ROOT, name: "root" }]);
+      const plan: IngestPlan = {
+        thoughts: [
+          { tempId: "a", name: "A", parent: ROOT },
+          { tempId: "b", name: "B", parent: ROOT },
+        ],
+        links: [{ from: "a", to: "b", name: "x" }, second],
+      };
+      const first = await ingest(api, BRAIN, plan);
+      expect(first.failures, what).toEqual([]);
+      expect(first.linksCreated, what).toBe(1);
+      expect(first.linksNotAdded, what).toEqual([
+        { from: second.from, to: second.to, note: notSent("a -> b", second.name) },
+      ]);
+      expect(between(links, "new-1", "new-2"), what).toEqual([
+        { a: "new-1", b: "new-2", relation: 3, name: "x" },
+      ]);
+
+      // The run after finds the first link and its label, and writes nothing.
+      const again = await ingest(api, BRAIN, plan);
+      expect(again.linksCreated, what).toBe(0);
+      expect(again.linksReused, what).toEqual([
+        { from: "a", to: "b", note: 'the link already existed, label already "x"' },
+      ]);
+      expect(again.linksNotAdded, what).toEqual(first.linksNotAdded);
+      expect(between(links, "new-1", "new-2"), what).toHaveLength(1);
+      expect(labelWrites, what).toEqual([]);
+    }
+  });
+
+  it("the same for two existing thoughts, an identifier in capitals included", async () => {
+    const { api, links } = existing();
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [{ tempId: "x", name: "X", parent: ROOT }],
+      links: [
+        { from: P, to: Q, relation: "child" },
+        { from: Q.toUpperCase(), to: P.toUpperCase(), name: "y" },
+        { from: Q, to: P, relation: "parent" },
+      ],
+    });
+    expect(outcome.linksCreated).toBe(1);
+    expect(outcome.linksNotAdded).toEqual([
+      { from: Q.toUpperCase(), to: P.toUpperCase(), note: notSent(`${P} -> ${Q}`, "y") },
+      { from: Q, to: P, note: notSent(`${P} -> ${Q}`) },
+    ]);
+    expect(between(links, P, Q)).toEqual([{ a: P, b: Q, relation: 1 }]);
+  });
+
+  it("the same when a tempId comes to a thought the plan also names by its identifier", async () => {
+    // No look at the plan's references could tell: "p" is P only once the
+    // batch has found a thought of that name under ROOT.
+    const { api, links } = existing();
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [{ tempId: "p", name: "P", parent: ROOT }],
+      links: [
+        { from: "p", to: Q, name: "x" },
+        { from: Q, to: P, name: "y" },
+      ],
+    });
+    expect(outcome.reused.map((r) => r.thoughtId)).toEqual([P]);
+    expect(outcome.linksCreated).toBe(1);
+    expect(outcome.linksNotAdded).toEqual([
+      { from: Q, to: P, note: notSent(`p -> ${Q}`, "y") },
+    ]);
+    expect(between(links, P, Q)).toEqual([{ a: P, b: Q, relation: 3, name: "x" }]);
+  });
+
+  it("the first is the link that is there when one is: the others add nothing, and no label", async () => {
+    const { api, links, given, labelWrites } = existing();
+    given.push({ a: P, b: Q, relation: 3, name: "old" });
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [{ tempId: "x", name: "X", parent: ROOT }],
+      links: [
+        { from: P, to: Q, name: "first" },
+        { from: P, to: Q, relation: "child", name: "second" },
+      ],
+    });
+    expect(outcome.linksCreated).toBe(0);
+    expect(outcome.linksReused).toEqual([
+      {
+        from: P,
+        to: Q,
+        note: 'the link already existed, label updated: it was "old" and is now "first"',
+      },
+    ]);
+    expect(outcome.linksNotAdded).toEqual([
+      { from: P, to: Q, note: notSent(`${P} -> ${Q}`, "second") },
+    ]);
+    expect(labelWrites.map((w) => w.name)).toEqual(["first"]);
+    expect(between(links, P, Q)).toEqual([]);
+  });
+
+  it("a link that fails does not hand the pair to the next: that one is still not sent", async () => {
+    // A second request for the same pair, and after a first that got no
+    // answer it can be the second link.
+    const { api, links } = existing();
+    const lost = new TheBrainError("network", "request exceeded 30000 ms", {
+      method: "POST",
+      path: `/api/links/${BRAIN}`,
+    });
+    vi.spyOn(api.links, "create").mockRejectedValueOnce(lost);
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [{ tempId: "x", name: "X", parent: ROOT }],
+      links: [
+        { from: P, to: Q, name: "first" },
+        { from: Q, to: P, name: "second" },
+      ],
+    });
+    expect(said(outcome)).toEqual([
+      { what: `link ${P} -> ${Q}`, reason: "request exceeded 30000 ms", unanswered: true },
+    ]);
+    expect(outcome.linksNotAdded).toEqual([
+      { from: Q, to: P, note: notSent(`${P} -> ${Q}`, "second") },
+    ]);
+    expect(api.links.create).toHaveBeenCalledTimes(1);
+    expect(between(links, P, Q)).toEqual([]);
+  });
+
+  it("links between different pairs are sent as they were, each once", async () => {
+    const { api, links } = existing();
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [{ tempId: "x", name: "X", parent: ROOT }],
+      links: [
+        { from: P, to: Q, name: "pq" },
+        { from: "x", to: P },
+        { from: "x", to: Q, relation: "parent" },
+      ],
+    });
+    expect(outcome).toMatchObject({ linksCreated: 3, linksNotAdded: [], failures: [] });
+    expect(links.filter((l) => l.a !== ROOT)).toHaveLength(3);
+  });
+});
+
+describe("the identifier of zeros in a plan", () => {
+  const ZEROS = "00000000-0000-0000-0000-000000000000";
+
+  it("is rejected for a parent and for an end of a link, before any read", async () => {
+    // Measured: a create under it is a 200 and a thought with no parent. A
+    // plan's parent was read and found to be nobody's; an end of a link was
+    // refused at the link's turn, with everything else written.
+    for (const [plan, message] of [
+      [
+        { thoughts: [{ tempId: "a", name: "A", parent: ZEROS }] },
+        `thought "a" references parent ${ZEROS}, the all-zero UUID, which names no thought`,
+      ],
+      [
+        { thoughts: [{ tempId: "a", name: "A", parent: ZEROS, relation: "jump" }] },
+        `thought "a" references parent ${ZEROS}, the all-zero UUID, which names no thought`,
+      ],
+      [
+        {
+          thoughts: [{ tempId: "a", name: "A", parent: ROOT }],
+          links: [{ from: "a", to: ZEROS, name: "x" }],
+        },
+        `the link a -> ${ZEROS} references ${ZEROS}, the all-zero UUID, in its to field, ` +
+          "and it names no thought",
+      ],
+      [
+        {
+          thoughts: [{ tempId: "a", name: "A", parent: ROOT }],
+          links: [{ from: ZEROS, to: "a", relation: "child" }],
+        },
+        `the link ${ZEROS} -> a references ${ZEROS}, the all-zero UUID, in its from field, ` +
+          "and it names no thought",
+      ],
+    ] as const) {
+      expect(() => planLevels(plan as IngestPlan), message).toThrowError(message);
+      const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+      const refused = await ingest(fake.api, BRAIN, plan as IngestPlan).catch((e: unknown) => e);
+      expect(refused, message).toBeInstanceOf(IngestMissingError);
+      expect((refused as IngestMissingError).ids).toEqual([ZEROS]);
+      expect([...fake.thoughts.keys()], message).toEqual([ROOT]);
+      expect([...fake.parentReads, ...fake.thoughtReads, ...fake.graphReads], message).toEqual([]);
+    }
+  });
+
+  it("is a tempId like any other when the plan has a thought by that label", () => {
+    // A label is whatever the plan calls its thought, and names nothing else.
+    expect(() =>
+      planLevels({
+        thoughts: [
+          { tempId: ZEROS, name: "Top", parent: ROOT },
+          { tempId: "a", name: "A", parent: ZEROS },
+        ],
+        links: [{ from: "a", to: ZEROS }],
+      }),
+    ).not.toThrow();
   });
 });

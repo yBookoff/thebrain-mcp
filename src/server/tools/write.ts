@@ -13,6 +13,7 @@ import { Relation, ThoughtKind } from "../../api/types.js";
 import {
   MAX_ALIASES,
   TheBrainError,
+  assertUuid,
   mayHaveLanded,
   normalizeAliases,
   warnIfFencedCode,
@@ -112,6 +113,13 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
             "out to create a thought with no link.",
         );
       }
+
+      // Ahead of every read, and by the tool's own name for it: `create`
+      // checks the same under the API's, after the tags have been read. The
+      // identifier of zeros is refused here with a malformed one: the API
+      // takes it for no parent given, and the thought was created with none.
+      if (parentId !== undefined) assertUuid(parentId, "parentId");
+      if (typeId !== undefined) assertUuid(typeId, "typeId");
 
       // Before the thought exists: refused after it, a tag that is no tag
       // would leave the thought behind for a retry to make again.
@@ -459,6 +467,12 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       },
     },
     guard(async ({ brainId: bid, fromId, toId, relation, name }) => {
+      // Both ends ahead of any read, and by the tool's own names for them:
+      // the lookup and the write name the API's, `thoughtIdA` and
+      // `thoughtIdB`, and one end used to be read before the other was looked
+      // at. A malformed one and the identifier of zeros alike.
+      assertUuid(fromId, "fromId");
+      assertUuid(toId, "toId");
       // Ahead of everything, the label of a link already there included: under
       // a type a thought is given that type, and loses the one it had, and
       // under a tag it is tagged, which is no link and no parent.
@@ -477,15 +491,18 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
             fromName: "fromId",
             toName: "toId",
           },
-          name !== undefined,
+          name,
         );
         if (!found.ordinary) return ok(section("No link added", found.note)!);
-        if (name !== undefined) await ctx.api.links.update(bid, existing.id, { name });
+        // A label the link has already is not sent again, and one that takes
+        // another's place is quoted: "label updated" used to be all it said,
+        // of a label written over as of one that was there already.
+        if (found.label?.write === true) await ctx.api.links.update(bid, existing.id, { name });
         return ok(
           section(
             "Link already existed",
             found.asAsked
-              ? `identifier ${existing.id}` + (name !== undefined ? ", label updated" : "")
+              ? `identifier ${existing.id}` + (found.label !== null ? `, ${found.label.said}` : "")
               : `identifier ${existing.id}: ${found.note}`,
           )!,
         );

@@ -23,11 +23,28 @@ export function isUuid(value: string): boolean {
 }
 
 /**
+ * The identifier of zeros. The API returns it, with a 200, for a link it did
+ * not make (`createdId`). Sent to the API, it is taken for no identifier at
+ * all wherever one can be done without (`assertUuid`).
+ */
+export const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
+
+/**
  * Validates a UUID before the request goes out.
  *
  * Without this a malformed identifier reaches the server, misses the router
  * and comes back as an HTML page with status 200 — indistinguishable from
  * success to a naive caller.
+ *
+ * The identifier of zeros is refused here as well, though it is well formed.
+ * It names nothing, and the API does not always say so (docs/api-map.md,
+ * L29): a create sent it for a source or for a type answers 200 and makes the
+ * thought with no link and no type, where any other identifier nobody has is
+ * a 404 or a 400; a note written to it is a 200 and a note that never reads
+ * back; and its history is a 200 with other thoughts' entries. Every
+ * identifier of every request passes through here, so this is the one place:
+ * a check in the tools would leave out a plan's references and the indexer's
+ * reads. An identifier of zeros in an *answer* is `zero_id`, from `createdId`.
  */
 export function assertUuid(value: string, field: string): void {
   if (!isUuid(value)) {
@@ -36,10 +53,14 @@ export function assertUuid(value: string, field: string): void {
       `${field} must be a UUID, got ${JSON.stringify(value)}`,
     );
   }
+  if (value === ZERO_UUID) {
+    throw new TheBrainError(
+      "invalid_uuid",
+      `${field} is the all-zero UUID (${ZERO_UUID}), which names nothing. ` +
+        "Leave an optional identifier out rather than send zeros",
+    );
+  }
 }
-
-/** What the API returns, with a 200, for a link it did not make. */
-const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 
 /**
  * The identifier a create answered with. Throws `zero_id`, with `message`,

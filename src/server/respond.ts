@@ -124,6 +124,15 @@ export function describeError(error: unknown, alone = true): string {
             "parent and the type with brain_get_thought before sending the call again."
           );
         }
+        // An end of a link that no thought has, and a thought to be tagged
+        // that nobody has: a 400 where a create under such a thought is a
+        // 404, in words that carry the identifier (L3). They are kept, and
+        // the request is left out: its path names the brain alone, which is
+        // not what was wrong. "source" is the link's first end and "target"
+        // its second, as the tools' own arguments have them.
+        if (LINK_END_MISSING.test(error.message.trim())) {
+          return `${sentence(error.message)} ${GONE} ${TAKE_IDENTIFIERS}`;
+        }
         return error.toToolMessage();
       default:
         return error.toToolMessage();
@@ -143,6 +152,9 @@ const ADDRESSED = /^\/api\/(thought|link)s\/[^/]+\/([0-9a-f-]{36})$/i;
 
 /** The path a note is read from: brain, then the thought it is the note of. */
 const NOTE_PATH = /^\/api\/notes\/[^/]+\/[0-9a-f-]{36}$/i;
+
+/** What `POST /api/links` answers for an end no thought of the brain has: the first it misses. */
+const LINK_END_MISSING = /^could not get (source|target) thought [0-9a-f-]{36}\.?$/i;
 
 /**
  * The first sentence for a 404. The API's own text is kept when it has one:

@@ -36,7 +36,14 @@ export class TheBrainApi {
   }
 }
 
-export { TheBrainClient, assertUuid, isUuid, emptyOn400, mayHaveLanded } from "./client.js";
+export {
+  TheBrainClient,
+  ZERO_UUID,
+  assertUuid,
+  isUuid,
+  emptyOn400,
+  mayHaveLanded,
+} from "./client.js";
 export { TheBrainError, type ApiErrorKind } from "./errors.js";
 export { compareLogTime, logEntryKey, logTime } from "./log.js";
 export { LOG_PAGE_SIZE } from "./resources/brains.js";
@@ -56,6 +63,7 @@ export {
   isStructuralLink,
   isTagLink,
   isTypeLink,
+  linkNameAsStored,
   type CreateLinkInput,
   type UpdateLinkInput,
 } from "./resources/links.js";

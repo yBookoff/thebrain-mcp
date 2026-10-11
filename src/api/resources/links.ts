@@ -251,6 +251,9 @@ export class LinksResource {
    * that.
    */
   async requireTag(brainId: string, tagId: string, thoughtId?: string): Promise<ThoughtDto> {
+    // Ahead of the read of the tag: a thought that cannot be tagged, being
+    // malformed or the identifier of zeros, sends nothing.
+    if (thoughtId !== undefined) assertUuid(thoughtId, "thoughtId");
     // Case aside: the API reads a UUID in capitals too.
     if (thoughtId !== undefined && sameId(tagId, thoughtId)) {
       throw new TheBrainError(
@@ -259,6 +262,22 @@ export class LinksResource {
       );
     }
     return requireKind(this.client, brainId, tagId, ThoughtKind.Tag);
+  }
+
+  /**
+   * Whether the tag is on the thought: the link the two share is the tag's,
+   * with the tag at its head, which is what `detachTag` deletes.
+   *
+   * It is for a caller that would attach a tag a second time. The request
+   * that attaches one answers 200 with the identifier of the attachment that
+   * is there, changes nothing, and logs a `402` against it all the same
+   * (docs/api-map.md, L35). The lookup is not behind a write: straight after
+   * an attach it had the link, and straight after a detach it did not, 20
+   * times of 20 each.
+   */
+  async hasTag(brainId: string, thoughtId: string, tagThoughtId: string): Promise<boolean> {
+    const link = await this.between(brainId, thoughtId, tagThoughtId);
+    return link !== null && isTagLink(link) && sameId(link.thoughtIdA, tagThoughtId);
   }
 
   /**
@@ -318,6 +337,20 @@ export function isTypeLink(link: LinkDto): boolean {
 /** An ordinary link — the kind worth showing as graph structure. */
 export function isStructuralLink(link: LinkDto): boolean {
   return link.meaning === LinkMeaning.Normal;
+}
+
+/**
+ * A link's name as TheBrain keeps it, by a `POST` and by a `PATCH` alike: a
+ * tab and a line feed are each a space, and the blanks at either end are
+ * dropped, a no-break space among them. A run of spaces inside is kept, and
+ * so is a carriage return (contract test; docs/api-map.md, L35).
+ *
+ * It is what a name asked for is set against the name a link has: sent as it
+ * was given, `" motivates\n"` would pass for another label than the
+ * `"motivates"` it was stored as, on every run of a plan.
+ */
+export function linkNameAsStored(name: string): string {
+  return name.replace(/[\t\n]/g, " ").trim();
 }
 
 function sameId(a: string, b: string): boolean {

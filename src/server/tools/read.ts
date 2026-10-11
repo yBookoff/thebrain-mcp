@@ -811,9 +811,14 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
           // logged as a link created, and reads as one unless the tag is marked.
           (t) => `${t.name ?? "(unnamed)"}${kindMark(t.kind)}`,
           // Not "(unnamed)" for a read that failed: a thought deleted since
-          // would read as one that is there, in every row about it.
+          // would read as one that is there, in every row about it. The
+          // identifier of zeros, which the log has for a note written to no
+          // thought, is that 404 too, and is refused ahead of the request.
           (error: unknown) =>
-            error instanceof TheBrainError && error.kind === "not_found" ? DELETED : NOT_READ,
+            error instanceof TheBrainError &&
+            (error.kind === "not_found" || error.kind === "invalid_uuid")
+              ? DELETED
+              : NOT_READ,
         );
         return [id, name] as const;
       });

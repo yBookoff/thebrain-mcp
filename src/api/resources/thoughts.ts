@@ -245,6 +245,9 @@ export class ThoughtsResource {
     if (input.sourceThoughtId !== undefined) {
       assertUuid(input.sourceThoughtId, "sourceThoughtId");
     }
+    // Here as well as in `requireType`: one that is malformed or of zeros
+    // sends nothing, the read of the source included.
+    if (input.typeId !== undefined) assertUuid(input.typeId, "typeId");
     // Ahead of the request, which answers 200 to any number and creates the
     // thought. With 4, the spec's "Sibling", or with 0 it has no link at all;
     // with 5 it has one that no list of the graph shows.

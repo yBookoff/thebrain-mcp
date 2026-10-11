@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { TheBrainError } from "../src/api/index.js";
+import { TheBrainError, assertUuid } from "../src/api/index.js";
 import { EmbedderUnavailableError } from "../src/semantic/embedder.js";
 import { confirmDestructive, confirmationInstructions } from "../src/server/confirm.js";
 import {
@@ -252,8 +252,59 @@ describe("error explanations point at the next step", () => {
     expect(text).not.toMatch(/brainId|brain_list\b|THEBRAIN_API_KEY/);
 
     // A 400 that says what it is about is passed on with its request, as before.
-    expect(refused(`Could not get target thought ${NOBODY}`, `/api/links/${BRAIN}`)).toBe(
-      `Could not get target thought ${NOBODY} (POST /api/links/${BRAIN})`,
+    expect(refused("Link thickness not specified.", `/api/links/${BRAIN}/${NOBODY}`)).toBe(
+      `Link thickness not specified. (POST /api/links/${BRAIN}/${NOBODY})`,
+    );
+  });
+
+  it("the 400 a link gets for an end nobody has keeps the API's words, and says where identifiers come from", () => {
+    // Measured: `POST /api/links` names the first end it does not find, the
+    // source when both are nobody's. It was passed on as it came, "Could not
+    // get target thought <id> (POST /api/links/<brain>)", where a create under
+    // such a thought had its 404 explained.
+    const refused = (message: string, alone?: boolean): string =>
+      describeError(
+        new TheBrainError("bad_request", message, {
+          status: 400,
+          method: "POST",
+          path: `/api/links/${BRAIN}`,
+        }),
+        alone,
+      );
+    for (const end of ["source", "target"]) {
+      const text = refused(`Could not get ${end} thought ${NOBODY}`);
+      expect(text, end).toBe(
+        `Could not get ${end} thought ${NOBODY}. It may have been deleted, or be another ` +
+          "brain's. Take identifiers from brain_search or brain_get_thought.",
+      );
+      // The request's path has the brain alone in it, which was not what was wrong.
+      expect(text, end).not.toMatch(/brainId|brain_list\b|THEBRAIN_API_KEY|POST/);
+      expect(text, end).not.toContain(BRAIN);
+      // The same as a line under "Failed", where "Nothing was written" would
+      // be read of the batch: it makes no such claim either way.
+      expect(refused(`Could not get ${end} thought ${NOBODY}`, false), end).toBe(text);
+    }
+    // With the period the API puts on some of its sentences, and in capitals.
+    expect(refused(`Could not get target thought ${NOBODY.toUpperCase()}.`)).toMatch(
+      /^Could not get target thought [0-9A-F-]{36}\. It may have been deleted/,
+    );
+    // Only that sentence: a 400 about a link in other words is as it came.
+    expect(refused("Link could not be created.")).toBe(
+      `Link could not be created. (POST /api/links/${BRAIN})`,
+    );
+  });
+
+  it("the identifier of zeros is told as that, with the same way on as a malformed one", () => {
+    let thrown: unknown;
+    try {
+      assertUuid("00000000-0000-0000-0000-000000000000", "parentId");
+    } catch (error) {
+      thrown = error;
+    }
+    expect(describeError(thrown)).toBe(
+      "parentId is the all-zero UUID (00000000-0000-0000-0000-000000000000), which names " +
+        "nothing. Leave an optional identifier out rather than send zeros. Take identifiers " +
+        "from brain_list, brain_search or brain_get_thought — do not invent them.",
     );
   });
 

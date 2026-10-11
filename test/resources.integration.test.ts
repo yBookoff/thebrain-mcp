@@ -33,6 +33,7 @@ import {
   isTagLink,
   isTypeLink,
   isUuid,
+  linkNameAsStored,
   logEntryKey,
   logTime,
   replayThoughtIds,
@@ -2605,8 +2606,9 @@ suite("resource layer against the live API", () => {
         modificationDateTime: "0001-01-01T00:00:00",
       });
       // The same for every identifier that names no thought of this brain.
-      const zeros = "00000000-0000-0000-0000-000000000000";
-      for (const id of [zeros, brainId]) {
+      // The one of zeros among them, which the resources no longer send:
+      // *the identifier of zeros, sent in a request*, below.
+      for (const id of ["ffffffff-ffff-ffff-ffff-ffffffffffff", brainId]) {
         expect(await answer(api.thoughts.get(brainId, id)), id).toBe(BARE_404);
         expect(await answer(api.thoughts.getGraph(brainId, id)), id).toBe(
           `403 forbidden: ${CATCH_ALL}`,
@@ -4001,9 +4003,17 @@ suite("resource layer against the live API", () => {
         relation: Relation.Jump,
       });
       await api.links.attachTag(brainId, id, tagId);
+      // And a child of its own, for a link asked for the other way up: a
+      // plan's second link between one pair is not sent at all (L35), so each
+      // link below asks about a pair of its own.
+      const under = await api.thoughts.create(brainId, {
+        name: `${PREFIX}la-under`,
+        sourceThoughtId: id,
+      });
+      created.push(under);
       await eventually(
         () => api.thoughts.getGraph(brainId, id),
-        (g) => g.tags.length === 1 && g.jumps.length === 1,
+        (g) => g.tags.length === 1 && g.jumps.length === 1 && g.children.length === 1,
       );
 
       // As the API stores them, which is what the report reads: a parent's
@@ -4019,8 +4029,8 @@ suite("resource layer against the live API", () => {
       expect(shape(before.tag)).toEqual([tagId, Relation.Child, LinkMeaning.Tag, null]);
       expect(shape(before.type)).toEqual([typeId, Relation.Child, LinkMeaning.Type, null]);
       const asked = { from: id, to: upper, fromName: "from", toName: "to" };
-      expect(linkFound(before.upper!, { ...asked, relation: "parent" }, false).asAsked).toBe(true);
-      expect(linkFound(before.upper!, { ...asked, relation: "child" }, false).asAsked).toBe(false);
+      expect(linkFound(before.upper!, { ...asked, relation: "parent" }).asAsked).toBe(true);
+      expect(linkFound(before.upper!, { ...asked, relation: "child" }).asAsked).toBe(false);
 
       const outcome = await ingest(api, brainId, {
         thoughts: [{ tempId: "new", name: `${PREFIX}la-new`, parent: root, relation: "parent" }],
@@ -4030,7 +4040,7 @@ suite("resource layer against the live API", () => {
           { from: root, to: "new", relation: "parent", name: "sits under" },
           // Another kind, and the other way up.
           { from: id, to: beside, relation: "child", name: "holds" },
-          { from: upper, to: id, relation: "parent" },
+          { from: id, to: under, relation: "parent" },
           // No link at all between two thoughts.
           { from: id, to: tagId, name: "about" },
           { from: id, to: typeId, relation: "jump", name: "an example of" },
@@ -4048,9 +4058,9 @@ suite("resource layer against the live API", () => {
         [`${id} -> ${beside}`]:
           `the link already existed as jump, the requested parent-child with ${id} above ` +
           "was not added — only the label was updated",
-        [`${upper} -> ${id}`]:
-          `the link already existed as parent-child with ${upper} above, the requested ` +
-          `parent-child with ${id} above was not added`,
+        [`${id} -> ${under}`]:
+          `the link already existed as parent-child with ${id} above, the requested ` +
+          `parent-child with ${under} above was not added`,
       });
       const over = "and two thoughts share one link: the requested jump was not added in its place";
       expect(notes(outcome.linksNotAdded)).toEqual({
@@ -5121,6 +5131,491 @@ suite("resource layer against the live API", () => {
       await settle();
       expect((await api.thoughts.getGraph(brainId, root)).children).toEqual([]);
     });
+  });
+
+  /**
+   * What the API does with `00000000-0000-0000-0000-000000000000` where an
+   * identifier goes. Measured on TheBrain 15.0.640, 2026-10-11, five times
+   * of five each. Where it can, a create takes it for no identifier given
+   * and answers 200; elsewhere it is an identifier nobody has. `assertUuid`
+   * refuses it ahead of every request, so the requests here go out by the
+   * client, past the resources.
+   */
+  describe("the identifier of zeros, sent in a request", () => {
+    const ZEROS = "00000000-0000-0000-0000-000000000000";
+    const answer = (request: Promise<unknown>): Promise<string> =>
+      request.then(
+        () => "accepted",
+        (e: unknown) =>
+          e instanceof TheBrainError ? `${e.status} ${e.kind}: ${e.message}` : String(e),
+      );
+    const rawCreate = async (extra: Record<string, unknown>): Promise<string> => {
+      const { id } = await api.client.post<{ id: string }>(`/api/thoughts/${brainId}`, {
+        json: { name: `${PREFIX}zeros`, kind: ThoughtKind.Normal, acType: 0, ...extra },
+      });
+      created.push(id);
+      return id;
+    };
+
+    it("a create with it for a source is a 200 and a thought linked to nothing, under each relation", async () => {
+      // A random identifier nobody has is a 404 here, and makes no thought.
+      for (const relation of [Relation.Child, Relation.Parent, Relation.Jump]) {
+        const id = await rawCreate({ sourceThoughtId: ZEROS, relation });
+        expect(id, `relation ${relation}`).not.toBe(ZEROS);
+        const graph = await api.thoughts.getGraph(brainId, id);
+        expect(
+          [graph.parents, graph.children, graph.jumps, graph.links].map((l) => l.length),
+          `relation ${relation}`,
+        ).toEqual([0, 0, 0, 0]);
+      }
+    });
+
+    it("a create with it for a type is a 200 and a thought with no type, where a random one is a 400", async () => {
+      const source = await make("zeros-source");
+      const alone = await rawCreate({ typeId: ZEROS });
+      const under = await rawCreate({ typeId: ZEROS, sourceThoughtId: source, relation: 1 });
+      expect((await api.thoughts.get(brainId, alone)).typeId).toBeNull();
+      const graph = await api.thoughts.getGraph(brainId, under);
+      expect(graph.thought.typeId).toBeNull();
+      expect(graph.type).toBeNull();
+      // The source it was given beside the zeros is its parent all the same.
+      expect(graph.parents.map((p) => p.id)).toEqual([source]);
+
+      expect(
+        await answer(
+          api.client.post(`/api/thoughts/${brainId}`, {
+            json: { name: `${PREFIX}never`, kind: 1, acType: 0, typeId: crypto.randomUUID() },
+          }),
+        ),
+      ).toBe("400 bad_request: Could not create thought.");
+    });
+
+    it("everywhere else it is an identifier nobody has: a 404, the catch-all 403, the link's 400, a brain's 401", async () => {
+      const id = await make("zeros-anchor");
+      const get = (path: string): Promise<string> => answer(api.client.get(path));
+      expect(await get(`/api/thoughts/${brainId}/${ZEROS}`)).toBe("404 not_found: Not Found");
+      expect(await get(`/api/thoughts/${brainId}/${ZEROS}/graph`)).toMatch(/^403 forbidden: /);
+      expect(await get(`/api/links/${brainId}/${ZEROS}`)).toBe("404 not_found: Not Found");
+      expect(await get(`/api/links/${brainId}/${id}/${ZEROS}`)).toBe("404 not_found: Not Found");
+      expect(
+        await answer(
+          api.client.patch(`/api/thoughts/${brainId}/${ZEROS}`, {
+            jsonPatch: [{ op: "replace", path: "/name", value: "never" }],
+          }),
+        ),
+      ).toBe("404 not_found: Not Found");
+      const link = (thoughtIdA: string, thoughtIdB: string): Promise<string> =>
+        answer(
+          api.client.post(`/api/links/${brainId}`, {
+            json: { thoughtIdA, thoughtIdB, relation: Relation.Jump },
+          }),
+        );
+      expect(await link(id, ZEROS)).toBe(
+        `400 bad_request: Could not get target thought ${ZEROS}`,
+      );
+      expect(await link(ZEROS, id)).toBe(
+        `400 bad_request: Could not get source thought ${ZEROS}`,
+      );
+      expect(await get(`/api/brains/${ZEROS}`)).toBe(
+        `401 unknown_brain: Access to brain ${ZEROS} is unauthorized.`,
+      );
+      await settle(400);
+      expect((await api.thoughts.getGraph(brainId, id)).links).toEqual([]);
+    });
+
+    it("its history is a 200 with other thoughts' entries, where a random identifier's is empty", async () => {
+      await make("zeros-logged");
+      const history = (id: string): Promise<ModificationLogDto[]> =>
+        api.client.get<ModificationLogDto[]>(`/api/thoughts/${brainId}/${id}/modifications`, {
+          query: { maxLogs: 20, includeRelatedLogs: true },
+        });
+      const entries = await history(ZEROS);
+      expect(entries.length).toBeGreaterThan(0);
+      expect(entries.some((e) => e.sourceId !== ZEROS)).toBe(true);
+      expect(await history(crypto.randomUUID())).toEqual([]);
+    });
+
+    it("a note written to it is a 200 and an attachment that no read of the note returns", async () => {
+      // A note written to a random identifier nobody has reads back (L3).
+      const attachments = (): Promise<Array<{ id: string; isNotes: boolean }>> =>
+        api.client.get(`/api/thoughts/${brainId}/${ZEROS}/attachments`);
+      const note = (): Promise<{ markdown: string | null }> =>
+        api.client.get(`/api/notes/${brainId}/${ZEROS}`);
+      try {
+        await api.client.post(`/api/notes/${brainId}/${ZEROS}/update`, {
+          json: { markdown: `${PREFIX}note for nobody` },
+        });
+        const stored = await eventually(attachments, (list) => list.length > 0, {
+          timeoutMs: 3000,
+          stepMs: 50,
+        });
+        expect(stored.map((a) => a.isNotes)).toEqual([true]);
+        // Not a lag: asked for a second, it is still the note of no thought.
+        const read = await eventually(note, (n) => (n.markdown ?? "") !== "", {
+          timeoutMs: 1000,
+          stepMs: 50,
+        });
+        expect(read.markdown ?? "").toBe("");
+      } finally {
+        for (const a of await attachments()) {
+          await api.client.delete(`/api/attachments/${brainId}/${a.id}`).catch(() => undefined);
+        }
+      }
+      await eventually(attachments, (list) => list.length === 0, { timeoutMs: 3000 });
+      expect(await attachments()).toEqual([]);
+    }, 20_000);
+
+    it("the resources send none of it: each refuses ahead of the request, and nothing is made", async () => {
+      const id = await make("zeros-refused");
+      await settle(400);
+      const before = await api.brains.statistics(brainId);
+      const refused = { kind: "invalid_uuid", status: undefined };
+      for (const [what, send] of [
+        ["a source", () => api.thoughts.create(brainId, { name: "never", sourceThoughtId: ZEROS })],
+        [
+          "a source to jump to",
+          () =>
+            api.thoughts.create(brainId, {
+              name: "never",
+              sourceThoughtId: ZEROS,
+              relation: Relation.Jump,
+            }),
+        ],
+        ["a type", () => api.thoughts.create(brainId, { name: "never", typeId: ZEROS })],
+        ["a note", () => api.notes.set(brainId, ZEROS, "never")],
+        ["a note to add to", () => api.notes.append(brainId, ZEROS, "never")],
+        ["a link's end", () => api.links.create(brainId, { thoughtIdA: id, thoughtIdB: ZEROS })],
+        ["a thought to tag", () => api.links.attachTag(brainId, ZEROS, id)],
+        ["a brain", () => api.thoughts.get(ZEROS, id)],
+      ] as const) {
+        await expect(send(), what).rejects.toMatchObject(refused);
+      }
+      // A plan names its item, and is rejected before it reads anything.
+      await expect(
+        ingest(api, brainId, { thoughts: [{ tempId: "a", name: "never", parent: ZEROS }] }),
+      ).rejects.toBeInstanceOf(IngestMissingError);
+      await expect(
+        ingest(api, brainId, {
+          thoughts: [{ tempId: "a", name: `${PREFIX}zeros-never`, parent: id }],
+          links: [{ from: "a", to: ZEROS }],
+        }),
+      ).rejects.toBeInstanceOf(IngestMissingError);
+
+      await settle(400);
+      const after = await api.brains.statistics(brainId);
+      expect([after.thoughts, after.links, after.notes]).toEqual([
+        before.thoughts,
+        before.links,
+        before.notes,
+      ]);
+      expect((await api.thoughts.getGraph(brainId, id)).children).toEqual([]);
+    });
+  });
+
+  /**
+   * What the API does when it is asked for what is there already, and for
+   * the same pair twice at once. Measured on TheBrain 15.0.640, 2026-10-11,
+   * through the API alone; the spec says of `POST /api/links` only that it
+   * "creates a new link". It is what `ingest()` goes by when a plan is sent
+   * a second time, and when a plan names one pair in two of its links.
+   */
+  describe("a link, a label and a tag that are there already", () => {
+    const pair = async (name: string): Promise<{ a: string; b: string }> => ({
+      a: await make(`${name}-A`),
+      b: await make(`${name}-B`),
+    });
+    const post = (body: Record<string, unknown>): Promise<{ id: string }> =>
+      api.client.post<{ id: string }>(`/api/links/${brainId}`, { json: body });
+    /** The log's entries about one link, oldest first, as `modType old→new`. */
+    const logged = async (linkId: string, atLeast: number): Promise<string[]> => {
+      const ours = (entries: ModificationLogDto[]): ModificationLogDto[] =>
+        entries.filter((l) => l.sourceId === linkId);
+      const entries = await eventually(
+        () => api.brains.modifications(brainId, { maxLogs: 300 }),
+        (all) => ours(all).length >= atLeast,
+        { timeoutMs: 3000, stepMs: 100 },
+      );
+      return ours(entries)
+        .sort((x, y) => compareLogTime(logTime(x), logTime(y)))
+        .map((l) =>
+          l.oldValue === null && l.newValue === null
+            ? String(l.modType)
+            : `${l.modType} ${JSON.stringify(l.oldValue)}→${JSON.stringify(l.newValue)}`,
+        );
+    };
+    /** The links a thought's graph has between it and another. */
+    const joining = async (a: string, b: string): Promise<LinkDto[]> =>
+      (await api.thoughts.getGraph(brainId, a)).links.filter(
+        (l) => [l.thoughtIdA, l.thoughtIdB].includes(a) && [l.thoughtIdA, l.thoughtIdB].includes(b),
+      );
+
+    it("a name a link has already is a 200 that logs nothing; another logs a 103 with both", async () => {
+      const { a, b } = await pair("there-name");
+      const { id } = await post({ thoughtIdA: a, thoughtIdB: b, relation: 3, name: "old" });
+      expect(await logged(id, 2)).toEqual(["101", '103 null→"old"']);
+
+      // Sent the name it has: accepted, and the log is as it was.
+      await api.links.update(brainId, id, { name: "old" });
+      await settle(500);
+      expect(await logged(id, 2)).toEqual(["101", '103 null→"old"']);
+      expect((await api.links.get(brainId, id)).name).toBe("old");
+
+      // The lookup of the pair has the new name straight after the patch,
+      // 20 times of 20, where the read of the link by its own identifier
+      // still had the old one, 20 of 20, for 9 to 134 ms (L22). It is what
+      // the tools read a label by.
+      expect((await api.links.between(brainId, a, b))?.name).toBe("old");
+      await api.links.update(brainId, id, { name: "new" });
+      expect((await api.links.between(brainId, a, b))?.name).toBe("new");
+      expect(await logged(id, 3)).toEqual(["101", '103 null→"old"', '103 "old"→"new"']);
+    }, 30_000);
+
+    it("a link's name is stored with a tab and a line feed as spaces and no blanks at its ends, by a post as by a patch", async () => {
+      for (const sent of [
+        "plain",
+        "  padded  ",
+        "two  spaces",
+        "tab\tinside",
+        "line\nbreak",
+        "crlf\r\nbreak",
+        "\nleading and trailing\n",
+        " nbsp ends ",
+      ]) {
+        const { a, b } = await pair("there-stored");
+        const posted = await post({ thoughtIdA: a, thoughtIdB: b, relation: 3, name: sent });
+        const other = await pair("there-stored-p");
+        const patched = await post({ thoughtIdA: other.a, thoughtIdB: other.b, relation: 3 });
+        await api.links.update(brainId, patched.id, { name: sent });
+        const stored = linkNameAsStored(sent);
+        for (const id of [posted.id, patched.id]) {
+          const link = await eventually(
+            () => api.links.get(brainId, id),
+            (l) => l.name === stored,
+            { timeoutMs: 3000, stepMs: 50 },
+          );
+          expect(link.name, JSON.stringify(sent)).toBe(stored);
+        }
+      }
+    }, 60_000);
+
+    it("a link posted over the pair's own answers its identifier and logs a 402, changed or not; a name it does not send stays", async () => {
+      const { a, b } = await pair("there-post");
+      // The lookup is answered before the write, and has the link straight
+      // after it: it is not a copy that is behind, as a graph is.
+      expect(await api.links.between(brainId, a, b)).toBeNull();
+      const { id } = await post({ thoughtIdA: a, thoughtIdB: b, relation: 3, name: "kept" });
+      expect((await api.links.between(brainId, a, b))?.id).toBe(id);
+      expect(await logged(id, 2)).toEqual(["101", '103 null→"kept"']);
+
+      // The same link again, with its name and without one: nothing changes.
+      for (const [n, body] of [
+        [3, { thoughtIdA: a, thoughtIdB: b, relation: 3, name: "kept" }],
+        [4, { thoughtIdA: a, thoughtIdB: b, relation: 3 }],
+        // From the other end too.
+        [5, { thoughtIdA: b, thoughtIdB: a, relation: 3 }],
+      ] as const) {
+        expect((await post(body)).id).toBe(id);
+        expect((await logged(id, n)).slice(2)).toEqual(Array.from({ length: n - 2 }, () => "402"));
+        expect((await api.links.get(brainId, id)).name).toBe("kept");
+      }
+      expect(await joining(a, b)).toHaveLength(1);
+
+      // With another name it takes that name, and with another relation that.
+      expect((await post({ thoughtIdA: a, thoughtIdB: b, relation: 1, name: "next" })).id).toBe(id);
+      expect((await logged(id, 7)).slice(5)).toEqual(["402", '103 "kept"→"next"']);
+      const link = await eventually(
+        () => api.links.get(brainId, id),
+        (l) => l.relation === Relation.Child,
+      );
+      expect([link.relation, link.name]).toEqual([Relation.Child, "next"]);
+    }, 30_000);
+
+    it("a tag attached a second time is a 200 with the attachment's identifier and a 402 in the log, and the pair lookup is not behind either write", async () => {
+      const id = await make("there-tagged");
+      const tagId = await make("there-tag", ThoughtKind.Tag);
+      // Asked before the write, as a plan asks: a lookup answered earlier.
+      expect(await api.links.hasTag(brainId, id, tagId)).toBe(false);
+      await api.thoughts.getGraph(brainId, id);
+
+      const first = await api.links.attachTag(brainId, id, tagId);
+      expect(await api.links.hasTag(brainId, id, tagId)).toBe(true);
+      expect(await logged(first, 1)).toEqual(["101"]);
+
+      const second = await api.links.attachTag(brainId, id, tagId);
+      expect(second).toBe(first);
+      expect(await logged(first, 2)).toEqual(["101", "402"]);
+      const graph = await eventually(
+        () => api.thoughts.getGraph(brainId, id),
+        (g) => g.tags.length === 1,
+      );
+      expect(graph.tags.map((t) => t.id)).toEqual([tagId]);
+      expect(graph.links).toHaveLength(1);
+
+      expect(await api.links.detachTag(brainId, id, tagId)).toBe(true);
+      expect(await api.links.hasTag(brainId, id, tagId)).toBe(false);
+    }, 30_000);
+
+    it("two links posted at once for a pair with none can both be made, and then the pair lookup is a 404 and a further post a 400", async () => {
+      // Over 60 pairs: two links 51 times, each with an identifier of its
+      // own, both read by it and both in the graph; one link the other 9,
+      // one of the two identifiers answered then naming no link. So a pair
+      // is tried until it comes to two, which the first or the second does.
+      let doubled: { a: string; b: string; ids: string[] } | null = null;
+      for (let attempt = 0; attempt < 20 && doubled === null; attempt += 1) {
+        const { a, b } = await pair(`there-twice-${attempt}`);
+        const [x, y] = await Promise.all([
+          post({ thoughtIdA: a, thoughtIdB: b, relation: 3 }),
+          post({ thoughtIdA: a, thoughtIdB: b, relation: 3 }),
+        ]);
+        await settle(600);
+        const links = await joining(a, b);
+        expect([1, 2], `attempt ${attempt}`).toContain(links.length);
+        if (links.length === 2) doubled = { a, b, ids: [x.id, y.id] };
+      }
+      expect(doubled, "no pair came to two links in twenty tries").not.toBeNull();
+      const { a, b, ids } = doubled!;
+
+      expect(new Set(ids).size).toBe(2);
+      expect((await joining(a, b)).map((l) => l.id).sort()).toEqual([...ids].sort());
+      // Two links the same way: the lookup finds neither, from either end.
+      expect(await api.links.between(brainId, a, b)).toBeNull();
+      expect(await api.links.between(brainId, b, a)).toBeNull();
+      // And nothing further can be posted between the two, whichever way.
+      for (const body of [
+        { thoughtIdA: a, thoughtIdB: b, relation: 3 },
+        { thoughtIdA: b, thoughtIdB: a, relation: 3 },
+        { thoughtIdA: a, thoughtIdB: b, relation: 1 },
+      ]) {
+        await expect(post(body)).rejects.toMatchObject({
+          status: 400,
+          message: "Link could not be created.",
+        });
+      }
+      // One of the two deleted, and the pair has its one link again.
+      await api.links.delete(brainId, ids[0]!);
+      const left = await eventually(
+        () => api.links.between(brainId, a, b),
+        (l) => l !== null,
+        { timeoutMs: 3000, stepMs: 50 },
+      );
+      expect(left?.id).toBe(ids[1]);
+    }, 90_000);
+
+    it("ingest sends one link for a pair its plan names twice, the first, on a first run and on a second", async () => {
+      // Both used to be posted at once and counted under "links created: 2",
+      // and two links between the pair is what 14 plans of 20 left.
+      const root = await make("there-plan-root");
+      const p = await make("there-plan-P");
+      const q = await make("there-plan-Q");
+      const name = (what: string): string => `${PREFIX}there-plan-${what}`;
+      const plan = {
+        thoughts: [
+          { tempId: "a", name: name("a"), parent: root },
+          { tempId: "b", name: name("b"), parent: root },
+        ],
+        links: [
+          { from: "a", to: "b", name: "first" },
+          { from: "b", to: "a", relation: "child" as const, name: "second" },
+          { from: p, to: q, relation: "child" as const },
+          { from: q.toUpperCase(), to: p.toUpperCase() },
+        ],
+      };
+      for (const run of [1, 2]) {
+        const outcome = await ingest(api, brainId, plan);
+        outcome.created.forEach((c) => created.push(c.thoughtId));
+        expect(outcome.failures, `run ${run}`).toEqual([]);
+        expect(outcome.linksCreated, `run ${run}`).toBe(run === 1 ? 2 : 0);
+        // The pairs are written six at a time, so in no set order.
+        expect(
+          outcome.linksNotAdded.map((l) => `${l.from} -> ${l.to}`).sort(),
+          `run ${run}`,
+        ).toEqual([`${q.toUpperCase()} -> ${p.toUpperCase()}`, `b -> a`].sort());
+        expect(outcome.linksNotAdded.find((l) => l.from === "b")!.note).toBe(
+          "the plan has a link between the same two thoughts ahead of this one, a -> b, and " +
+            'two thoughts share one link: this one was not sent, and its label "second" was ' +
+            "not written",
+        );
+      }
+      await settle(600);
+      const [a, b] = (await api.thoughts.getGraph(brainId, root)).children
+        .filter((c) => [name("a"), name("b")].includes(c.name ?? ""))
+        .sort((x, y) => (x.name ?? "").localeCompare(y.name ?? ""))
+        .map((c) => c.id) as [string, string];
+      const ab = await joining(a, b);
+      expect(ab.map((l) => [l.thoughtIdA, l.relation, l.name])).toEqual([
+        [a, Relation.Jump, "first"],
+      ]);
+      const pq = await joining(p, q);
+      expect(pq.map((l) => [l.thoughtIdA, l.relation])).toEqual([[p, Relation.Child]]);
+    }, 60_000);
+
+    it("a second run of a plan logs nothing for its tags and its labels, and a label changed by hand is replaced and quoted", async () => {
+      const root = await make("there-run-root");
+      const tagId = await make("there-run-tag", ThoughtKind.Tag);
+      const name = (what: string): string => `${PREFIX}there-run-${what}`;
+      const plan = {
+        thoughts: [
+          { tempId: "top", name: name("top"), parent: root, tagIds: [tagId] },
+          { tempId: "leaf", name: name("leaf"), parent: "top", tagIds: [tagId] },
+          { tempId: "side", name: name("side"), parent: "top" },
+        ],
+        links: [
+          { from: "leaf", to: "side", name: " motivates\n" },
+          { from: "top", to: "leaf", name: "has part" },
+        ],
+      };
+      const first = await ingest(api, brainId, plan);
+      first.created.forEach((c) => created.push(c.thoughtId));
+      expect(first).toMatchObject({ tagsAttached: 2, tagsAlreadyThere: 0, linksCreated: 1 });
+      const at = (tempId: string): string =>
+        first.created.find((c) => c.tempId === tempId)!.thoughtId;
+      const tagLinks = [
+        (await api.links.between(brainId, at("top"), tagId))!.id,
+        (await api.links.between(brainId, at("leaf"), tagId))!.id,
+      ];
+      const jump = (await api.links.between(brainId, at("leaf"), at("side")))!;
+      expect(jump.name).toBe("motivates");
+      const hierarchy = (await api.links.between(brainId, at("top"), at("leaf")))!;
+      const about = [...tagLinks, jump.id, hierarchy.id];
+      const entries = async (): Promise<number> => {
+        await settle(700);
+        const all = await api.brains.modifications(brainId, { maxLogs: 300 });
+        return all.filter((l) => about.includes(l.sourceId)).length;
+      };
+      const before = await entries();
+
+      const second = await ingest(api, brainId, plan);
+      expect(second).toMatchObject({
+        created: [],
+        tagsAttached: 0,
+        tagsAlreadyThere: 2,
+        linksCreated: 0,
+        failures: [],
+      });
+      expect(second.linksReused.map((l) => l.note).sort()).toEqual([
+        "the link already existed as parent-child with top above, the requested jump was not " +
+          'added, and its label is already "has part"',
+        'the link already existed, label already "motivates"',
+      ]);
+      // It used to add a 402 for each tag.
+      expect(await entries()).toBe(before);
+
+      // A person renames the label, and the plan is sent a third time.
+      await api.links.update(brainId, jump.id, { name: "by hand" });
+      await eventually(
+        () => api.links.get(brainId, jump.id),
+        (l) => l.name === "by hand",
+      );
+      const third = await ingest(api, brainId, plan);
+      expect(third.linksReused.map((l) => l.note)).toContain(
+        'the link already existed, label updated: it was "by hand" and is now "motivates"',
+      );
+      const renamed = await eventually(
+        () => api.links.get(brainId, jump.id),
+        (l) => l.name === "motivates",
+      );
+      expect(renamed.name).toBe("motivates");
+    }, 60_000);
   });
 
   /**

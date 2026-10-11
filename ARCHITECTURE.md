@@ -77,7 +77,9 @@ that matter most:
 
 - **UUIDs are validated before the request.** A malformed UUID in the path makes
   the API return **HTTP 200 with a Blazor HTML page**. A client that trusts the
-  status code will parse an error page as success.
+  status code will parse an error page as success. The identifier of zeros is
+  refused by the same check, though it is well formed: a create takes it for
+  no parent and no type given, and answers 200 (§7, item 21).
 - **The response body decides, not the declared content-type.** The layer sniffs
   for HTML even on 200, and parses JSON regardless of what the header claims.
 
@@ -272,8 +274,10 @@ Five properties, each of which took a bug to get right:
   no parent are rejected up front. So is what a read shows: a `typeId` that is
   no type, a tag that is no tag, a type or a tag named as a parent (§7, items
   15, 17 and 18), and a parent that no thought of the brain has (*When a
-  thought of the plan is not created*, below). A plan either starts writing or
-  does not — no half-written graph from a mistake that was visible in advance.
+  thought of the plan is not created*, below). And the identifier of zeros
+  for a parent or for an end of a link, which needs no read to be known for
+  nobody's (§7, item 21). A plan either starts writing or does not — no
+  half-written graph from a mistake that was visible in advance.
 - **Idempotent.** Re-running the same plan reuses existing thoughts instead of
   duplicating them. Dedup is by `(parentId, relation, trimmed name)`: a thought
   is looked for where its relation puts it, see *What a second run finds*
@@ -281,14 +285,17 @@ Five properties, each of which took a bug to get right:
   two identical names in the same level resolve to one thought rather than
   racing each other into two. (This was a real bug, caught by a unit test.)
   A thought that is reused keeps the note it has, on every run: see *The note
-  of a thought that was there*.
+  of a thought that was there*. And a tag or a label that is there is not
+  written again: see *What a second run writes*.
 - **Honest about what it did not do.** If a requested jump is between a thought
   and its own parent, the API would turn the hierarchy link into that jump, so
   the link is left as it is. The report carries a "Links that already existed"
   section with the mismatch spelled out, rather than counting it as created.
   A tag on one of the two, or its type, is no link that existed: it is left
   as it is too, and listed under "Links not added". `brain_link` answers in
-  the same words (§7, item 21).
+  the same words (§7, item 21). So is the second of two links a plan asks for
+  between one pair, and a label that takes another's place is quoted with
+  the one it took (*What a second run writes*).
 - **A failure takes its own branch and nothing else.** A thought that is not
   created leaves the thoughts under it unwritten and the links to them
   untried, and everything that does not hang on it is written to the end. See
@@ -520,6 +527,116 @@ write, so a note this process has just written is seen.
 **Not guarded.** A note written between this read and this write, a few
 milliseconds apart, is written over. And a note is read once a batch: what
 another call writes while the batch runs is not seen.
+
+#### What a second run writes
+
+Nothing, when what the plan asks for is there. That held for thoughts and,
+since the section above, for notes. It did not hold for tags and for the
+labels of links, and two links of one plan between one pair were written at
+once. Each measured through the real handler on 15.0.640, and what the API
+does is in `docs/api-map.md`, row L35.
+
+**A tag and a label were sent again by every run.** A plan of three thoughts
+with three tags and two labelled links, sent a second time: 16 requests, 5 of
+them writes, an attach for each tag and a `PATCH` for each label, under "tags
+attached: 3" and "label updated", 18 runs of 18. A label written again is a
+200 that changes nothing and logs nothing. A tag attached again is a 200 too,
+and logs a `402` against the attachment each time: three a run, each of
+which a sync then reads both ends of (§8) and `brain_recent_changes` lists as
+"link moved".
+
+Now a tag on a thought the plan found in place is looked up first, with the
+lookup that finds a link (`links.hasTag()`), and one that is there is counted
+under "tags already attached" and not sent. A label is set against the name
+the link has, as TheBrain stores a name (`linkNameAsStored()`: a tab and a
+line feed a space each, the blanks at the ends dropped), and one that is
+there reads `label already "motivates"`. The second run of that plan sends 11
+requests, all of them reads, and logs nothing, 18 runs of 18.
+
+What it costs: one read for a tag on a thought that was there, where there
+were a read of the tag and an attach, so one request fewer when the tag is on
+it and one more when it is not. A thought the batch made has no tag and is
+not asked, so a first run sends what it sent, and reads as it did to the
+character: 9 writes and 14 reads for that plan, beside the wait for the
+graphs, before and after. The reads a plan makes ahead of its writes could
+not answer instead. They read each tag for its kind, not for what it is on,
+and the one read that lists a thought's tags is the graph of a thought the
+plan hangs something on, which a leaf never is and which is a copy up to
+0.5 s behind an attach. The lookup of a pair was not behind a write once in
+80: straight after an attach, a detach, a link posted and a name patched, 20
+times each. The read of a link by its own identifier is behind a patch, 20
+of 20, which is why a label is read by the pair.
+
+**A label that takes another's place is quoted.** A link has one label.
+`brain_link` and a plan both wrote theirs over the one a link had and
+answered "label updated", three times of three each, with no word of what it
+had been. They still replace it, and say `label updated: it was "contradicts"
+and is now "refines"`, the new one as it will be stored. A label written
+where there was none reads "label updated", as it did.
+
+Replaced and reported, where a note is kept. Two things are different. A note
+can be added to, and the plan's text has `brain_append_note` to go to; a link
+has one label and nothing appends to it, so a label kept is the plan's label
+dropped, and the label is all a plan has to add to a link that is there (§7,
+item 21). And what is lost is one line,
+which is whole in the result: the call that set the new label can set the old
+one back. A note's text would not fit in a result, which is why
+`brain_set_note` reports its length and a plan does not replace one at all.
+
+Whether this needs a person's consent (§6) was weighed, and it does not.
+Consent guards what cannot be given back: a deleted thought takes its note,
+its links and its attachments, and no result holds them. A label replaced
+*without a word* was in that class, since the text was gone and nobody had
+been told; quoted, it is one call from being restored. The tools that
+replace a title or a caption ask nobody either. What changed is that this
+one no longer does it silently.
+
+**Two links of a plan between one pair are one link, the first.** Both used
+to look up the pair, both saw no link, and both posted, at once. On the API
+two posts sent together for a pair with no link are not one link rewritten:
+they were two links 51 times in 60, each with its own identifier. Through
+`brain_ingest`, 20 plans: 14 left two links under "links created: 2", 2 one
+link under the same count, and 4 one link and a link under "Failed". Where
+the two go the same way the lookup of the pair answers 404 from then on, so
+the next run posted again and was refused, `Link could not be created.` for
+both links, on every run. Where one link was left, the two labels were
+written over each other on every run.
+
+`ingest()` now groups the links of a plan by the two thoughts each joins,
+after the references are resolved, whichever end is named first. The first
+of a pair in the plan is looked up and written as before. Each other is
+listed under "Links not added": `the plan has a link between the same two
+thoughts ahead of this one, a -> b, and two thoughts share one link: this
+one was not sent, and its label "y" was not written`. On every run, and
+whatever became of the first: after a first that got no answer, a second
+request can be the second link. 20 plans of 20 then left one link, the
+first, on the first run and on the second.
+
+Rejecting the plan before its first write was the other way, and it was
+weighed for the same reasons as a link's end nobody has (*A parent nobody
+has*, below). The pair is known only once the plan's thoughts are found: a
+`tempId` can land on a thought the plan also names by its identifier, and no
+look at the plan's references tells. A rule that rejects what it can see and
+reports what it cannot would treat one mistake two ways. A plan rejected is
+the whole plan sent again to drop one line. And it is what the module does
+elsewhere: of two plan items of one name the first is made, of two notes for
+one thought the first is written, and a plan thought's own parent link
+beside a jump between the same two has always been reported, not refused.
+What is left for the caller is the label, if it wanted the other one, which
+is one `brain_link` call. It is no error, as a tag found between the two is
+none.
+
+The tags of a plan go the same way: one job for a tag on a thought, so a
+tag named twice, in one list or by two plan items that are one thought, is
+one attach. Two attaches of one tag sent at once left two attachments 11
+times in 20.
+
+**Not guarded.** Two calls sent at once for one pair, two `brain_link` calls
+or two plans, are two posts as they were: there is no lock (*What a second
+run finds*). A pair that already has two links cannot be linked or labelled
+by any tool: the lookup answers 404, so the tools post, and the post is
+refused. And `brain_tag` asked to add a tag that is on the thought attaches
+it again, and logs the `402`.
 
 #### When a thought of the plan is not created
 
@@ -1014,6 +1131,17 @@ that no cause was given, which two it is the answer for, that nothing was
 created, and to read the parent and the type before sending the call again.
 It names both because the API names neither, and still not `brainId`.
 
+And one that names what was wrong was passed on with nothing after it: the
+400 a link gets for an end no thought has, `Could not get target thought
+<id> (POST /api/links/<brain>)`, where a create under such a thought had its
+404 explained. It is the line a model reads for a wrong identifier in a link,
+from `brain_link` and under "Failed" in a batch, a plan's links being left to
+fail alone (§4). It is told as that 404 is: the API's sentence, then that the
+thought may have been deleted or be another brain's, and where identifiers
+are taken from. Without the request, whose path has the brain alone in it.
+"Source" and "target" are the link's first and second end, which is what
+`fromId` and `toId` are described as.
+
 **Degradation is reported, not hidden.** When semantic search falls back to the
 lexical fan-out, the outcome carries `degradedReason` and the tool prints it. An
 agent that does not know recall dropped will trust an empty result.
@@ -1163,6 +1291,28 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     thought alike, and `links.create()` and `planLevels()` refuse a thought
     linked to itself before anything is sent.
 
+    *Zeros sent.* The same identifier where a caller puts one. A create with
+    it for a source is a 200 and a thought linked to nothing, under each of
+    the three relations, and with it for a type a 200 and a thought with no
+    type: the API takes it for none given, where any other identifier nobody
+    has is a 404 or a 400. A note written to it is a 200, and a note that no
+    read returns. Elsewhere it is an identifier nobody has. So
+    `brain_create_thought` with it for `parentId` answered "created thought"
+    for a thought with no parent, and the note tools that a note was written,
+    three times of three each. `assertUuid()` refuses it now, with a
+    malformed identifier and for the same reason, a 200 for what was not
+    done. That is the one place every identifier of every request goes
+    through, a plan's references and the indexer's reads included, which a
+    check in the tools' schemas would leave out; and its kind is
+    `invalid_uuid`, which the indexer already takes for a thought that is
+    gone and the note tools for a failure of the call, not of a read.
+    Nothing that carries it is sent, a read included. `brain_create_thought`
+    and `brain_link` check their own arguments first, so the refusal names
+    `parentId` or `toId` and not the API's field, and a plan is rejected for
+    it with the plan item named (§4). An identifier of zeros in an *answer*
+    stays `zero_id`: that one comes after a request, and says a write was not
+    carried out.
+
     *The link that is there.* `GET /api/links/{a}/{b}` returns the one link a
     pair has, and a link posted over it replaces it. So the tools post
     nothing there, and used to say "already existed" whatever it was.
@@ -1174,7 +1324,17 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     ordinary link whatever its relation, as `brain_ingest` always wrote it:
     it says how the two relate, and that link is the one place to keep it.
     It does not go onto a tag's attachment or a type's link, where both
-    tools used to write it.
+    tools used to write it. One that takes another's place is quoted with
+    it, and one the link has already is not sent (§4, *What a second run
+    writes*).
+
+    *One link, when the posts come one after another.* Posted over the link
+    a pair has, a link answers that link's identifier and logs a `402`,
+    changed or not. Two posted at once for a pair with none were two links
+    51 times in 60, and from then on the lookup of the pair answers 404 where
+    both go the same way and a further post is a 400. `ingest()` wrote a
+    plan's links six at a time, so two between one pair did exactly that. It
+    sends one link a pair now, and one attach for a tag on a thought (§4).
 22. **The search answers from a copy that is behind, and a hit is that
     copy.** The search of a brain has an index of its own, refreshed about
     every five seconds. Until the next refresh it returns a thought that was
@@ -1210,6 +1370,7 @@ Measured against a live API by polling until the result appeared:
 | a note changed → the thought's `graph` | lists no Notes attachment at one read within 0.2 s of the change, then lists it again; the note itself reads at once |
 | a note deleted → the thought's `graph` | still lists it for up to 0.2 s, while the note's read is a 403 |
 | `attachTag` → `graph.tags` | ~0.1–0.5 s |
+| a tag attached or detached, a link posted, a link's name patched → the lookup of the pair (`GET /api/links/{a}/{b}`) | at once, 20 times of 20 each, the lookup having been answered before the write |
 | `create` next to a thought → that thought's `graph` lists it | 10–205 ms, about 80 ms at the median: a copy refreshed about every 0.1 s. Live on its first read |
 | `attach URL` → `by-location` | instant |
 | `attach URL` → the thought's attachment list | up to 0.2 s: a copy refreshed about every 0.1 s. Live on its first read |
@@ -1251,6 +1412,11 @@ tag, and `detachTag()` deletes a link only when it is the tag's: meaning 5 or
 7, from the tag (§7, item 17). And `links.create()` refuses a tag above, so
 that a tag is attached by the call that asks for one and by no other (§7,
 item 21).
+
+Attached a second time, a tag is a 200 with the identifier of the attachment
+that is there, and a `402` in the log against it. `links.hasTag()` asks first,
+with the lookup `detachTag()` uses, and a plan does not attach a tag that is
+on its thought (§4, *What a second run writes*).
 
 `statistics.links` does not count tags — links with `meaning=5` are excluded.
 
