@@ -135,7 +135,8 @@ export function describeError(error: unknown, alone = true): string {
 }
 
 const GONE = "It may have been deleted, or be another brain's.";
-const TAKE_IDENTIFIERS = "Take identifiers from brain_search or brain_get_thought.";
+/** Where an identifier that names nothing is to be taken from instead. */
+export const TAKE_IDENTIFIERS = "Take identifiers from brain_search or brain_get_thought.";
 
 /** The path of a thought or a link addressed by its own identifier: brain, then it. */
 const ADDRESSED = /^\/api\/(thought|link)s\/[^/]+\/([0-9a-f-]{36})$/i;

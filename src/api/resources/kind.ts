@@ -56,14 +56,16 @@ export async function requireKind(
  * asks for one, and it does not come through here.
  *
  * An identifier nobody has is left to the write, which answers for it as it
- * did before this check.
+ * did before this check. It is what null says, where a thought that may be a
+ * parent comes back as it was read: a caller with more than this one write
+ * ahead of it can refuse by that, as `ingest()` does its plan.
  */
 export async function requireParent(
   client: TheBrainClient,
   brainId: string,
   id: string,
   field: string,
-): Promise<void> {
+): Promise<ThoughtDto | null> {
   const named = await read(client, brainId, id, field);
   if (named?.kind === ThoughtKind.Type) {
     throw new TheBrainError(
@@ -77,6 +79,7 @@ export async function requireParent(
       `${field} ${id} cannot be a parent: it is the tag "${named.name ?? "(unnamed)"}"`,
     );
   }
+  return named;
 }
 
 /** The thought `id` names, or null when no thought in the brain has it. */

@@ -232,9 +232,9 @@ export class LinksResource {
    * `create` here and `ThoughtsResource.create` both call it. A caller that
    * writes something else first calls it ahead of that. See `requireParent`
    * in `kind.ts` for what the API does with a type and with a tag there, and
-   * for what is let through.
+   * for what is let through: an identifier nobody has, which is null here.
    */
-  async requireParent(brainId: string, id: string, field: string): Promise<void> {
+  async requireParent(brainId: string, id: string, field: string): Promise<ThoughtDto | null> {
     return requireParent(this.client, brainId, id, field);
   }
 

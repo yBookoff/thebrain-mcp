@@ -43,7 +43,12 @@ import {
   type ThoughtGraphDto,
 } from "../src/api/index.js";
 import { describeChange, subjectIds } from "../src/operations/changes.js";
-import { IngestValidationError, ingest, linkFound } from "../src/operations/ingest.js";
+import {
+  IngestMissingError,
+  IngestValidationError,
+  ingest,
+  linkFound,
+} from "../src/operations/ingest.js";
 import type { Embedder } from "../src/semantic/embedder.js";
 import {
   SemanticIndexer,
@@ -3766,9 +3771,12 @@ suite("resource layer against the live API", () => {
     it("nothing is made under a thought that was not, a second run adds nothing, and the rest lands by identifier", async () => {
       const root = await make("pf-root");
       const tagId = await make("pf-tag", ThoughtKind.Tag);
-      const nobody = crypto.randomUUID();
+      // The parent of the branch that fails is there when the plan is checked
+      // and deleted before the create under it. One nobody has from the start
+      // rejects the plan, and no batch is begun: the next test.
+      const doomed = await make("pf-doomed-parent");
       const name = (what: string): string => `${PREFIX}pf-${what}`;
-      const top = { tempId: "top", name: name("top"), parent: nobody, note: "top note" };
+      const top = { tempId: "top", name: name("top"), parent: doomed, note: "top note" };
       const mid = { tempId: "mid", name: name("mid"), parent: "top", tagIds: [tagId] };
       const leaf = { tempId: "leaf", name: name("leaf"), parent: "mid", note: "leaf note" };
       const plan = {
@@ -3786,15 +3794,55 @@ suite("resource layer against the live API", () => {
       };
       const since = new Date().toISOString();
 
-      const first = await ingest(api, brainId, plan);
+      // The API as a plan meets it then. The first read of `doomed` in a run
+      // is the plan's check, and is answered as it was while the thought was
+      // there: the first time by the API, with the thought deleted before
+      // the plan has the answer, and after that by the same answer again,
+      // which is what the API gives for up to 0.15 s after a deletion (L3).
+      // Every other request is the API's own, the later reads of `doomed`
+      // included: by then they are the 404 of an identifier nobody has, and
+      // so is the create under it (L26).
+      let there: { status: number; body: string } | undefined;
+      const checkedThenGone = (): TheBrainApi => {
+        let checked = false;
+        return new TheBrainApi({
+          apiKey: apiKey!,
+          fetchImpl: async (input, init) => {
+            const check =
+              !checked && new URL(String(input)).pathname === `/api/thoughts/${brainId}/${doomed}`;
+            if (!check) return fetch(input, init);
+            checked = true;
+            if (there === undefined) {
+              const response = await fetch(input, init);
+              there = { status: response.status, body: await response.text() };
+              await api.thoughts.delete(brainId, doomed);
+              await eventually(
+                () => api.thoughts.get(brainId, doomed).then(
+                  () => true,
+                  () => false,
+                ),
+                (reads) => !reads,
+                { timeoutMs: 3000, stepMs: 25 },
+              );
+            }
+            return new Response(there.body, {
+              status: there.status,
+              headers: { "content-type": "application/json; charset=utf-8" },
+            });
+          },
+        });
+      };
+
+      const first = await ingest(checkedThenGone(), brainId, plan);
       for (const c of first.created) created.push(c.thoughtId);
+      expect(there?.status).toBe(200);
       expect(first.created.map((c) => c.tempId).sort()).toEqual(["side", "sideleaf"]);
       // The API's own answer for a parent nobody has, and no mark on it: it answered.
       expect(first.failures).toEqual([
         {
           of: "thought",
           what: `thought "${name("top")}" (top)`,
-          reason: `Source Thought ${nobody} could not be located`,
+          reason: `Source Thought ${doomed} could not be located`,
           error: expect.objectContaining({ kind: "not_found", status: 404 }),
         },
       ]);
@@ -3815,13 +3863,18 @@ suite("resource layer against the live API", () => {
       await settle();
       expect(await madeSince(since)).toEqual(written);
 
-      const second = await ingest(api, brainId, plan);
+      const second = await ingest(checkedThenGone(), brainId, plan);
       for (const c of second.created) created.push(c.thoughtId);
       expect(second.created).toEqual([]);
       expect(second.reused.map((r) => r.thoughtId).sort()).toEqual(written);
       expect(second.failures).toEqual(first.failures);
       expect(second.skipped).toEqual(first.skipped);
       await settle();
+      expect(await madeSince(since)).toEqual(written);
+
+      // Once the check itself reads that nobody has the parent, the plan is
+      // rejected whole, and that run adds nothing either.
+      await expect(ingest(api, brainId, plan)).rejects.toBeInstanceOf(IngestMissingError);
       expect(await madeSince(since)).toEqual(written);
 
       // What the result asks for: the failed and skipped items alone, the
@@ -3847,6 +3900,121 @@ suite("resource layer against the live API", () => {
         (await api.thoughts.getGraph(brainId, root)).children.map((c) => c.id).sort(),
       ).toEqual([side, made.get("top")!].sort());
       expect(await madeSince(since)).toHaveLength(5);
+    }, 30_000);
+
+    it("a parent nobody has is no batch at all: the plan is rejected by the read that checks the parent, and nothing is written", async () => {
+      // It used to fail its own thought in the middle of the batch, with the
+      // branches beside it written: through the real handler on 15.0.640, 3
+      // of 3 for a child, a parent and a jump, in 5 to 19 requests.
+      const root = await make("pn-root");
+      const other = await make("pn-other");
+      const name = (what: string): string => `${PREFIX}pn-${what}`;
+      const sent: string[] = [];
+      const counting = new TheBrainApi({
+        apiKey: apiKey!,
+        fetchImpl: async (input, init) => {
+          const { pathname } = new URL(String(input));
+          sent.push(`${init?.method ?? "GET"} ${pathname.replace(`/${brainId}`, "")}`);
+          return fetch(input, init);
+        },
+      });
+      /** What a plan comes to, and the requests it took. */
+      const run = async (plan: Parameters<typeof ingest>[2]) => {
+        sent.length = 0;
+        const outcome = await ingest(counting, brainId, plan).catch((e: unknown) => e as Error);
+        if (!(outcome instanceof Error)) for (const c of outcome.created) created.push(c.thoughtId);
+        return { outcome, requests: [...sent].sort() };
+      };
+      const read = (id: string): string => `GET /api/thoughts/${id}`;
+      const nobodyHas = (references: string): string =>
+        `${references}, and no thought in this brain has that identifier. It may have been ` +
+        "deleted, or be another brain's";
+      const since = new Date().toISOString();
+
+      // What the rule rests on: the read that checks a parent's kind is a
+      // 404 for an identifier nobody has (L3), which comes back as null.
+      const nobody = crypto.randomUUID();
+      expect(await api.links.requireParent(brainId, nobody, "parent")).toBeNull();
+      expect((await api.links.requireParent(brainId, root, "parent"))?.id).toBe(root);
+
+      // Beside a branch that could have been written, and alone.
+      const top = { tempId: "top", name: name("top"), parent: nobody, note: "top note" };
+      const mid = { tempId: "mid", name: name("mid"), parent: "top" };
+      const side = { tempId: "side", name: name("side"), parent: root, note: "side note" };
+      const beside = await run({
+        thoughts: [top, mid, side],
+        links: [{ from: "mid", to: "side", name: "relates" }],
+      });
+      expect(beside.outcome).toBeInstanceOf(IngestMissingError);
+      expect(beside.outcome).toMatchObject({
+        message: nobodyHas(`thought "top" references parent ${nobody}`),
+        ids: [nobody],
+      });
+      // One read for each parent the plan names, as before, and no other request.
+      expect(beside.requests).toEqual([read(nobody), read(root)].sort());
+      const alone = await run({ thoughts: [top, mid] });
+      expect(alone.outcome).toBeInstanceOf(IngestMissingError);
+      expect(alone.requests).toEqual([read(nobody)]);
+
+      // A thought made as its parent or as its jump: one read, which nothing
+      // sent before, in place of the read of the brain.
+      for (const relation of ["parent", "jump"] as const) {
+        const { outcome, requests } = await run({ thoughts: [{ ...top, relation }, mid] });
+        expect(outcome, relation).toBeInstanceOf(IngestMissingError);
+        expect((outcome as Error).message, relation).toBe(
+          nobodyHas(`thought "top" references parent ${nobody}`),
+        );
+        expect(requests, relation).toEqual([read(nobody)]);
+      }
+
+      // The upper end of a link, whichever way it is written.
+      const a = { tempId: "a", name: name("a"), parent: root };
+      for (const [link, field] of [
+        [{ from: nobody, to: "a", relation: "child" }, "from"],
+        [{ from: "a", to: nobody, relation: "parent" }, "to"],
+      ] as const) {
+        const { outcome, requests } = await run({ thoughts: [a], links: [link] });
+        expect(outcome, field).toBeInstanceOf(IngestMissingError);
+        const by = `the link ${link.from} -> ${link.to}`;
+        expect((outcome as Error).message, field).toBe(
+          nobodyHas(`${by} references ${nobody} in its ${field} field`),
+        );
+        expect(requests, field).toEqual([read(nobody), read(root)].sort());
+      }
+
+      // None of it wrote anything.
+      await settle();
+      expect(await madeSince(since)).toEqual([]);
+      expect((await api.thoughts.getGraph(brainId, root)).children).toEqual([]);
+
+      // The lower end of a link and the ends of a jump are not read ahead of
+      // the writes. The plan is written, and the link fails alone, in the
+      // API's words (L3), with the links beside it made.
+      for (const [link, end] of [
+        [{ from: "a", to: nobody, relation: "child" }, "target"],
+        [{ from: nobody, to: "a", relation: "parent" }, "source"],
+        [{ from: "a", to: nobody }, "target"],
+        [{ from: nobody, to: "a", relation: "jump" }, "source"],
+      ] as const) {
+        const what = `link ${link.from} -> ${link.to}`;
+        const { outcome, requests } = await run({
+          thoughts: [{ ...a, name: name(`a-${end}-${link.relation ?? "none"}`) }],
+          links: [link, { from: "a", to: other, name: "beside" }],
+        });
+        if (outcome instanceof Error) throw outcome;
+        expect(outcome.created.map((c) => c.tempId), what).toEqual(["a"]);
+        expect(outcome.linksCreated, what).toBe(1);
+        expect(outcome.failures, what).toEqual([
+          {
+            of: "link",
+            what,
+            reason: `Could not get ${end} thought ${nobody}`,
+            error: expect.objectContaining({ kind: "bad_request", status: 400 }),
+          },
+        ]);
+        expect(outcome.skipped, what).toEqual([]);
+        expect(requests.filter((r) => r === read(nobody)), what).toEqual([]);
+      }
     }, 30_000);
 
     it("a create whose answer is lost has made the thought: the batch says it may have, and the next run finds it", async () => {

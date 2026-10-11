@@ -37,6 +37,10 @@
  *     as on a second, and what a person had written there was gone.
  *  9. Two thoughts of one name in one list are not one thought to land on.
  *     The last the graph listed used to be taken, without a word of the other.
+ * 10. A parent nobody has fails the plan, ahead of its writes. It used to
+ *     fail its own thought in the middle of the batch, with the branches
+ *     beside it written and what hung on it skipped, though the read that
+ *     checks a parent's kind had the answer before the first write.
  */
 
 import {
@@ -221,6 +225,22 @@ export class IngestValidationError extends Error {
 }
 
 /**
+ * A plan that names, for a thought to hang something on, an identifier no
+ * thought of the brain has. A plan error like the others, thrown before the
+ * first write, and a class of its own for a caller that says where
+ * identifiers are taken from. `ids` are the ones nobody has.
+ */
+export class IngestMissingError extends IngestValidationError {
+  readonly ids: readonly string[];
+
+  constructor(message: string, ids: readonly string[]) {
+    super(message);
+    this.name = "IngestMissingError";
+    this.ids = ids;
+  }
+}
+
+/**
  * A write that was not sent because a read ahead of it failed. `context` is
  * the sentence without the cause, for a caller that explains the cause in its
  * own words; the message has both.
@@ -368,15 +388,38 @@ export async function ingest(
   // checked at its own turn, by `create` and `links.create`: it can land on
   // one its parent holds as an ordinary child.
   const ends = parentEnds(plan);
-  await mapWithConcurrency([...ends], 6, ([id, field]) =>
-    api.links.requireParent(brainId, id, field),
-  );
+  /** Named by the plan, and read as no thought's. */
+  const missing = new Set<string>();
+  await mapWithConcurrency([...ends], 6, async ([id, { field }]) => {
+    if ((await api.links.requireParent(brainId, id, field)) === null) missing.add(id);
+  });
+
+  // That read also says whether anybody has the identifier. One nobody has
+  // used to be let through for the create to refuse: in the middle of the
+  // batch, with the branches beside it written and what hung on it skipped.
+  // The plan is refused by it now, at no request more. The thought a plan
+  // thought is made a parent or a jump of was not read, having no kind to be
+  // refused by. Its branch is lost the same way, so it is read too, for
+  // that alone. The lower end of a link and the ends of a jump still are
+  // not: a link that fails takes nothing with it, and what is left to send
+  // is that link, where a plan refused is the whole plan again.
+  const beside = besideEnds(plan, ends);
+  await mapWithConcurrency([...beside.keys()], 6, async (id) => {
+    await api.thoughts.get(brainId, id).catch((error: unknown) => {
+      if (!(error instanceof TheBrainError && error.kind === "not_found")) throw error;
+      missing.add(id);
+    });
+  });
+  if (missing.size > 0) {
+    const named = [...ends, ...beside].filter(([id]) => missing.has(id));
+    throw new IngestMissingError(nobodyHas(named), named.map(([id]) => id));
+  }
 
   // Each of those reads is refused for a `brainId` that is no brain, and the
   // plan with it. A plan that names nothing in the brain has sent none of
   // them, and every one of its creates used to be refused in turn, each with
   // the 401 on a line of its own. So that plan reads the brain itself.
-  if (typeIds.size + tagIds.size + ends.size === 0) await api.brains.get(brainId);
+  if (typeIds.size + tagIds.size + ends.size + beside.size === 0) await api.brains.get(brainId);
 
   const outcome: IngestOutcome = {
     created: [],
@@ -471,7 +514,8 @@ export async function ingest(
    * read: the graph of an identifier nobody has is a 403, which this API
    * gives for much else, while the thought itself is a 404. Then there is
    * nothing to look under, and the create goes out to be refused in the
-   * API's own words.
+   * API's own words. The plan's checks found the thought there, or the plan
+   * would not have come this far: it is one deleted since.
    */
   const lookAround = async (anchorId: string): Promise<Neighbours | null> => {
     try {
@@ -939,26 +983,70 @@ function answeredBy<T>(deadline: number, read: Promise<T>): Promise<T> {
   });
 }
 
+/** How a plan names an existing thought: the field, and the first plan item that has it there. */
+interface NamedEnd {
+  field: string;
+  by: string;
+}
+
 /**
  * The existing thoughts a plan puts something under, each with the field that
  * names it: the `parent` of a thought made as its child, and the upper end of
  * a child or parent link. A jump has no upper end, and a `tempId` is not an
  * existing thought.
  */
-function parentEnds(plan: IngestPlan): Map<string, string> {
+function parentEnds(plan: IngestPlan): Map<string, NamedEnd> {
   const tempIds = new Set(plan.thoughts.map((t) => t.tempId));
-  const ends = new Map<string, string>();
-  const add = (ref: string, field: string): void => {
-    if (!tempIds.has(ref) && !ends.has(ref)) ends.set(ref, field);
+  const ends = new Map<string, NamedEnd>();
+  const add = (ref: string, field: string, by: string): void => {
+    if (!tempIds.has(ref) && !ends.has(ref)) ends.set(ref, { field, by });
   };
   for (const t of plan.thoughts) {
-    if (t.parent !== undefined && (t.relation ?? "child") === "child") add(t.parent, "parent");
+    if (t.parent !== undefined && (t.relation ?? "child") === "child") {
+      add(t.parent, "parent", `thought "${t.tempId}"`);
+    }
   }
   for (const link of plan.links ?? []) {
-    if (link.relation === "child") add(link.from, "from");
-    if (link.relation === "parent") add(link.to, "to");
+    const by = `the link ${link.from} -> ${link.to}`;
+    if (link.relation === "child") add(link.from, "from", by);
+    if (link.relation === "parent") add(link.to, "to", by);
   }
   return ends;
+}
+
+/**
+ * The existing thoughts a plan makes a thought next to and puts nothing
+ * under: the `parent` of a thought made as its parent or as its jump. The
+ * ones among `ends` are left out, having been read as parents.
+ */
+function besideEnds(plan: IngestPlan, ends: ReadonlyMap<string, NamedEnd>): Map<string, NamedEnd> {
+  const tempIds = new Set(plan.thoughts.map((t) => t.tempId));
+  const beside = new Map<string, NamedEnd>();
+  for (const t of plan.thoughts) {
+    if (t.parent === undefined || tempIds.has(t.parent)) continue;
+    if (ends.has(t.parent) || beside.has(t.parent)) continue;
+    beside.set(t.parent, { field: "parent", by: `thought "${t.tempId}"` });
+  }
+  return beside;
+}
+
+/**
+ * Why a plan is refused for the existing thoughts it names that nobody has:
+ * each identifier with the plan item that names it, as a plan error names a
+ * reference that is in no batch.
+ */
+function nobodyHas(named: ReadonlyArray<readonly [string, NamedEnd]>): string {
+  const references = named.map(([id, { field, by }]) =>
+    field === "parent"
+      ? `${by} references parent ${id}`
+      : `${by} references ${id} in its ${field} field`,
+  );
+  const one = named.length === 1;
+  return (
+    `${references.join(", ")}, and no thought in this brain has ` +
+    `${one ? "that identifier. It" : "those identifiers. Each"} may have been deleted, ` +
+    "or be another brain's"
+  );
 }
 
 /**

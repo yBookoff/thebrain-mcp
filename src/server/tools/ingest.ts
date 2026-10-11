@@ -8,6 +8,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { MAX_ALIASES, warnIfFencedCode } from "../../api/index.js";
 import {
+  IngestMissingError,
   IngestReadError,
   IngestValidationError,
   ingest,
@@ -15,6 +16,7 @@ import {
 } from "../../operations/ingest.js";
 import type { ServerContext } from "../context.js";
 import {
+  TAKE_IDENTIFIERS,
   bullet,
   describeError,
   fail,
@@ -135,8 +137,11 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
         });
       } catch (error) {
         if (error instanceof IngestValidationError) {
+          // An identifier nobody has is answered as it is anywhere else: with
+          // where to take one from.
+          const take = error instanceof IngestMissingError ? ` ${TAKE_IDENTIFIERS}` : "";
           return fail(
-            `Plan rejected, nothing was written: ${error.message}. Fix it and retry.`,
+            `Plan rejected, nothing was written: ${error.message}.${take} Fix it and retry.`,
           );
         }
         throw error;

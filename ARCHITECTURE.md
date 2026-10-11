@@ -262,8 +262,11 @@ Five properties, each of which took a bug to get right:
   so the input can be in any order.
 - **Validated before the first write.** Cycles, dangling references, empty names,
   duplicate `tempId`s, a relation that is none of the three and a relation with
-  no parent are rejected up front. A plan either starts writing or does not —
-  no half-written graph from a mistake that was visible in advance.
+  no parent are rejected up front. So is what a read shows: a `typeId` that is
+  no type, a tag that is no tag, a type or a tag named as a parent (§7, items
+  15, 17 and 18), and a parent that no thought of the brain has (*When a
+  thought of the plan is not created*, below). A plan either starts writing or
+  does not — no half-written graph from a mistake that was visible in advance.
 - **Idempotent.** Re-running the same plan reuses existing thoughts instead of
   duplicating them. Dedup is by `(parentId, relation, trimmed name)`: a thought
   is looked for where its relation puts it, see *What a second run finds*
@@ -334,7 +337,9 @@ create failed does: what hangs on it is skipped and the rest is written. One ans
 has is a 403, in the words this API has for much else, a request dropped
 under load included; the thought itself is a 404. When the thought says nobody
 has it, there is nothing to look under, and the create goes out to be refused
-in the API's own words. A thought the batch created is not read at all:
+in the API's own words. Such a thought was deleted after the plan was checked:
+one nobody had by then rejects the plan (*When a thought of the plan is not
+created*). A thought the batch created is not read at all:
 nothing can be next to it yet, and a read that can find nothing could only
 fail what goes under it.
 
@@ -511,10 +516,13 @@ another call writes while the batch runs is not seen.
 
 #### When a thought of the plan is not created
 
-The checks ahead of the first write leave a create few ways to fail: a parent
-identifier nobody has, which the API answers with a 404; a plan thought that
-deduplication lands on a type, so that `create` refuses the one under it (§7,
-item 18); a parent deleted in between; a request that fails on the way.
+The checks ahead of the first write leave a create few ways to fail: a plan
+thought that deduplication lands on a type, so that `create` refuses the one
+under it (§7, item 18); a parent deleted between the checks and the create; a
+request that fails on the way. A parent identifier nobody has, which the API
+answers with a 404, was one more, and the one that shows ahead of the first
+write. It rejects the plan now: *A parent nobody has*, at the end of this
+section.
 
 The thoughts under the one that failed used to be created all the same. Their
 parent resolved to nothing, so they were created with no parent, listed as
@@ -620,6 +628,63 @@ refused in turn, with the API's bare 401 on a line of its own and "Fix the
 cause and send the plan again" under them. That plan reads the brain first,
 which is one request for the plan that had none ahead of its writes. Any other
 plan sends what it sent.
+
+**A parent nobody has rejects the plan, before its first write.** A wrong
+identifier in `parent` was the one way into all of the above that showed
+ahead of the first write. Through the real handler on 15.0.640, three times
+of three each: with a branch beside it that could be written, the batch wrote
+that branch, 2 thoughts, a note and a link in 15–19 requests, and listed the
+thought under "Failed" and what hung on it under "Skipped"; alone, it took 5
+requests, four of them reads of the identifier nobody has, to say that no
+thought was written. The read that checks a parent for a type or a tag (§7,
+item 18) had the answer before the first write, a 404, and let it through for
+the create to refuse. `requireParent()` hands back what it read, null for an
+identifier nobody has, and `ingest()` refuses the plan by that, as it refuses
+one with a reference to no `tempId`:
+
+```
+Plan rejected, nothing was written: thought "top" references parent <id>, and
+no thought in this brain has that identifier. It may have been deleted, or be
+another brain's. Take identifiers from brain_search or brain_get_thought. Fix
+it and retry.
+```
+
+Every identifier nobody has is named, each with the first plan item that
+names it. The two plans above are rejected in 2 requests and in 1, none of
+them a write, in under 10 ms. A plan whose parents are there sends what it
+sent: the read is the one already made.
+
+What is read ahead of the writes, and what is not:
+
+- *A thought's `parent` when the thought is its child, and the upper end of a
+  child or parent link.* Read for its kind as before, at no request more.
+- *A thought's `parent` when the thought is made its parent or its jump.* No
+  kind is refused there, so nothing read it, and its branch was lost in the
+  middle of the batch all the same: 3 of 3 each, one thought written beside
+  it. It is read now for whether it is there. That is one read, 0.4 ms at the
+  median, for each such thought the plan does not also name as a parent, and
+  none for a plan that names no type, tag or parent besides, where it takes
+  the place of the read of the brain.
+- *The lower end of a child or parent link, and the ends of a jump.* Not
+  read. Such a link fails at its turn, with the API's 400 that names the
+  identifier, after everything else of the plan is written: 3 of 3 for each
+  of the four. One read each would reject those plans too, and it is cheap:
+  ten took 0.9 ms, and a plan of 10 thoughts and 10 jumps to existing thoughts
+  would send 53 requests where it sends 43. It is left out for what each way
+  leaves the caller to do. A link that fails takes nothing with it, and what
+  is left is that one link, for `brain_link`. A plan rejected is the whole
+  plan sent again, notes included, to correct one link.
+
+The rule is the plan's, not `requireParent()`'s. `brain_create_thought` and
+`brain_link` go on to their write when the parent reads as nobody's: it is
+their first write, the API refuses it in words that carry the identifier,
+and a refusal of their own would save one request.
+
+It does not end failures in the middle of a batch. A parent can be deleted
+between the plan's checks and the create under it, and a thought deleted a
+moment ago still reads for up to 0.15 s (row L3). The thought under it fails
+then, at the look next to its parent or at the create, and everything above
+holds.
 
 Nothing is deleted to tidy up after a failure. Deletion needs a human (§6).
 
@@ -1040,7 +1105,8 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     given for a parent before anything else it does. It is refused, not done
     and reported: the call asked for a link, the API can only set a type
     there, and `typeId` is the argument that asks for one. A jump to a type
-    stays an ordinary link.
+    stays an ordinary link. That read is a 404 for an identifier nobody has,
+    which is left to the write: only a plan is rejected by it (§4).
 19. **Nothing is written as a sibling.** The spec lists a fourth relation,
     `Sibling = 4`. A link sent with it is a 400; a thought created with it is
     a 200 and a thought linked to nothing; a patch with it is a 200 that

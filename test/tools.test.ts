@@ -889,33 +889,47 @@ describe("brain_ingest", () => {
 });
 
 describe("brain_ingest when a thought fails in the middle of a batch", () => {
-  const NOBODY = "99999999-0000-4000-8000-000000000009";
+  const DOOMED = "99999999-0000-4000-8000-000000000009";
   const SIDE = "eeeeeeee-0000-4000-8000-000000000005";
   const TOP = "ffffffff-0000-4000-8000-000000000006";
   type Create = { name: string; sourceThoughtId?: string };
 
   /**
+   * The read of a thought. DOOMED is deleted between a plan's checks and its
+   * writes: it is there the first time it is asked for, and nobody has it
+   * from then on. A parent nobody has from the start rejects the plan, and
+   * no batch is begun.
+   */
+  const thoughtRead = (): ((url: URL) => unknown) => {
+    let checked = false;
+    return (url) => {
+      if (!url.pathname.endsWith(DOOMED)) return thought("Constraints", { aliases: [] });
+      const there = !checked;
+      checked = true;
+      return there ? thought("doomed", { id: DOOMED }) : 404;
+    };
+  };
+
+  /**
    * A brain where PARENT is an ordinary thought with no children and nobody
-   * has NOBODY. As on the live API, a thought created under an identifier
-   * nobody has is a 404 that says so, and the graph of one is the 403 the
-   * API has for much else. `create` answers for the rest.
+   * has DOOMED by the time a plan writes. As on the live API, a thought
+   * created under an identifier nobody has is a 404 that says so, and the
+   * graph of one is the 403 the API has for much else. `create` answers for
+   * the rest.
    */
   const routes = (create: (body: Create) => unknown, notes: () => unknown = () => 200): Route[] => [
     ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
     [
       "GET /graph",
-      (url) => (url.pathname.includes(NOBODY) ? generic403() : graph(thought("parent"))),
+      (url) => (url.pathname.includes(DOOMED) ? generic403() : graph(thought("parent"))),
     ],
-    [
-      "GET /api/thoughts/",
-      (url) => (url.pathname.endsWith(NOBODY) ? 404 : thought("Constraints", { aliases: [] })),
-    ],
+    ["GET /api/thoughts/", thoughtRead()],
     [
       "POST /api/thoughts/",
       (_url, body) => {
         const asked = body as Create;
-        return asked.sourceThoughtId === NOBODY
-          ? new Response(JSON.stringify(`Source Thought ${NOBODY} could not be located`), {
+        return asked.sourceThoughtId === DOOMED
+          ? new Response(JSON.stringify(`Source Thought ${DOOMED} could not be located`), {
               status: 404,
               headers: { "content-type": "application/json" },
             })
@@ -944,7 +958,7 @@ describe("brain_ingest when a thought fails in the middle of a batch", () => {
     // Mid and Leaf used to be created with no parent and listed as created,
     // under "Everything else was written", in a result that was no error.
     const { call, sent } = await connect(routes(made));
-    const result = await call("brain_ingest", plan(NOBODY));
+    const result = await call("brain_ingest", plan(DOOMED));
 
     expect(result.isError).toBe(true);
     expect(result.text).toBe(
@@ -960,7 +974,7 @@ describe("brain_ingest when a thought fails in the middle of a batch", () => {
         "- tags attached: 0",
         "",
         "## Failed",
-        `- thought "Top" (top): Source Thought ${NOBODY} could not be located.${NOBODY_HAS_IT}`,
+        `- thought "Top" (top): Source Thought ${DOOMED} could not be located.${NOBODY_HAS_IT}`,
         "",
         "## Skipped",
         '- thought "Mid" (mid): depends on "top", which was not created',
@@ -988,7 +1002,7 @@ describe("brain_ingest when a thought fails in the middle of a batch", () => {
     const result = await call("brain_ingest", {
       brainId: BRAIN,
       thoughts: [
-        { tempId: "top", name: "Top", parent: NOBODY },
+        { tempId: "top", name: "Top", parent: DOOMED },
         { tempId: "mid", name: "Mid", parent: "top" },
       ],
     });
@@ -1044,6 +1058,156 @@ describe("brain_ingest when a thought fails in the middle of a batch", () => {
     );
     expect(result.text).not.toContain("## Skipped");
     expect(result.text).toContain("nothing is rolled back");
+  });
+});
+
+describe("brain_ingest and a parent nobody has", () => {
+  const NOBODY = "99999999-0000-4000-8000-000000000009";
+  /**
+   * A brain where PARENT is an ordinary thought with no children and nobody
+   * has NOBODY, each request about it answered as the live API answers.
+   */
+  const routes: Route[] = [
+    ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
+    [
+      "GET /graph",
+      (url) => (url.pathname.includes(NOBODY) ? generic403() : graph(thought("parent"))),
+    ],
+    [
+      "GET /api/thoughts/",
+      (url) => (url.pathname.endsWith(NOBODY) ? 404 : thought("Constraints", { aliases: [] })),
+    ],
+    ["POST /api/thoughts/", () => ({ id: THOUGHT })],
+    ["POST /api/notes/", () => 200],
+    [
+      "POST /api/links/",
+      (_url, body) => {
+        const { thoughtIdA, thoughtIdB } = body as { thoughtIdA: string; thoughtIdB: string };
+        const end = thoughtIdA === NOBODY ? "source" : thoughtIdB === NOBODY ? "target" : null;
+        return end === null
+          ? { id: LINK }
+          : new Response(JSON.stringify(`Could not get ${end} thought ${NOBODY}`), {
+              status: 400,
+              headers: { "content-type": "application/json" },
+            });
+      },
+    ],
+    ["GET /api/links/", () => 404],
+  ];
+  const rejected = (references: string): string =>
+    `Plan rejected, nothing was written: ${references}, and no thought in this brain has ` +
+    `that identifier.${NOBODY_HAS_IT} Fix it and retry.`;
+  const read = (id: string) => ({ method: "GET", path: `/api/thoughts/${BRAIN}/${id}` });
+
+  it("the plan is rejected whole, the branch beside it included, by the read that checks the parent", async () => {
+    // "Side" used to be created with its note, "Top" listed under Failed in
+    // the API's words and "Mid" under Skipped: a batch written in part.
+    const { call, calls } = await connect(routes);
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [
+        { tempId: "top", name: "Top", parent: NOBODY, note: "summary" },
+        { tempId: "mid", name: "Mid", parent: "top" },
+        { tempId: "side", name: "Side", parent: PARENT, note: "body" },
+      ],
+      links: [{ from: "mid", to: "side", name: "relates" }],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toBe(rejected(`thought "top" references parent ${NOBODY}`));
+    // One read for each parent the plan names, as before, and nothing else.
+    expect(calls.map(({ method, path }) => ({ method, path }))).toEqual(
+      expect.arrayContaining([read(PARENT), read(NOBODY)]),
+    );
+    expect(calls).toHaveLength(2);
+  });
+
+  it("a plan with nothing else in it costs that one read, where it cost four and a create", async () => {
+    const { call, calls } = await connect(routes);
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [
+        { tempId: "top", name: "Top", parent: NOBODY },
+        { tempId: "mid", name: "Mid", parent: "top" },
+      ],
+    });
+
+    expect(result.text).toBe(rejected(`thought "top" references parent ${NOBODY}`));
+    expect(calls.map(({ method, path }) => ({ method, path }))).toEqual([read(NOBODY)]);
+  });
+
+  it("a thought made as a parent or a jump of it, and a link with it above, are rejected in the same words", async () => {
+    for (const relation of ["parent", "jump"]) {
+      const { call, calls } = await connect(routes);
+      const result = await call("brain_ingest", {
+        brainId: BRAIN,
+        thoughts: [
+          { tempId: "top", name: "Top", parent: NOBODY, relation },
+          { tempId: "side", name: "Side", parent: PARENT },
+        ],
+      });
+      expect(result.text, relation).toBe(rejected(`thought "top" references parent ${NOBODY}`));
+      expect(calls.filter((c) => c.method !== "GET"), relation).toEqual([]);
+    }
+    for (const [link, field] of [
+      [{ from: NOBODY, to: "a", relation: "child" }, "from"],
+      [{ from: "a", to: NOBODY, relation: "parent" }, "to"],
+    ] as const) {
+      const { call, calls } = await connect(routes);
+      const result = await call("brain_ingest", {
+        brainId: BRAIN,
+        thoughts: [{ tempId: "a", name: "A", parent: PARENT }],
+        links: [link],
+      });
+      expect(result.text, field).toBe(
+        rejected(`the link ${link.from} -> ${link.to} references ${NOBODY} in its ${field} field`),
+      );
+      expect(calls.filter((c) => c.method !== "GET"), field).toEqual([]);
+    }
+  });
+
+  it("with it below a link, or at an end of a jump, the plan is written and the link fails alone", async () => {
+    for (const [link, end] of [
+      [{ from: "a", to: NOBODY, relation: "child" }, "target"],
+      [{ from: "a", to: NOBODY }, "target"],
+      [{ from: NOBODY, to: "a" }, "source"],
+    ] as const) {
+      const { call } = await connect(routes);
+      const result = await call("brain_ingest", {
+        brainId: BRAIN,
+        thoughts: [{ tempId: "a", name: "A", parent: PARENT }],
+        links: [link],
+      });
+
+      expect(result.isError, end).toBe(true);
+      expect(result.text, end).toContain(`created  A      ${THOUGHT}  a`);
+      expect(result.text, end).toContain(
+        `## Failed\n- link ${link.from} -> ${link.to}: Could not get ${end} thought ${NOBODY} ` +
+          `(POST /api/links/${BRAIN})\n`,
+      );
+    }
+  });
+
+  it("every identifier nobody has is named in the one refusal", async () => {
+    const ALSO = "88888888-0000-4000-8000-000000000008";
+    const { call } = await connect([
+      [`GET /api/thoughts/${BRAIN}/${ALSO}`, () => 404],
+      ...routes,
+    ]);
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [
+        { tempId: "top", name: "Top", parent: NOBODY },
+        { tempId: "beside", name: "Beside", parent: ALSO, relation: "jump" },
+      ],
+    });
+
+    expect(result.text).toBe(
+      `Plan rejected, nothing was written: thought "top" references parent ${NOBODY}, ` +
+        `thought "beside" references parent ${ALSO}, and no thought in this brain has those ` +
+        "identifiers. Each may have been deleted, or be another brain's. Take identifiers " +
+        "from brain_search or brain_get_thought. Fix it and retry.",
+    );
   });
 });
 
@@ -1987,6 +2151,34 @@ describe("an identifier nobody has, and a brainId that is no brain", () => {
       expect(result.text).toBe(`Source Thought ${NOBODY} could not be located.${tail}`);
       // The create is still what answers for it: the read lets it through.
       expect(sent("POST")).toHaveLength(1);
+    });
+
+    it("brain_link leaves a parent nobody has to the link, which names it", async () => {
+      // Its link is the call's one write, and the API refuses it in words
+      // that carry the identifier. Only a plan is rejected ahead of its writes.
+      for (const [args, end] of [
+        [{ fromId: NOBODY, toId: THOUGHT, relation: "child" }, "source"],
+        [{ fromId: THOUGHT, toId: NOBODY, relation: "parent" }, "target"],
+      ] as const) {
+        const { call, sent } = await connect([
+          ["GET /api/thoughts/", bareNotFound],
+          ["GET /api/links/", bareNotFound],
+          [
+            "POST /api/links/",
+            () =>
+              new Response(JSON.stringify(`Could not get ${end} thought ${NOBODY}`), {
+                status: 400,
+                headers: { "content-type": "application/json; charset=utf-8" },
+              }),
+          ],
+        ]);
+        const result = await call("brain_link", { brainId: BRAIN, ...args });
+        expect(result.isError, end).toBe(true);
+        expect(result.text, end).toBe(
+          `Could not get ${end} thought ${NOBODY} (POST /api/links/${BRAIN})`,
+        );
+        expect(sent("POST"), end).toHaveLength(1);
+      }
     });
 
     it("brain_attach_url keeps them for its thought", async () => {
@@ -5194,7 +5386,7 @@ describe("a call that fails after it has written", () => {
 });
 
 describe("what brain_ingest says of a batch written in part", () => {
-  const NOBODY = "99999999-0000-4000-8000-000000000009";
+  const DOOMED = "99999999-0000-4000-8000-000000000009";
   const TAG = "ffffffff-0000-4000-8000-000000000006";
   const HELD = "eeeeeeee-0000-4000-8000-000000000005";
   const FENCED = "```\ncode\n```\n";
@@ -5210,9 +5402,25 @@ describe("what brain_ingest says of a batch written in part", () => {
   };
 
   /**
+   * The read of a thought. DOOMED is deleted between a plan's checks and its
+   * writes: it is there the first time it is asked for, and nobody has it
+   * from then on.
+   */
+  const thoughtRead = (): ((url: URL) => unknown) => {
+    let checked = false;
+    return (url) => {
+      const id = url.pathname.split("/").pop()!;
+      if (id === DOOMED && checked) return 404;
+      if (id === DOOMED) checked = true;
+      return { ...thought("Constraints", { aliases: [] }), id, kind: id === TAG ? 4 : 1 };
+    };
+  };
+
+  /**
    * A brain where PARENT is an ordinary thought with `children` under it,
-   * TAG is a tag and nobody has NOBODY. A thought is created with the
-   * identifier `ID` has for its name; `first` goes ahead of the routes.
+   * TAG is a tag and nobody has DOOMED by the time a plan writes. A thought
+   * is created with the identifier `ID` has for its name; `first` goes ahead
+   * of the routes.
    */
   const routes = (first: Route[] = [], children: unknown[] = []): Route[] => [
     ...first,
@@ -5220,24 +5428,17 @@ describe("what brain_ingest says of a batch written in part", () => {
     [
       "GET /graph",
       (url) =>
-        url.pathname.includes(NOBODY)
+        url.pathname.includes(DOOMED)
           ? generic403()
           : { ...graph(thought("parent", { id: PARENT })), children },
     ],
-    [
-      "GET /api/thoughts/",
-      (url) => {
-        const id = url.pathname.split("/").pop()!;
-        if (id === NOBODY) return 404;
-        return { ...thought("Constraints", { aliases: [] }), id, kind: id === TAG ? 4 : 1 };
-      },
-    ],
+    ["GET /api/thoughts/", thoughtRead()],
     [
       "POST /api/thoughts/",
       (_url, body) => {
         const asked = body as Create;
-        return asked.sourceThoughtId === NOBODY
-          ? new Response(JSON.stringify(`Source Thought ${NOBODY} could not be located`), {
+        return asked.sourceThoughtId === DOOMED
+          ? new Response(JSON.stringify(`Source Thought ${DOOMED} could not be located`), {
               status: 404,
               headers: { "content-type": "application/json" },
             })
@@ -5263,7 +5464,7 @@ describe("what brain_ingest says of a batch written in part", () => {
       thoughts: [
         { tempId: "kept", name: "Kept", parent: PARENT, note: FENCED },
         { tempId: "lost", name: "Lost", parent: PARENT, note: FENCED },
-        { tempId: "gone", name: "Gone", parent: NOBODY, note: FENCED },
+        { tempId: "gone", name: "Gone", parent: DOOMED, note: FENCED },
       ],
     });
 
@@ -5272,7 +5473,7 @@ describe("what brain_ingest says of a batch written in part", () => {
     expect(result.text).toContain(
       [
         "## Failed",
-        `- thought "Gone" (gone): Source Thought ${NOBODY} could not be located.${NOBODY_HAS_IT}`,
+        `- thought "Gone" (gone): Source Thought ${DOOMED} could not be located.${NOBODY_HAS_IT}`,
         `- note for "Lost" (${ID["Lost"]}): ` +
           boomAt(`POST /api/notes/${BRAIN}/${ID["Lost"]}/update`),
       ].join("\n"),
@@ -5432,8 +5633,8 @@ describe("what brain_ingest says of a batch written in part", () => {
     const result = await call("brain_ingest", {
       brainId: BRAIN,
       thoughts: [
-        { tempId: "x", name: "Same", parent: NOBODY },
-        { tempId: "y", name: "Same", parent: NOBODY },
+        { tempId: "x", name: "Same", parent: DOOMED },
+        { tempId: "y", name: "Same", parent: DOOMED },
         { tempId: "under", name: "Leaf", parent: "y" },
       ],
     });
@@ -5442,7 +5643,7 @@ describe("what brain_ingest says of a batch written in part", () => {
     expect(result.text).toContain(
       [
         "## Failed",
-        `- thought "Same" (x): Source Thought ${NOBODY} could not be located.${NOBODY_HAS_IT}`,
+        `- thought "Same" (x): Source Thought ${DOOMED} could not be located.${NOBODY_HAS_IT}`,
         "",
         "## Skipped",
         '- thought "Same" (y): is the same thought as "x", which was not created',
