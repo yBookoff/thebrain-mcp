@@ -312,7 +312,22 @@ Constraints to respect in any new code:
   that is no UUID. Ranking by vectors makes no request, but `find()` then
   reads the thought of each hit: with TheBrain closed a vector search lists
   its hits as not verified, and with a rejected key or a `brainId` that is no
-  brain it fails.
+  brain it fails. A rebuild or a sync also leaves an empty
+  `index-<id>.sqlite.lock` beside the file, even when it wrote nothing.
+- **The index file is shared: every client session runs a server process of
+  its own over it.** A search asks `PRAGMA data_version` before it ranks and
+  reads the rows again when another connection has committed; anything else
+  kept in memory from that file needs the same check. Every write of
+  `VectorStore` is one `BEGIN IMMEDIATE` transaction that waits
+  `BUSY_TIMEOUT_MS` (2 s) and then throws `IndexBusyError`, a sentence:
+  SQLite's `database is locked` must not reach a result. A rebuild and a sync
+  hold `store.claim()` from before their first look at the index to their
+  last write, so two runs never overlap; a second one waits `RUN_WAIT_MS`
+  (10 s) and is then refused with `IndexRunningError`, having read and written
+  nothing. Code that reads the index, awaits, and writes by what it read
+  belongs inside a claim; a single write, like `remove()` after a deletion,
+  does not. An index of another model is replaced through `startOver()`,
+  never `clear()` and then `setMeta()`.
 - **A rebuild and a sync read everything before they write anything, and a
   read that fails is not an answer.** `auth`, `unknown_brain` and `network`
   stop the run, and so do the log's and the brain's reads whatever they fail
