@@ -257,6 +257,15 @@ silent wrong behaviour rather than a loud failure:
   on.** They change places from read to read. `ingest()` fails a plan thought
   with two candidates and names both.
 - **Search is prefix-based.** This is why `src/semantic/` exists.
+- **A search hit is the search index's copy, not the thought, and that index
+  is about five seconds behind.** Until its next refresh `search/{brainId}`
+  and `?nameExact=` return a thought that was deleted, the hit the same to the
+  last field, and a changed one by its old text under its old name. A thought
+  deleted some tens of milliseconds after a neighbour stayed there for good
+  about once in a hundred. `SemanticSearch.find()` reads every hit's thought
+  before it returns: a 404 goes to `gone`, any other failure to `unverified`.
+  Anything new that takes an identifier from a search or from `findByName`
+  needs that read.
 
 ## Semantic layer
 
@@ -284,8 +293,10 @@ Constraints to respect in any new code:
   with no file reads as an empty index, so `brain_list`, `brain_search`, a
   status and `ctx.store(id).remove()` leave nothing behind. `brain_index` asks
   `brains.get()` first, for every action; `indexPath()` refuses a `brainId`
-  that is no UUID. Vector search makes no request at all, so it answers with
-  TheBrain closed.
+  that is no UUID. Ranking by vectors makes no request, but `find()` then
+  reads the thought of each hit: with TheBrain closed a vector search lists
+  its hits as not verified, and with a rejected key or a `brainId` that is no
+  brain it fails.
 - **A rebuild and a sync read everything before they write anything, and a
   read that fails is not an answer.** `auth`, `unknown_brain` and `network`
   stop the run, and so do the log's and the brain's reads whatever they fail
