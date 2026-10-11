@@ -158,6 +158,16 @@ silent wrong behaviour rather than a loud failure:
   `extraBId`, the same as an ordinary parent link's. Renaming a tag or a type
   logs its own `103` and nothing about the thoughts that carry it. Sync reads
   both ends of a link event and the `children` of a renamed tag or type.
+- **A kind change is one `304`, and it changes more than the kind.** `PATCH
+  /kind` takes 1, 2 and 4 only. The `304` is against the thought, the kinds by
+  name, and the last entry of the change. Each link under the thought turns
+  with it and logs a `404`: children become the thoughts a tag is on or the
+  instances of a type, with a `203` for a type gained or lost. A thought with
+  no label of its own reads with its name for a `label` while it is a type,
+  and no `202` says so. The kind is beside the document, so the hash cannot
+  see it: `#indexThoughts` compares it apart and `VectorStore.setKinds()`
+  corrects the row with its vector kept. Never fold the kind into the hash or
+  the document.
 - **A write is in the log before it is in `graph`**, a tag by 0.1–0.5 s. Sync
   leaves its watermark `SYNC_OVERLAP_MS` behind so the next run reads that tail
   again; a watermark at the run's own start lost one tag in four.
@@ -201,7 +211,9 @@ silent wrong behaviour rather than a loud failure:
   for an ordinary thought. A new read tool that names a thought prints its
   mark. It costs no request: every thought the API returns carries `kind`, in
   a graph's lists and in a search hit. In vector mode the kind is the index's
-  own, and the index does not follow a thought that changes kind. A write
+  own, as old as its last sync: a sync reads a thought again on a `304` and a
+  rebuild compares every row's kind, and either corrects the row without
+  encoding it. A write
   result marks a thought where the kind is already in what the tool read; the
   ends of a link are not marked.
 - **The search refuses a long query without a word about length.** Past 8,192
@@ -209,6 +221,16 @@ silent wrong behaviour rather than a loud failure:
   reach, and for 513 to 1,024 words it is the catch-all 403.
   `search.inBrain()` makes `query_too_long` of both; a shorter query to the
   same brain is answered.
+- **A read that failed is not the API's answer for "nothing".** A thought with
+  no note is a 200 with a sentinel, and a note's read answers the catch-all 403
+  for up to 0.2 s after the note's attachment is deleted, on a thought that is
+  there. Never `.catch(() => "")` a read in a tool: keep the failure (`kept()`
+  in `tools/read.ts`), fail the call when the read is ahead of a write that
+  erases (`brain_set_note`, `brain_delete_thought`), and name what was not
+  read when the tool only shows it ("Note not read", "Not read", "Listing not
+  read").
+- **A note write with no answer may have landed, and an append sent again
+  lands twice.** Both note tools say so under "Next" when `mayHaveLanded()`.
 - **Search is prefix-based.** This is why `src/semantic/` exists.
 
 ## Semantic layer
