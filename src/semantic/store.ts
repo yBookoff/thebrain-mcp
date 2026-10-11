@@ -158,6 +158,26 @@ export class VectorStore {
     this.#cache = null;
   }
 
+  /**
+   * Sets the kind of rows that are there already and leaves the rest of each:
+   * name, hash and vector. A thought that changes kind keeps its document, so
+   * there is nothing to encode, and the kind is what `search` excludes by.
+   * An identifier with no row is passed over.
+   */
+  setKinds(kinds: ReadonlyMap<string, number>): void {
+    if (kinds.size === 0) return;
+    const stmt = this.#db.prepare("UPDATE vectors SET kind = ? WHERE thought_id = ?");
+    this.#db.exec("BEGIN");
+    try {
+      for (const [id, kind] of kinds) stmt.run(kind, id);
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+    this.#cache = null;
+  }
+
   remove(thoughtIds: readonly string[]): void {
     if (thoughtIds.length === 0) return;
     const stmt = this.#db.prepare("DELETE FROM vectors WHERE thought_id = ?");
@@ -187,6 +207,18 @@ export class VectorStore {
       .prepare("SELECT thought_id, content_hash FROM vectors")
       .all() as Array<{ thought_id: string; content_hash: string }>;
     return new Map(rows.map((r) => [r.thought_id, r.content_hash]));
+  }
+
+  /**
+   * The kind each row was indexed with. It is no part of the document, so the
+   * hash says nothing of it and it is compared on its own.
+   */
+  kinds(): Map<string, number> {
+    const rows = this.#db.prepare("SELECT thought_id, kind FROM vectors").all() as Array<{
+      thought_id: string;
+      kind: number;
+    }>;
+    return new Map(rows.map((r) => [r.thought_id, r.kind]));
   }
 
   /**

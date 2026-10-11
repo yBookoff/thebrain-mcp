@@ -2248,6 +2248,32 @@ describe("brain_index and a brain it has not been shown", () => {
       expect(store.size()).toBe(1);
     });
 
+    it("says so when it gave a row its kind and encoded nothing, and only then", async () => {
+      // A thought turned into a tag has the document it had. Its row is not
+      // encoded again, and is not unchanged either: it was reported as skipped.
+      const store = new VectorStore(":memory:");
+      const first = await connect(brain, indexing(store).context);
+      const built = await first.call("brain_index", { brainId: BRAIN, action: "rebuild" });
+      expect(built.text).toContain("- thoughts encoded: 1\n- skipped unchanged: 0\n");
+
+      const turned: Route[] = [
+        ["GET /modifications", () => []],
+        ["GET /api/brains/", () => ({ id: BRAIN, name: "Test brain", homeThoughtId: THOUGHT })],
+        ["GET /graph", () => graph(thought("RAG", { kind: 4 }))],
+      ];
+      const second = await connect(turned, indexing(store).context);
+      const rebuilt = await second.call("brain_index", { brainId: BRAIN, action: "rebuild" });
+      expect(rebuilt.isError).toBe(false);
+      expect(rebuilt.text).toContain(
+        "## Index built\n- thoughts encoded: 0\n- kind updated, nothing to encode: 1\n" +
+          "- skipped unchanged: 0\n- removed from index: 0\n",
+      );
+      expect(store.kinds()).toEqual(new Map([[THOUGHT, 4]]));
+
+      const again = await second.call("brain_index", { brainId: BRAIN, action: "rebuild" });
+      expect(again.text).toContain("- thoughts encoded: 0\n- skipped unchanged: 1\n");
+    });
+
     it("without the embeddings package it fails with the reason, and status does not call it built", async () => {
       const store = new VectorStore(":memory:");
       const { call } = await connect(brain, indexing(store, new AbsentEmbedder()).context);

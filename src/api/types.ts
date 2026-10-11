@@ -162,6 +162,13 @@ export const ModType = {
   AliasesChanged: 211,
   Forgotten: 301,
   Remembered: 302,
+  /**
+   * Against the thought itself, with the kinds by name in the values:
+   * `"Normal"`, `"Type"`, `"Tag"`. The last entry of the change: the links
+   * that change meaning with the thought (`404`) and the types set or lost
+   * through them (`203`) are logged before it.
+   */
+  KindChanged: 304,
   LinkMoved: 402,
   LinkMeaningChanged: 404,
   NoteCreated: 801,
@@ -169,12 +176,20 @@ export const ModType = {
   NoteChanged: 803,
 } as const;
 
-/** Codes after which a thought must be re-embedded in the semantic index. */
+/**
+ * Codes after which a thought must be re-embedded in the semantic index.
+ *
+ * A kind change is among them on two counts. The kind is in the index beside
+ * the document, and search leaves types and tags out by it. And the document
+ * can change with it: a thought with no label of its own reads with its name
+ * for a label while it is a type, and no `202` is logged for that.
+ */
 export const REEMBED_MOD_TYPES: ReadonlySet<number> = new Set([
   ModType.NameChanged,
   ModType.LabelChanged,
   ModType.TypeSet,
   ModType.AliasesChanged,
+  ModType.KindChanged,
   ModType.NoteCreated,
   ModType.NoteDeleted,
   ModType.NoteChanged,
@@ -185,6 +200,10 @@ export const REEMBED_MOD_TYPES: ReadonlySet<number> = new Set([
  * created, deleted, moved to another thought, or changed its meaning (a tag
  * turned into an ordinary thought). A link's rename, thickness, direction and
  * relation leave its ends and its meaning alone.
+ *
+ * A `404` is logged for every link under a thought that changes kind,
+ * whichever way: its children become the thoughts a tag is on or the
+ * instances of a type, and back.
  */
 export const TAG_LINK_MOD_TYPES: ReadonlySet<number> = new Set([
   ModType.Created,

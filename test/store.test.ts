@@ -130,6 +130,62 @@ describe("storage", () => {
     );
     s.close();
   });
+
+  it("kinds returns what each row was indexed as", () => {
+    const s = store();
+    s.upsert([
+      { thoughtId: "a", name: "a", kind: 1, contentHash: "hash-a", vector: vec(1, 0) },
+      { thoughtId: "b", name: "b", kind: 4, contentHash: "hash-b", vector: vec(0, 1) },
+    ]);
+    expect(s.kinds()).toEqual(
+      new Map([
+        ["a", 1],
+        ["b", 4],
+      ]),
+    );
+    s.close();
+  });
+
+  it("setKinds changes the kind a search excludes by, and nothing else of the row", () => {
+    const s = store();
+    s.upsert([
+      { thoughtId: "a", name: "data", kind: 1, contentHash: "hash-a", vector: vec(1, 0.2) },
+      { thoughtId: "b", name: "gotcha", kind: 4, contentHash: "hash-b", vector: vec(0.2, 1) },
+    ]);
+    // Read once, so that the rows are in the cache a search answers from.
+    const before = s.search(vec(1, 0));
+    expect(s.search(vec(1, 0), { excludeKinds: [2, 4] }).map((h) => h.thoughtId)).toEqual(["a"]);
+
+    s.setKinds(
+      new Map([
+        ["a", 4],
+        ["b", 1],
+      ]),
+    );
+
+    expect(s.search(vec(1, 0), { excludeKinds: [2, 4] }).map((h) => h.thoughtId)).toEqual(["b"]);
+    expect(s.search(vec(1, 0))).toEqual(
+      before.map((h) => ({ ...h, kind: h.thoughtId === "a" ? 4 : 1 })),
+    );
+    expect(s.contentHashes()).toEqual(
+      new Map([
+        ["a", "hash-a"],
+        ["b", "hash-b"],
+      ]),
+    );
+    expect(s.size()).toBe(2);
+    s.close();
+  });
+
+  it("setKinds passes over an identifier with no row, and an empty map", () => {
+    const s = store();
+    s.upsert([{ thoughtId: "a", name: "a", kind: 1, contentHash: "h", vector: vec(1, 0) }]);
+    expect(() => s.setKinds(new Map())).not.toThrow();
+    s.setKinds(new Map([["nobody", 4]]));
+    expect(s.kinds()).toEqual(new Map([["a", 1]]));
+    expect(s.size()).toBe(1);
+    s.close();
+  });
 });
 
 describe("index compatibility", () => {

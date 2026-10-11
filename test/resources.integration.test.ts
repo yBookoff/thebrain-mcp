@@ -52,6 +52,7 @@ import {
   logThoughtId,
   neighbourIds,
 } from "../src/semantic/indexer.js";
+import { SemanticSearch } from "../src/semantic/search.js";
 import { VectorStore } from "../src/semantic/store.js";
 
 const apiKey = process.env["THEBRAIN_API_KEY"];
@@ -1034,6 +1035,577 @@ suite("resource layer against the live API", () => {
       expect(documents.slice(from).sort()).toEqual(
         [0, 1, 2].map((i) => `${PREFIX}race-${i}\ntags: ${PREFIX}race-tag`),
       );
+      store.close();
+    }, 60_000);
+  });
+
+  /**
+   * What `PATCH /kind` does to a thought, to what is under it and to the log.
+   * The semantic index keeps a thought's kind beside its document and leaves
+   * types and tags out of a search by it, so sync has to hear of the change.
+   * Measured on TheBrain 15.0.640; the spec says only that `kind` is patched.
+   */
+  describe("a thought that changes kind", () => {
+    const { Normal, Type, Tag } = ThoughtKind;
+    /** A kind as a `304` writes it. */
+    const KIND_NAME: Record<number, string> = { [Normal]: "Normal", [Type]: "Type", [Tag]: "Tag" };
+    /** What a `404` calls a link under a thought of that kind. */
+    const UNDER: Record<number, string> = {
+      [Normal]: "Normal",
+      [Type]: "InstanceOf",
+      [Tag]: "HasTag",
+    };
+    const CHANGES = (
+      [
+        [Normal, Tag],
+        [Tag, Normal],
+        [Normal, Type],
+        [Type, Normal],
+        [Type, Tag],
+        [Tag, Type],
+      ] as const
+    ).map(([from, to]) => ({ from, to, named: `${KIND_NAME[from]} → ${KIND_NAME[to]}` }));
+
+    /** Every entry that names one of `ids`, in any position, oldest first. */
+    const about = async (ids: readonly string[]): Promise<ModificationLogDto[]> =>
+      (await api.brains.modifications(brainId, { maxLogs: 300 }))
+        .filter((l) => [l.sourceId, l.extraAId, l.extraBId].some((id) => ids.includes(id)))
+        .sort((a, b) => compareLogTime(logTime(a), logTime(b)));
+
+    /**
+     * Changes the kind of `id` and returns what the log gained about `ids`,
+     * oldest first. A write is in the log when its request is answered, so
+     * what was there before the patch is what made the fixture.
+     */
+    const turn = async (
+      id: string,
+      to: number,
+      ids: readonly string[] = [id],
+    ): Promise<ModificationLogDto[]> => {
+      const made = await about(ids);
+      const boundary = logTime(made.at(-1)!);
+      const later = (l: ModificationLogDto): boolean => compareLogTime(logTime(l), boundary) > 0;
+      await api.thoughts.update(brainId, id, { kind: to });
+      const entries = await eventually(
+        () => about(ids),
+        (found) =>
+          found.some((l) => later(l) && l.modType === ModType.KindChanged && l.sourceId === id),
+      );
+      return entries.filter(later);
+    };
+
+    /** An entry as code, whom it is about by role, and its two values. */
+    const shapeOf =
+      (roles: ReadonlyMap<string, string>) =>
+      (l: ModificationLogDto): [number, string, string | null, string | null] => [
+        l.modType,
+        l.sourceType === EntityType.Thought
+          ? (roles.get(l.sourceId) ?? l.sourceId)
+          : `${roles.get(l.extraAId) ?? l.extraAId}>${roles.get(l.extraBId) ?? l.extraBId}`,
+        l.oldValue,
+        l.newValue,
+      ];
+
+    /** Puts `id` under `x` the way a thought is under one of that kind. */
+    const putUnder = async (x: string, kind: number, id: string): Promise<void> => {
+      if (kind === Type) await api.thoughts.update(brainId, id, { typeId: x });
+      else if (kind === Tag) await api.links.attachTag(brainId, id, x);
+      else {
+        await api.links.create(brainId, {
+          thoughtIdA: x,
+          thoughtIdB: id,
+          relation: Relation.Child,
+        });
+      }
+    };
+
+    /** An embedder that records what it is given and ranks nothing. */
+    const recorder = (): { embedder: Embedder; documents: string[] } => {
+      const documents: string[] = [];
+      const embedder: Embedder = {
+        id: "contract@v1",
+        dimensions: 1,
+        embedDocuments: async (texts) => {
+          documents.push(...texts);
+          return texts.map(() => new Float32Array([1]));
+        },
+        embedQuery: async () => new Float32Array([1]),
+      };
+      return { embedder, documents };
+    };
+
+    it.each(CHANGES)(
+      "$named is one 304 against the thought, the kinds by name, and no other entry",
+      async ({ from, to }) => {
+        const name = `kind-${KIND_NAME[from]}-${KIND_NAME[to]}`.toLowerCase();
+        const id = await make(name, from);
+
+        const entries = await turn(id, to);
+        expect(entries.map(shapeOf(new Map([[id, "x"]])))).toEqual([
+          [ModType.KindChanged, "x", KIND_NAME[from]!, KIND_NAME[to]!],
+        ]);
+        const [event] = entries;
+        expect(event).toMatchObject({
+          sourceType: EntityType.Thought,
+          sourceId: id,
+          extraAType: EntityType.Unknown,
+          extraBType: EntityType.Unknown,
+        });
+        expect(logThoughtId(event!)).toBe(id);
+        expect(linkEndIds(event!)).toEqual([]);
+        expect(describeChange(event!)).toBe("kind changed");
+
+        // The read and the graph follow, up to a quarter of a second later.
+        const read = await eventually(
+          () => api.thoughts.get(brainId, id),
+          (t) => t.kind === to,
+        );
+        expect(read.kind).toBe(to);
+        const graph = await eventually(
+          () => api.thoughts.getGraph(brainId, id),
+          (g) => g.thought.kind === to,
+        );
+        expect(graph.thought.kind).toBe(to);
+        // The label is in the document, and it changes with no 202: a thought
+        // with none of its own reads with its name for one while it is a type.
+        expect(graph.thought.label).toBe(to === Type ? `${PREFIX}${name}` : null);
+      },
+      30_000,
+    );
+
+    it.each(CHANGES)(
+      "$named turns every link under the thought, a 404 each, with a 203 for a type gained or lost",
+      async ({ from, to }) => {
+        const tail = `${KIND_NAME[from]}-${KIND_NAME[to]}`.toLowerCase();
+        const x = await make(`kind-over-${tail}`, from);
+        const c = await make(`kind-under-${tail}-c`);
+        const d = await make(`kind-under-${tail}-d`);
+        const name = `${PREFIX}kind-over-${tail}`;
+        await putUnder(x, from, c);
+        await putUnder(x, from, d);
+        await eventually(
+          () => api.thoughts.getGraph(brainId, x),
+          (g) => g.children.length === 2,
+        );
+
+        const entries = await turn(x, to, [x, c, d]);
+        const shapes = entries.map(
+          shapeOf(
+            new Map([
+              [x, "x"],
+              [c, "c"],
+              [d, "d"],
+            ]),
+          ),
+        );
+        const key = (shape: unknown): string => JSON.stringify(shape);
+        const link = (id: string): unknown => [
+          ModType.LinkMeaningChanged,
+          `x>${id}`,
+          UNDER[from]!,
+          UNDER[to]!,
+        ];
+        const lost = (id: string): unknown => [ModType.TypeSet, id, name, null];
+        const gained = (id: string): unknown => [ModType.TypeSet, id, null, name];
+        const own = [ModType.KindChanged, "x", KIND_NAME[from]!, KIND_NAME[to]!];
+        expect(shapes.map(key).sort()).toEqual(
+          [
+            ...(from === Type ? [lost("c"), lost("d")] : []),
+            link("c"),
+            link("d"),
+            ...(to === Type ? [gained("c"), gained("d")] : []),
+            own,
+          ]
+            .map(key)
+            .sort(),
+        );
+
+        // The thought's own entry is the last. The children come in any order;
+        // a type lost is logged ahead of every link, a type gained straight
+        // after its own link.
+        const at = (shape: unknown): number => shapes.map(key).indexOf(key(shape));
+        expect(at(own)).toBe(shapes.length - 1);
+        for (const id of ["c", "d"]) {
+          if (from === Type) expect(at(lost(id))).toBeLessThan(2);
+          if (to === Type) expect(at(gained(id))).toBe(at(link(id)) + 1);
+        }
+        // Each link's entry names both ends, which is how sync finds what is
+        // under the thought: nothing else in the log says its document changed
+        // when it gains or loses a tag.
+        const links = entries.filter((l) => l.modType === ModType.LinkMeaningChanged);
+        expect(links.map(linkEndIds).sort()).toEqual([[x, c], [x, d]].sort());
+        // One request, and each of its entries has a time of its own.
+        expect(new Set(entries.map(logTime)).size).toBe(entries.length);
+
+        for (const id of [c, d]) {
+          const graph = await eventually(
+            () => api.thoughts.getGraph(brainId, id),
+            (g) =>
+              to === Type
+                ? g.type?.id === x
+                : to === Tag
+                  ? g.tags.some((t) => t.id === x)
+                  : g.parents.some((p) => p.id === x),
+          );
+          expect({
+            type: graph.type?.id ?? null,
+            tags: graph.tags.map((t) => t.id),
+            parents: graph.parents.map((p) => p.id),
+          }).toEqual({
+            type: to === Type ? x : null,
+            tags: to === Tag ? [x] : [],
+            parents: to === Normal ? [x] : [],
+          });
+        }
+      },
+      30_000,
+    );
+
+    it("a thought turned into a tag loses its type, and keeps the tag it had", async () => {
+      const t = await make("kind-own-type-1", Type);
+      const g = await make("kind-own-tag-1", Tag);
+      const x = await make("kind-typed-to-tag");
+      await api.thoughts.update(brainId, x, { typeId: t });
+      await api.links.attachTag(brainId, x, g);
+      await eventually(
+        () => api.thoughts.getGraph(brainId, x),
+        (graph) => graph.type?.id === t && graph.tags.length === 1,
+      );
+
+      const entries = await turn(x, Tag, [x, t, g]);
+      const roles = new Map([
+        [x, "x"],
+        [t, "t"],
+        [g, "g"],
+      ]);
+      // The type's link is deleted and the type cleared, each with its entry,
+      // so this change was read by sync before it read 304.
+      expect(entries.map(shapeOf(roles))).toEqual([
+        [ModType.Deleted, "t>x", null, null],
+        [ModType.TypeSet, "x", `${PREFIX}kind-own-type-1`, null],
+        [ModType.LinkMeaningChanged, "g>x", "HasTag", "SubTagOf"],
+        [ModType.KindChanged, "x", "Normal", "Tag"],
+      ]);
+
+      const graph = await eventually(
+        () => api.thoughts.getGraph(brainId, x),
+        (now) => now.thought.kind === Tag && now.type === null,
+      );
+      expect(graph.thought.typeId).toBeNull();
+      expect(graph.type).toBeNull();
+      expect(graph.tags.map((tag) => tag.id)).toEqual([g]);
+    }, 30_000);
+
+    it("a thought turned into a type keeps its type and its tag", async () => {
+      const t = await make("kind-own-type-2", Type);
+      const g = await make("kind-own-tag-2", Tag);
+      const x = await make("kind-typed-to-type");
+      await api.thoughts.update(brainId, x, { typeId: t });
+      await api.links.attachTag(brainId, x, g);
+      await eventually(
+        () => api.thoughts.getGraph(brainId, x),
+        (graph) => graph.type?.id === t && graph.tags.length === 1,
+      );
+
+      const entries = await turn(x, Type, [x, t, g]);
+      const roles = new Map([
+        [x, "x"],
+        [t, "t"],
+        [g, "g"],
+      ]);
+      expect(entries.map(shapeOf(roles))).toEqual([
+        [ModType.LinkMeaningChanged, "t>x", "InstanceOf", "TypeOf"],
+        [ModType.KindChanged, "x", "Normal", "Type"],
+      ]);
+
+      const graph = await eventually(
+        () => api.thoughts.getGraph(brainId, x),
+        (now) => now.thought.kind === Type,
+      );
+      expect(graph.type?.id).toBe(t);
+      expect(graph.tags.map((tag) => tag.id)).toEqual([g]);
+    }, 30_000);
+
+    it("a child with a type of its own loses it to a parent turned into a type, and keeps it under one turned into a tag", async () => {
+      const fixture = async (tail: string) => {
+        const x = await make(`kind-over-typed-${tail}`);
+        const c = await make(`kind-typed-child-${tail}`);
+        const t = await make(`kind-child-type-${tail}`, Type);
+        await putUnder(x, Normal, c);
+        await api.thoughts.update(brainId, c, { typeId: t });
+        await eventually(
+          () => api.thoughts.getGraph(brainId, c),
+          (g) => g.type?.id === t && g.parents.some((p) => p.id === x),
+        );
+        const roles = new Map([
+          [x, "x"],
+          [c, "c"],
+          [t, "t"],
+        ]);
+        return { x, c, t, roles };
+      };
+
+      const typed = await fixture("type");
+      const own = `${PREFIX}kind-child-type-type`;
+      // The second 203 has the old type for its old value, though the first
+      // has cleared it. Both name the child, so sync reads it again.
+      expect((await turn(typed.x, Type, [typed.x, typed.c, typed.t])).map(shapeOf(typed.roles))).toEqual([
+        [ModType.Deleted, "t>c", null, null],
+        [ModType.TypeSet, "c", own, null],
+        [ModType.LinkMeaningChanged, "x>c", "Normal", "InstanceOf"],
+        [ModType.TypeSet, "c", own, `${PREFIX}kind-over-typed-type`],
+        [ModType.KindChanged, "x", "Normal", "Type"],
+      ]);
+      const instance = await eventually(
+        () => api.thoughts.getGraph(brainId, typed.c),
+        (g) => g.type?.id === typed.x,
+      );
+      expect(instance.type?.id).toBe(typed.x);
+
+      const tagged = await fixture("tag");
+      expect((await turn(tagged.x, Tag, [tagged.x, tagged.c, tagged.t])).map(shapeOf(tagged.roles))).toEqual([
+        [ModType.LinkMeaningChanged, "x>c", "Normal", "HasTag"],
+        [ModType.KindChanged, "x", "Normal", "Tag"],
+      ]);
+      const carrier = await eventually(
+        () => api.thoughts.getGraph(brainId, tagged.c),
+        (g) => g.tags.some((tag) => tag.id === tagged.x),
+      );
+      expect(carrier.type?.id).toBe(tagged.t);
+      expect(carrier.tags.map((tag) => tag.id)).toEqual([tagged.x]);
+    }, 30_000);
+
+    it.each([
+      { to: Tag, named: "a tag" },
+      { to: Type, named: "a type" },
+    ])("a thought turned into $named keeps its label, its note, its parent and its jump", async ({ to }) => {
+      const tail = KIND_NAME[to]!.toLowerCase();
+      const x = await api.thoughts.create(brainId, {
+        name: `${PREFIX}kind-kept-${tail}`,
+        label: "a caption",
+      });
+      created.push(x);
+      const p = await make(`kind-kept-parent-${tail}`);
+      const j = await make(`kind-kept-jump-${tail}`);
+      await api.links.create(brainId, { thoughtIdA: x, thoughtIdB: p, relation: Relation.Parent });
+      await api.links.create(brainId, { thoughtIdA: x, thoughtIdB: j, relation: Relation.Jump });
+      await api.notes.set(brainId, x, "a note of its own");
+      await eventually(
+        () => api.thoughts.getGraph(brainId, x),
+        (g) => g.parents.length === 1 && g.jumps.length === 1 && g.attachments.some((a) => a.isNotes),
+      );
+
+      // Neither link turns: the 304 is all the log has.
+      const entries = await turn(x, to, [x, p, j]);
+      expect(entries.map((l) => l.modType)).toEqual([ModType.KindChanged]);
+
+      const graph = await eventually(
+        () => api.thoughts.getGraph(brainId, x),
+        (g) => g.thought.kind === to,
+      );
+      expect(graph.thought.label).toBe("a caption");
+      expect(graph.parents.map((t) => t.id)).toEqual([p]);
+      expect(graph.jumps.map((t) => t.id)).toEqual([j]);
+      expect(graph.attachments.some((a) => a.isNotes)).toBe(true);
+      expect(await api.notes.get(brainId, x)).toBe("a note of its own");
+    }, 30_000);
+
+    it("only an ordinary thought, a type and a tag can be asked for, and asking for what it is logs nothing", async () => {
+      const id = await make("kind-refused");
+      const patched = (op: Record<string, unknown>): Promise<unknown> =>
+        api.client
+          .patch(`/api/thoughts/${brainId}/${id}`, {
+            jsonPatch: [{ path: "/kind", ...op } as never],
+          })
+          .then(
+            () => "accepted",
+            (error: unknown) => error,
+          );
+
+      // 3 is the spec's Event and 5 its System: no request makes either.
+      for (const value of [0, 3, 5, 6, 99, -1]) {
+        expect(await patched({ op: "replace", value }), `kind ${value}`).toMatchObject({
+          kind: "bad_request",
+          status: 400,
+          message: "'kind' value is not valid.",
+        });
+      }
+      // What is no whole number is the 403 that names no cause.
+      for (const value of [null, 1.5, "tag", true]) {
+        expect(await patched({ op: "replace", value }), `kind ${String(value)}`).toMatchObject({
+          kind: "forbidden",
+          status: 403,
+        });
+      }
+      for (const op of ["remove", "add"]) {
+        expect(await patched({ op, value: Tag }), op).toMatchObject({
+          kind: "bad_request",
+          status: 400,
+          message: "Only 'replace' operation is allowed for 'kind' path.",
+        });
+      }
+      for (const kind of [3, 5]) {
+        const born = await api.thoughts.create(brainId, { name: `${PREFIX}kind-born-${kind}`, kind }).then(
+          (made) => {
+            created.push(made);
+            return "accepted";
+          },
+          (error: unknown) => error,
+        );
+        expect(born, `a thought created with kind ${kind}`).toMatchObject({
+          kind: "bad_request",
+          status: 400,
+          message: `Invalid 'Kind' value: ${kind}.`,
+        });
+      }
+
+      // The kind it has is a 200 and no entry: the one 304 below is the tag's.
+      expect(await patched({ op: "replace", value: Normal })).toBe("accepted");
+      expect((await api.thoughts.get(brainId, id)).kind).toBe(Normal);
+      const entries = await turn(id, Tag);
+      expect(entries.map((l) => [l.modType, l.oldValue, l.newValue])).toEqual([
+        [ModType.KindChanged, "Normal", "Tag"],
+      ]);
+
+      // The number as a string is taken for the number.
+      expect(await patched({ op: "replace", value: String(Type) })).toBe("accepted");
+      const read = await eventually(
+        () => api.thoughts.get(brainId, id),
+        (t) => t.kind === Type,
+      );
+      expect(read.kind).toBe(Type);
+    }, 30_000);
+
+    it("sync and rebuild give the row its kind, read from the live log, and a search leaves it out or takes it in", async () => {
+      // The whole path, on rows whose documents do not change and on those
+      // whose do. Each row used to keep the kind it was first indexed with.
+      const plain = await make("kind-sync-plain");
+      const tag = await make("kind-sync-tag", Tag);
+      const captioned = await api.thoughts.create(brainId, {
+        name: `${PREFIX}kind-sync-captioned`,
+        label: "a caption",
+      });
+      created.push(captioned);
+      const type = await make("kind-sync-type", Type);
+      const parent = await make("kind-sync-parent");
+      const child = await make("kind-sync-child");
+      await putUnder(parent, Normal, child);
+
+      const { embedder, documents } = recorder();
+      const store = new VectorStore(":memory:");
+      const indexer = new SemanticIndexer(api, store, embedder);
+      const search = new SemanticSearch(api, store, embedder);
+      await indexer.rebuild(brainId);
+      // As an index synced some time ago: the watermark is past everything
+      // that made these thoughts, so a sync hears of them from the kind
+      // change alone. A rebuild leaves it ten seconds back.
+      const [newest] = await api.brains.modifications(brainId, { maxLogs: 1 });
+      store.setSyncedThrough(shiftMicros(logTime(newest!), 1));
+
+      const kinds = (): Record<string, number | undefined> => {
+        const rows = store.kinds();
+        return {
+          plain: rows.get(plain),
+          tag: rows.get(tag),
+          captioned: rows.get(captioned),
+          type: rows.get(type),
+          parent: rows.get(parent),
+        };
+      };
+      /** Which of them a search returns: every row scores the same here. */
+      const found = async (includeAuxiliary: boolean): Promise<string[]> => {
+        const names = new Map([
+          [plain, "plain"],
+          [tag, "tag"],
+          [captioned, "captioned"],
+          [type, "type"],
+          [parent, "parent"],
+        ]);
+        const { matches, mode } = await search.find(brainId, "anything", {
+          limit: store.size(),
+          includeAuxiliary,
+        });
+        expect(mode).toBe("vector");
+        return matches.flatMap((m) => names.get(m.thoughtId) ?? []).sort();
+      };
+      expect(kinds()).toEqual({ plain: 1, tag: 4, captioned: 1, type: 2, parent: 1 });
+      expect(await found(false)).toEqual(["captioned", "parent", "plain"]);
+
+      const turned = async (changes: Array<[string, number]>): Promise<void> => {
+        for (const [id, to] of changes) await api.thoughts.update(brainId, id, { kind: to });
+        for (const [id, to] of changes) {
+          await eventually(
+            () => api.thoughts.getGraph(brainId, id),
+            (g) => g.thought.kind === to,
+          );
+        }
+      };
+      await turned([
+        [plain, Tag],
+        [tag, Normal],
+        [captioned, Type],
+        [type, Normal],
+        [parent, Tag],
+      ]);
+      await eventually(
+        () => api.thoughts.getGraph(brainId, child),
+        (g) => g.tags.some((t) => t.id === parent),
+      );
+      let from = documents.length;
+      const synced = await indexer.sync(brainId);
+
+      expect(kinds()).toEqual({ plain: 4, tag: 1, captioned: 2, type: 1, parent: 4 });
+      expect(await found(false)).toEqual(["tag", "type"]);
+      expect(await found(true)).toEqual(["captioned", "parent", "plain", "tag", "type"]);
+      // Encoded again: the one whose document changed, a type that read with
+      // its name for a label and reads with none now, and the thought under
+      // the new tag. The other four rows got their kind and nothing else.
+      expect(documents.slice(from).sort()).toEqual(
+        [`${PREFIX}kind-sync-type`, `${PREFIX}kind-sync-child\ntags: ${PREFIX}kind-sync-parent`].sort(),
+      );
+      expect(synced).toMatchObject({ indexed: 2, kindUpdated: 4, skipped: 0, removed: 0 });
+
+      // A rebuild with no sync before it: it compared hashes alone, and these
+      // two documents are the ones they were.
+      await turned([
+        [plain, Normal],
+        [captioned, Tag],
+      ]);
+      from = documents.length;
+      const rebuilt = await indexer.rebuild(brainId);
+
+      expect(kinds()).toEqual({ plain: 1, tag: 1, captioned: 4, type: 1, parent: 4 });
+      expect(await found(false)).toEqual(["plain", "tag", "type"]);
+      expect(documents.slice(from)).toEqual([]);
+      expect(rebuilt).toMatchObject({ indexed: 0, kindUpdated: 2, removed: 0 });
+      store.close();
+    }, 90_000);
+
+    it("a sync that runs before the graph shows the kind does not lose it", async () => {
+      // The 304 is in the log when the patch is answered, and a graph that
+      // has been read before shows the kind up to a quarter of a second later.
+      const ids = [await make("kind-race-0"), await make("kind-race-1"), await make("kind-race-2")];
+      const { embedder } = recorder();
+      const store = new VectorStore(":memory:");
+      const indexer = new SemanticIndexer(api, store, embedder);
+      await indexer.rebuild(brainId);
+
+      for (const id of ids) {
+        await api.thoughts.update(brainId, id, { kind: Tag });
+        const [event] = (await about([id])).filter((l) => l.modType === ModType.KindChanged);
+        expect(event, "the 304 is not in the log when the patch is answered").toBeDefined();
+        await indexer.sync(brainId);
+      }
+      for (const id of ids) {
+        await eventually(
+          () => api.thoughts.getGraph(brainId, id),
+          (g) => g.thought.kind === Tag,
+        );
+      }
+      await indexer.sync(brainId);
+
+      const rows = store.kinds();
+      expect(ids.map((id) => rows.get(id))).toEqual([Tag, Tag, Tag]);
       store.close();
     }, 60_000);
   });

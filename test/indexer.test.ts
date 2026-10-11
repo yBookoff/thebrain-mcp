@@ -877,6 +877,353 @@ describe("incremental sync", () => {
   });
 });
 
+describe("a thought that changes kind", () => {
+  // What the live API logs and reads back for each change is contract-tested
+  // in test/resources.integration.test.ts, under the same name. The fake brain
+  // and its log below are shaped by that, not by what the indexer reads.
+  const NORMAL = 1;
+  const TYPE = 2;
+  const TAG = 4;
+  /** A kind as a `304` writes it. */
+  const KIND_NAME: Record<number, string> = { 1: "Normal", 2: "Type", 4: "Tag" };
+  /** What a `404` calls a link under a thought of that kind. */
+  const UNDER: Record<number, string> = { 1: "Normal", 2: "InstanceOf", 4: "HasTag" };
+  type Change = [from: number, to: number];
+  const cases = (changes: Change[]): Array<{ change: Change; named: string }> =>
+    changes.map((change) => ({
+      change,
+      named: `${KIND_NAME[change[0]]} → ${KIND_NAME[change[1]]}`,
+    }));
+  const CHANGES = cases([
+    [NORMAL, TAG],
+    [TAG, NORMAL],
+    [NORMAL, TYPE],
+    [TYPE, NORMAL],
+    [TYPE, TAG],
+    [TAG, TYPE],
+  ]);
+  /** The two that leave the document of a thought with no label as it was. */
+  const BETWEEN_ORDINARY_AND_TAG = CHANGES.filter(({ change }) => !change.includes(TYPE));
+  const TO_OR_FROM_A_TYPE = CHANGES.filter(({ change }) => change.includes(TYPE));
+
+  /**
+   * A thought as the API reads it. One with no label of its own reads with
+   * its name for a label while it is a type, and with none otherwise.
+   */
+  const thoughtOf = (
+    id: string,
+    name: string,
+    kind: number,
+    extra: Partial<FakeThought> = {},
+  ): FakeThought => ({
+    id,
+    name,
+    kind,
+    ...(kind === TYPE ? { label: name } : {}),
+    ...extra,
+  });
+
+  /** How a thought under one of that kind is linked to it. */
+  const under = (xId: string, kind: number): Partial<FakeThought> =>
+    kind === TYPE ? { typeId: xId } : kind === TAG ? { tags: [xId] } : { parents: [xId] };
+
+  /**
+   * The log of one kind change, in the API's order: what is under the thought
+   * first, its own `304` last, every entry stamped apart.
+   *
+   * Each link under it changes meaning, a `404` with both ends. A thought that
+   * gains the changed one for its type has a `203` straight after its link's
+   * entry; those that lose it have theirs ahead of every link.
+   */
+  function kindChange(
+    x: { id: string; name: string },
+    [from, to]: Change,
+    below: readonly string[] = [],
+    at = "2099-01-01T00:00:00",
+  ): ModificationLogDto[] {
+    let tick = 0;
+    const stamp = (): string => `${at}.${String((tick += 1)).padStart(6, "0")}`;
+    const typeSet = (id: string, oldValue: string | null, newValue: string | null) => ({
+      ...log(id, 203, stamp()),
+      oldValue,
+      newValue,
+    });
+    const entries: ModificationLogDto[] = [];
+    if (from === TYPE) for (const id of below) entries.push(typeSet(id, x.name, null));
+    for (const id of below) {
+      entries.push({
+        ...linkLog(x.id, id, 404, stamp()),
+        oldValue: UNDER[from]!,
+        newValue: UNDER[to]!,
+      });
+      if (to === TYPE) entries.push(typeSet(id, null, x.name));
+    }
+    entries.push({
+      ...log(x.id, 304, stamp()),
+      oldValue: KIND_NAME[from]!,
+      newValue: KIND_NAME[to]!,
+    });
+    return entries;
+  }
+
+  async function indexed(thoughts: Map<string, FakeThought>) {
+    const logs = [...thoughts.keys()].map((id, i) => log(id, 101, `2026-08-11T09:00:0${i}`));
+    const { api, calls } = fakeApi(thoughts, logs);
+    const store = new VectorStore(":memory:");
+    const embedder = new FakeEmbedder();
+    const indexer = new SemanticIndexer(api, store, embedder);
+    await indexer.rebuild(BRAIN);
+    return { api, logs, calls, store, embedder, indexer };
+  }
+
+  /** The kind a thought's row holds, read the way a search reads it. */
+  const kindOf = (store: VectorStore, id: string): number | undefined =>
+    store.search(new Float32Array(8), { limit: 1000 }).find((h) => h.thoughtId === id)?.kind;
+
+  it("the 304 names the thought in sourceId, and is no link event", () => {
+    const [entry] = kindChange({ id: "x", name: "data" }, [NORMAL, TAG]);
+    expect(entry).toMatchObject({ modType: 304, sourceType: 2, oldValue: "Normal", newValue: "Tag" });
+    expect(logThoughtId(entry!)).toBe("x");
+    expect(linkEndIds(entry!)).toEqual([]);
+  });
+
+  it.each(BETWEEN_ORDINARY_AND_TAG)(
+    "sync gives the row its kind and encodes nothing: $named, a thought with nothing under it",
+    async ({ change }) => {
+      // The document is the one it was, so its hash is too, and the only entry
+      // in the log is the 304. The row kept its kind through sync and rebuild.
+      const [from, to] = change;
+      const thoughts = new Map<string, FakeThought>([
+        ["x", thoughtOf("x", "data", from)],
+        ["b", thoughtOf("b", "bystander", NORMAL)],
+      ]);
+      const { logs, calls, store, embedder, indexer } = await indexed(thoughts);
+      expect(kindOf(store, "x")).toBe(from);
+      const graphBefore = calls.graph;
+      const embeddedBefore = embedder.calls;
+
+      thoughts.set("x", thoughtOf("x", "data", to));
+      logs.push(...kindChange({ id: "x", name: "data" }, change));
+      const result = await indexer.sync(BRAIN);
+
+      expect(kindOf(store, "x")).toBe(to);
+      expect(result).toMatchObject({ indexed: 0, kindUpdated: 1, skipped: 0, removed: 0 });
+      expect(embedder.calls).toBe(embeddedBefore);
+      expect(calls.graphIds.slice(graphBefore)).toEqual(["x"]);
+      store.close();
+    },
+  );
+
+  it.each(TO_OR_FROM_A_TYPE)(
+    "to or from a type the document changes as well, with only the 304 to say so: $named",
+    async ({ change }) => {
+      // A thought with no label of its own reads with its name for a label
+      // while it is a type. No 202 is logged for that.
+      const [from, to] = change;
+      const thoughts = new Map<string, FakeThought>([["x", thoughtOf("x", "data", from)]]);
+      const { logs, store, embedder, indexer } = await indexed(thoughts);
+      expect(embedder.documents.at(-1)).toBe(from === TYPE ? "data\ndata" : "data");
+
+      thoughts.set("x", thoughtOf("x", "data", to));
+      logs.push(...kindChange({ id: "x", name: "data" }, change));
+      const result = await indexer.sync(BRAIN);
+
+      expect(kindOf(store, "x")).toBe(to);
+      expect(embedder.documents.at(-1)).toBe(to === TYPE ? "data\ndata" : "data");
+      expect(result).toMatchObject({ indexed: 1, kindUpdated: 0, skipped: 0 });
+      store.close();
+    },
+  );
+
+  it.each(CHANGES)(
+    "a thought with a label of its own keeps its document through any change: $named",
+    async ({ change }) => {
+      const [from, to] = change;
+      const labelled = (kind: number): FakeThought =>
+        thoughtOf("x", "data", kind, { label: "what was measured" });
+      const thoughts = new Map<string, FakeThought>([["x", labelled(from)]]);
+      const { logs, store, embedder, indexer } = await indexed(thoughts);
+      const embeddedBefore = embedder.calls;
+
+      thoughts.set("x", labelled(to));
+      logs.push(...kindChange({ id: "x", name: "data" }, change));
+      const result = await indexer.sync(BRAIN);
+
+      expect(kindOf(store, "x")).toBe(to);
+      expect(result).toMatchObject({ indexed: 0, kindUpdated: 1, skipped: 0 });
+      expect(embedder.calls).toBe(embeddedBefore);
+      store.close();
+    },
+  );
+
+  it.each(CHANGES)(
+    "a rebuild corrects the kind with no entry in the log to go by: $named",
+    async ({ change }) => {
+      // An index synced before sync read the 304 holds such rows, and a rebuild
+      // compared hashes alone: it skipped them as unchanged.
+      const [from, to] = change;
+      const labelled = (kind: number): FakeThought =>
+        thoughtOf("x", "data", kind, { label: "what was measured" });
+      const thoughts = new Map<string, FakeThought>([
+        ["x", labelled(from)],
+        ["b", thoughtOf("b", "bystander", NORMAL)],
+      ]);
+      const { store, embedder, indexer } = await indexed(thoughts);
+      const embeddedBefore = embedder.calls;
+
+      thoughts.set("x", labelled(to));
+      const result = await indexer.rebuild(BRAIN);
+
+      expect(kindOf(store, "x")).toBe(to);
+      expect(result).toMatchObject({ indexed: 0, kindUpdated: 1, skipped: 1, removed: 0 });
+      expect(embedder.calls).toBe(embeddedBefore);
+      // And there is nothing left for the next one.
+      expect(await indexer.rebuild(BRAIN)).toMatchObject({ indexed: 0, kindUpdated: 0, skipped: 2 });
+      store.close();
+    },
+  );
+
+  it("after one sync a thought turned into a tag has left the default search, and one turned back is in it", async () => {
+    const thoughts = new Map<string, FakeThought>([
+      ["x", thoughtOf("x", "data", NORMAL)],
+      ["g", thoughtOf("g", "gotcha", TAG)],
+      ["b", thoughtOf("b", "bystander", NORMAL)],
+    ]);
+    const { api, logs, store, embedder, indexer } = await indexed(thoughts);
+    const search = new SemanticSearch(api, store, embedder);
+    const found = async (query: string, includeAuxiliary = false) =>
+      (await search.find(BRAIN, query, { includeAuxiliary })).matches.map((m) => [
+        m.thoughtId,
+        m.kind,
+      ]);
+    expect(await found("data")).toContainEqual(["x", NORMAL]);
+    expect((await found("gotcha")).map(([id]) => id)).not.toContain("g");
+
+    thoughts.set("x", thoughtOf("x", "data", TAG));
+    thoughts.set("g", thoughtOf("g", "gotcha", NORMAL));
+    logs.push(
+      ...kindChange({ id: "x", name: "data" }, [NORMAL, TAG]),
+      ...kindChange({ id: "g", name: "gotcha" }, [TAG, NORMAL], [], "2099-01-01T00:00:01"),
+    );
+    await indexer.sync(BRAIN);
+
+    expect((await found("data")).map(([id]) => id)).not.toContain("x");
+    // Asked for, it comes with the kind it has now: the Kind column prints it.
+    expect(await found("data", true)).toContainEqual(["x", TAG]);
+    expect(await found("gotcha")).toContainEqual(["g", NORMAL]);
+    store.close();
+  });
+
+  it.each(CHANGES)(
+    "what is under the thought is read again through its own entries: $named",
+    async ({ change }) => {
+      // Children of an ordinary thought, the thoughts a tag is on, the
+      // instances of a type: one becomes the other, and each of their
+      // documents names the tag or the type.
+      const [from, to] = change;
+      const x = (kind: number): FakeThought =>
+        thoughtOf("x", "data", kind, { children: ["c", "d"] });
+      const below = (kind: number): Array<[string, FakeThought]> => [
+        ["c", thoughtOf("c", "vector databases", NORMAL, under("x", kind))],
+        ["d", thoughtOf("d", "warehouses", NORMAL, under("x", kind))],
+      ];
+      const thoughts = new Map<string, FakeThought>([
+        ["x", x(from)],
+        ...below(from),
+        ["b", thoughtOf("b", "bystander", NORMAL)],
+      ]);
+      const { logs, calls, store, embedder, indexer } = await indexed(thoughts);
+      const graphBefore = calls.graph;
+      const embeddedBefore = embedder.documents.length;
+
+      thoughts.set("x", x(to));
+      for (const [id, thought] of below(to)) thoughts.set(id, thought);
+      logs.push(...kindChange({ id: "x", name: "data" }, change, ["c", "d"]));
+      const result = await indexer.sync(BRAIN);
+
+      const line = to === TYPE ? "\ntype: data" : to === TAG ? "\ntags: data" : "";
+      // Its own document changes only with the label a type reads with.
+      const own = from === TYPE || to === TYPE;
+      expect(embedder.documents.slice(embeddedBefore).sort()).toEqual(
+        [
+          ...(own ? [to === TYPE ? "data\ndata" : "data"] : []),
+          `vector databases${line}`,
+          `warehouses${line}`,
+        ].sort(),
+      );
+      expect(kindOf(store, "x")).toBe(to);
+      expect(result).toMatchObject({ indexed: own ? 3 : 2, kindUpdated: own ? 0 : 1, skipped: 0 });
+      // One request each, and none for the bystander.
+      expect(calls.graphIds.slice(graphBefore).sort()).toEqual(["c", "d", "x"]);
+      store.close();
+    },
+  );
+
+  it("a thought turned into a tag loses its type, and its row gets the kind with the new document", async () => {
+    const thoughts = new Map<string, FakeThought>([
+      ["x", thoughtOf("x", "data", NORMAL, { typeId: "t", tags: ["g"] })],
+      ["t", thoughtOf("t", "Topic", TYPE, { children: ["x"] })],
+      ["g", thoughtOf("g", "gotcha", TAG, { children: ["x"] })],
+    ]);
+    const { logs, store, embedder, indexer } = await indexed(thoughts);
+    expect(embedder.documents).toContain("data\ntype: Topic\ntags: gotcha");
+
+    // The type's link is deleted and the thought's type cleared; the tag it
+    // carried stays, as a tag on a tag; then the 304.
+    thoughts.set("x", thoughtOf("x", "data", TAG, { tags: ["g"] }));
+    thoughts.set("t", thoughtOf("t", "Topic", TYPE));
+    logs.push(
+      linkLog("t", "x", 102, "2099-01-01T00:00:00.000001"),
+      { ...log("x", 203, "2099-01-01T00:00:00.000002"), oldValue: "Topic", newValue: null },
+      {
+        ...linkLog("g", "x", 404, "2099-01-01T00:00:00.000003"),
+        oldValue: "HasTag",
+        newValue: "SubTagOf",
+      },
+      { ...log("x", 304, "2099-01-01T00:00:00.000004"), oldValue: "Normal", newValue: "Tag" },
+    );
+    const result = await indexer.sync(BRAIN);
+
+    expect(result).toMatchObject({ indexed: 1, kindUpdated: 0 });
+    expect(embedder.documents.at(-1)).toBe("data\ntags: gotcha");
+    expect(kindOf(store, "x")).toBe(TAG);
+    store.close();
+  });
+
+  it("a kind the graph did not show yet is picked up by the next sync, and counted once", async () => {
+    // The 304 is in the log at once and the graph follows up to 0.25 s later:
+    // read in between, the thought still has its old kind.
+    const thoughts = new Map<string, FakeThought>([["x", thoughtOf("x", "data", NORMAL)]]);
+    const { logs, store, indexer } = await indexed(thoughts);
+
+    // Stamped now and without an offset, as the log writes it.
+    const now = new Date().toISOString().slice(0, 19);
+    logs.push(...kindChange({ id: "x", name: "data" }, [NORMAL, TAG], [], now));
+    const early = await indexer.sync(BRAIN);
+    expect(early).toMatchObject({ indexed: 0, kindUpdated: 0, skipped: 1 });
+    expect(kindOf(store, "x")).toBe(NORMAL);
+
+    thoughts.set("x", thoughtOf("x", "data", TAG));
+    const late = await indexer.sync(BRAIN);
+    expect(kindOf(store, "x")).toBe(TAG);
+    expect(late).toMatchObject({ indexed: 0, kindUpdated: 1, skipped: 0 });
+
+    // The overlap reads the entry a third time, and there is nothing to do.
+    expect(await indexer.sync(BRAIN)).toMatchObject({ indexed: 0, kindUpdated: 0, skipped: 1 });
+    store.close();
+  });
+
+  it("a run with no kind to correct reports none", async () => {
+    const thoughts = new Map<string, FakeThought>([["x", thoughtOf("x", "data", NORMAL)]]);
+    const { logs, store, indexer } = await indexed(thoughts);
+    expect(await indexer.rebuild(BRAIN)).toMatchObject({ indexed: 0, kindUpdated: 0, skipped: 1 });
+    logs.push(log("y", 101, "2099-01-01T00:00:00"));
+    thoughts.set("y", thoughtOf("y", "new", NORMAL));
+    expect(await indexer.sync(BRAIN)).toMatchObject({ indexed: 1, kindUpdated: 0, skipped: 0 });
+    store.close();
+  });
+});
+
 describe("search", () => {
   async function ready() {
     const thoughts = new Map<string, FakeThought>([

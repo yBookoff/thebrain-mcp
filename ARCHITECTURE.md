@@ -234,9 +234,10 @@ Left as they were: a thought's tags are names still, because an identifier
 each on every read of a tagged thought is paid far more often than a tag is
 taken off, and `brain_list_types_and_tags` has them; and the active thought of
 `brain_list`, whose kind would take a request of its own. In vector mode the
-kind is the one the index recorded. A thought turned into a tag afterwards
-keeps its old kind there through a sync and a rebuild, since its document has
-not changed, and a default search goes on returning it.
+kind is the one the index recorded, as old as its last sync. A sync reads a
+thought again when its kind changes and a rebuild compares the kind of every
+row, and either gives the row its kind with nothing encoded (§8, *The kind is
+beside the document*).
 
 ### `brain_ingest` — the tool the product is built around
 
@@ -1374,6 +1375,7 @@ measured and has a contract test:
 | note | `801`/`802`/`803` against the `Notes.md` attachment | `extraAId` |
 | tag attached or detached | `101`/`102` against the link | both ends, `extraAId` and `extraBId` |
 | tag or type renamed | `103` against the tag or type alone | its graph's `children` |
+| kind, and with it the label a type reads with | `304` against the thought, the kinds by name as the values | `sourceId` |
 
 `logThoughtId()` covers the first five: it reads `sourceId` for a thought event
 and `extraAId` for a note event — otherwise an edit that touches only a note
@@ -1401,6 +1403,67 @@ link.
 > note event only. A label, a type or a tag changed the document and left the
 > vector as it was. A rebuild repairs an index synced that way: it compares
 > hashes, and these documents differ.
+
+**The kind is beside the document, not in it.** A row holds its thought's
+kind in a column of its own: that is what leaves types and tags out of a
+search, and what `brain_search` prints (§4). `PATCH /kind` turns an ordinary
+thought into a tag or a type, either of those into the other, and both back;
+no request makes kind 3 or 5. The log gains one `304` against the thought,
+the kinds by name in its values, and it is the last entry of the change.
+Ahead of it come the entries for what is under the thought: a `404` against
+each link there, whose meaning turns with the thought, and a `203` against
+each thought that gains or loses it for a type. The children of an ordinary
+thought are the thoughts a tag is on and the instances of a type, and one
+becomes the other. Measured 12 times out of 12 for each of the six changes,
+on a thought with nothing on it and on one with a parent, a child, a jump, a
+tag and, while its kind lets it have one, a type (`docs/api-map.md`, L31).
+
+So what is under the thought was read again already, both ends of a `404` by
+`linkEndIds()` and a `203` by `logThoughtId()`, and its document followed.
+The thought itself was not. `304` is now among the entries a sync reads, on
+two counts:
+
+- **The row's kind.** An ordinary thought turned into a tag has the document
+  it had, so its hash is the one stored and the thought was skipped. The kind
+  is compared apart from the hash, in the one place a sync and a rebuild
+  share. A row that differs in kind alone is given the new kind and keeps its
+  vector: nothing is encoded, so correcting it costs the graph request the
+  run makes anyway.
+- **The label.** A thought with no label of its own reads with its name for a
+  label while it is a type, and with none before and after. No `202` is
+  logged for that: the document gains or loses a line, and the `304` is the
+  only entry to say so.
+
+> Until this was fixed, no sync read a `304` and both runs compared hashes
+> alone. Measured through `brain_index` and `brain_search` on a live brain,
+> three runs of each change, with what made the fixture out of the sync's
+> reach. A sync left the row of a thought with nothing under it as it was,
+> whatever the change. A rebuild corrected the kind only where the document
+> had changed too, which is to or from a type for a thought with no label of
+> its own. Between an ordinary thought and a tag nothing corrected it unless
+> the thought had a type to lose, and nothing did for a thought with a label:
+> the new tag stayed in a default search, the thought that had been a tag
+> stayed out of it, and the `Kind` column said what the thought used to be.
+> With the change, all twenty cases read right after one sync and after a
+> rebuild alone, three runs of three.
+
+The kind did not go into the hash or into the document. In the hash it would
+make a miss of every hash stored, and the next rebuild would encode the whole
+brain again, minutes on a real one, for what one integer says. In the
+document it would change every vector and take a new `DOCUMENT_FORMAT`, for a
+word that says nothing of what a thought is about. So `DOCUMENT_FORMAT` stays
+at 3 and an index built before this is used as it is. A row whose thought
+changed kind before the upgrade keeps the old kind until a rebuild: its `304`
+is behind the watermark, and a sync reads the thought only when something
+else touches it.
+
+The graph shows a new kind up to a quarter of a second after the log has the
+`304`, 234 ms at the most in 280 changes. That is a tag's race over again,
+and the watermark's overlap covers it the same way.
+
+`brain_index` counts such a row apart, as "kind updated, nothing to encode",
+and prints the line only when there is one: the row is neither encoded nor
+unchanged, which is what it used to be reported as.
 
 Measured on a live 45-thought brain: first index 1.5 s, second run 0.1 s
 (everything skipped by hash), empty sync 0.1 s.

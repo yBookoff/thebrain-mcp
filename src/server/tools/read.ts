@@ -665,6 +665,11 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
             action === "rebuild" ? "Index built" : "Index refreshed",
             bullet([
               `thoughts encoded: ${result.indexed}`,
+              // A thought that changed kind and kept its document: the row
+              // was corrected, which is neither encoded nor unchanged.
+              ...(result.kindUpdated > 0
+                ? [`kind updated, nothing to encode: ${result.kindUpdated}`]
+                : []),
               `skipped unchanged: ${result.skipped}`,
               `removed from index: ${result.removed}`,
               `took: ${(result.elapsedMs / 1000).toFixed(1)} s`,

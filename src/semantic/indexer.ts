@@ -42,6 +42,11 @@ export interface IndexProgress {
 
 export interface IndexResult {
   indexed: number;
+  /**
+   * Rows given the kind their thought has now, with the vector left as it
+   * was: the document had not changed, so there was nothing to encode.
+   */
+  kindUpdated: number;
   skipped: number;
   removed: number;
   elapsedMs: number;
@@ -125,7 +130,10 @@ export class SemanticIndexer {
    * Full re-index.
    *
    * Unchanged thoughts are reused by document hash, so a repeat run is cheap:
-   * embeddings are computed only for what actually changed.
+   * embeddings are computed only for what actually changed. A row's kind is
+   * compared apart from the hash and corrected in place, with nothing encoded:
+   * that is what repairs an index whose thoughts changed kind before a sync
+   * read `304`.
    */
   async rebuild(
     brainId: string,
@@ -319,10 +327,11 @@ export class SemanticIndexer {
     ids: readonly string[],
     onProgress: (p: IndexProgress) => void,
     graphs: ReadonlyMap<string, CleanGraph> = new Map(),
-  ): Promise<{ indexed: number; skipped: number }> {
-    if (ids.length === 0) return { indexed: 0, skipped: 0 };
+  ): Promise<{ indexed: number; kindUpdated: number; skipped: number }> {
+    if (ids.length === 0) return { indexed: 0, kindUpdated: 0, skipped: 0 };
 
     const existing = this.#store.contentHashes();
+    const kinds = this.#store.kinds();
     const total = ids.length;
     let fetched = 0;
 
@@ -343,6 +352,11 @@ export class SemanticIndexer {
     });
 
     const pending: Array<{ thought: IndexableThought; doc: string; hash: string }> = [];
+    // The kind is stored beside the document and is no part of it, so a row
+    // can have the right hash and the wrong kind. An ordinary thought turned
+    // into a tag has the document it had: it used to be skipped here by a
+    // sync and by a rebuild alike, and a default search went on returning it.
+    const rekinded = new Map<string, number>();
     let skipped = 0;
     for (const item of collected) {
       if (item === null) continue;
@@ -350,11 +364,13 @@ export class SemanticIndexer {
       const doc = buildDocument(item);
       const hash = documentHash(doc);
       if (existing.get(item.id) === hash) {
-        skipped += 1;
+        if (kinds.get(item.id) === item.kind) skipped += 1;
+        else rekinded.set(item.id, item.kind);
         continue;
       }
       pending.push({ thought: item, doc, hash });
     }
+    this.#store.setKinds(rekinded);
 
     let indexed = 0;
     for (let i = 0; i < pending.length; i += this.#embedBatch) {
@@ -377,7 +393,7 @@ export class SemanticIndexer {
       });
     }
 
-    return { indexed, skipped };
+    return { indexed, kindUpdated: rekinded.size, skipped };
   }
 
   async #collect(
@@ -431,7 +447,14 @@ function watermarkAt(startedAt: number): string {
  *     extraAId: <thought>, extraAType: 2 }
  *   { modType: 211, sourceType: 2, sourceId: <thought>, extraAType: -1 }
  * So an alias change is an ordinary thought event, unlike a note. A label
- * (`202`) and a type (`203`, set or lost) are ordinary thought events too.
+ * (`202`) and a type (`203`, set or lost) are ordinary thought events too, and
+ * so is a change of kind:
+ *   { modType: 304, sourceType: 2, sourceId: <thought>, extraAType: -1,
+ *     oldValue: "Normal", newValue: "Tag" }
+ * That entry is all the log has for a thought with nothing under it. What is
+ * under it is named by its own entries: a `404` against each link whose
+ * meaning the change turned, and a `203` against each thought that gained or
+ * lost the changed one as its type.
  */
 export function logThoughtId(log: ModificationLogDto): string | null {
   if (log.sourceType === EntityType.Thought) return log.sourceId;
