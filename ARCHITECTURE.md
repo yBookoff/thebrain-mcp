@@ -579,6 +579,133 @@ parent or child link is read, and refused unless it is ordinary; the lower end
 and both ends of a jump are not read at all. A mark there would cost a read an
 end on every call, against the rule above that a mark costs no request.
 
+### A read that fails inside a tool
+
+Seven tools read something beside the thing they are called for: a note ahead
+of printing or replacing it, a graph on the way through a walk, the app's
+state beside the list of brains. Six of those reads dropped their failure,
+`.catch(() => "")` on a note and `.catch(() => null)` on a graph and on the
+state, and what they put in its place is what the API answers when nothing is
+there: no note, nothing next to a thought, no brain open.
+
+Measured through the real handlers on 15.0.640, with a 500, an answer dropped
+on its way back, a dropped connection and the catch-all 403 each put in on the
+way to the live API, once each, and all four the same:
+
+- `brain_get_thought` printed the thought with no Note section, in a result
+  that was no error.
+- `brain_set_note` answered "note created" and replaced a note of 18
+  characters it had not read.
+- `brain_delete_thought` put its question with no line for the note, and with
+  `confirm` deleted the thought and the note with it.
+- `brain_traverse` listed the thought whose graph had failed like any other,
+  with nothing under it: 4 thoughts and 3 links where there were 6 and 5.
+- `brain_ingest`, at the wait for the graphs (above), read the failing graph
+  74 to 78 times over its two seconds and answered "TheBrain does not yet
+  list 1 of the new thoughts", and to wait a few seconds.
+- `brain_list` marked no brain open and printed no active thought.
+- `brain_append_note` wrote nothing when the read ahead of its write failed,
+  and answered with the read's error alone. With the answer to its write
+  dropped it answered that the request had exceeded 30000 ms; the text was in
+  the note, and the same call sent again put it there twice, with a note to
+  begin with and without one.
+
+One of these needs nothing put in. The read of a note answers the 403 for a
+moment after the note's attachment is deleted, on a thought that is there
+(`docs/api-map.md`, L3): each tool called straight after such a deletion met
+it, 3 times of 3, and answered as above.
+
+**A failed read is not one of the API's answers for "nothing".** A thought
+with no note is a 200 from the note's read, with a sentinel, an identifier
+nobody has included (L3), and a thought with nothing next to it is a 200 with
+empty lists. So the two are told apart by the request having been answered,
+and no read's failure is turned into a value now. What a tool does then goes
+by what the read was for.
+
+**A read ahead of a write that erases fails the call, and nothing is
+written.** `brain_set_note` does not replace a note it could not read: its
+result is where the model learns what it erased, and a note written over is
+lost. Going on, and saying that the previous note was not read, would say it
+after the fact. `brain_append_note` appends nothing, as before: its read
+decides between an append and a first write, which replaces. Both now say
+that nothing was written and which read failed, and `brain_set_note` to read
+the thought before sending the call again. `brain_delete_thought` puts no
+question and deletes nothing, with `confirm` as without: a question that
+cannot say whether a note goes with the thought is not the question the
+person answers, and consent that could not be asked for whole is refusal
+(§6). A line "note: not read" in the question was the other way, and leaves
+the person to decide on less than the tool is able to find out a moment
+later.
+
+**A read that is part of what a tool shows is left out, and named.**
+
+- `brain_get_thought` prints the thought as read and, where the note goes, a
+  "Note not read" section: that the read failed, why, that the result does
+  not say whether there is a note, and to call again before relying on the
+  note or replacing it. The result is `isError`. Read as a success, that
+  section would be one more section, as "Failed" was in a batch written in
+  part, and no Note section is what a model takes to `brain_set_note`.
+  Failing the call whole was the other way: it throws away a graph that was
+  read, and for the moment after a note is deleted it would hide a thought
+  that is there. The graph's own failure is the call's, as it was.
+- `brain_traverse` walks on. A "Not read" section names each thought whose
+  graph could not be read, by identifier, with the reason, once when it is
+  the same for all, and "Totals" says how many. It is not an error: like a
+  search that some phrasings failed (§8), the rest is a result, and what is
+  missing from it is named. The starting thought's graph failing is still
+  the call's own failure. `traverse()` returns them as `unread`.
+- `brain_list` lists the brains and adds "Open brain not read". It is not an
+  error either: the list is whole, and `brainId` is never taken from which
+  brain is open.
+
+**The read that waits for a write names the graph it could not read.**
+`ingest()` still asks to the end of its two seconds, since the next read may
+be answered. When the last one failed too, the thought is returned in
+`listingUnread` and not counted in `unlisted`, and the result has "Listing not
+read" for it: the thought, how many new thoughts are next to it, why, and to
+read it with `brain_get_thought` before sending the plan again. "Not listed
+yet" is a statement about TheBrain, and stays for a graph that answered. The
+batch is no error for it: what the plan asked for is written.
+
+**A failure that is about the call is explained as it was**: an identifier
+that is malformed, a `brainId` that is no brain, a key TheBrain rejects. The
+write after the read would be refused in the same words.
+
+**A note write with no answer may have been carried out**, and both note
+tools say so, in the shape a create with no answer has: the failure's own
+sentence, then "Next". `brain_append_note` says that the text may be in the
+note and to read the note with `brain_get_thought` before sending the call
+again, since sent again after an append that went through the text would be
+there twice. `brain_set_note` says that the note may have been replaced, what
+it held before the call, in characters or "no note", and that the call sent
+again writes the same text. A write that is answered with a refusal is the
+error it was, and the result of a call that succeeds is what it was, to the
+character: tests pin both for the two tools.
+
+**The 403 a note's read gets is no longer explained as an identifier that
+names nothing.** `describeError()` said that of every 403, and the note of an
+identifier nobody has is a 200. For the read of a note it now says that the
+answer comes for a moment after the note is deleted and says nothing of the
+thought or of its identifier. Within that moment `brain_set_note` now refuses
+where it used to write and answer "note created", which was right by
+accident. Measured over 12 deletions: the last 403 came 0 to 162 ms after the
+deletion, and the thought and its graph read throughout.
+
+No request is added anywhere: each of these reads was being made. The
+descriptions say nothing of it, so `tools/list` is the size it was.
+
+**Left as they are.** `emptyOn400()` takes any 400 from `/types`, `/tags` and
+`/pins` for an empty list. The API's answer for an empty list is "Could not
+retrieve list of Types for brain …", the words of a failure, so nothing in it
+tells the two apart: with a 400 in other words put in, `brain_list_types_and_tags`
+answered "This brain has no types or tags yet". `supportsAliases()` answers
+yes when it cannot ask, and the write goes ahead (§7, on aliases). The read
+that waits for an alias or a type to read back takes a failure for "not yet"
+(above). `brain_recent_changes` prints "(name not read)" for a thought whose
+read failed. The indexer still skips a thought it cannot read (§8, "Not
+guarded"). And one thing about notes that is no read: a note written to an
+identifier nobody has is stored, and reported as written (L3).
+
 ---
 
 ## 5. Error philosophy
@@ -641,7 +768,10 @@ agent that does not know recall dropped will trust an empty result.
 **A failure is not an empty result.** A search that could not ask is an
 error, and one that asked with some of its phrasings names the ones it left
 out. An index is not described before TheBrain has answered for the brain.
-The rule and what it was measured on are in §8.
+The rule and what it was measured on are in §8. The reads a tool makes beside
+its own go by it too: a note that could not be read is not shown as no note,
+nor written over, and a walk names the thoughts it could not look around (§4,
+*A read that fails inside a tool*).
 
 ---
 
@@ -1081,6 +1211,15 @@ with an index built: with a rejected key, with nothing listening and with a
 is. The answer comes from the index, which is as old as its last sync
 whether the app runs or not; `brain_index` with `action: "status"` gives that
 time.
+
+**The reads inside the other tools go by the same rule.** `brain_get_thought`,
+`brain_set_note`, `brain_append_note`, `brain_delete_thought`,
+`brain_traverse`, `brain_list` and the wait at the end of `brain_ingest` each
+read something beside what they are called for. A failure of that read used
+to stand for a thought with no note, a thought with nothing next to it, or an
+app with no brain open. What each does now, and the reads outside the index
+that still take a failure for an answer, are in §4, *A read that fails inside
+a tool*.
 
 **`brain_index` asks for the brain first**: one `GET /api/brains/{id}`, 0.3 ms
 at the median here, for every action and ahead of the index file. The other

@@ -7,9 +7,20 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { MAX_ALIASES, warnIfFencedCode } from "../../api/index.js";
-import { IngestValidationError, ingest } from "../../operations/ingest.js";
+import { IngestValidationError, ingest, type IngestOutcome } from "../../operations/ingest.js";
 import type { ServerContext } from "../context.js";
-import { bullet, fail, guard, join, kindMark, ok, section, table } from "../respond.js";
+import {
+  bullet,
+  describeError,
+  fail,
+  guard,
+  join,
+  kindMark,
+  ok,
+  section,
+  sentence,
+  table,
+} from "../respond.js";
 import { ALIAS_COST } from "./write.js";
 
 const relation = z
@@ -200,6 +211,7 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
                   "the thoughts they were attached to. This plan sent again now would not " +
                   "find them and would make them a second time: wait a few seconds first.",
               ),
+          section("Listing not read", listingNotRead(outcome.listingUnread)),
           section(
             "Next",
             partial
@@ -242,6 +254,30 @@ function afterAFailure(anyThought: boolean, unanswered: boolean): string {
     "or alias of a thought in the table with brain_set_note, brain_tag or " +
     "brain_update_thought. Do not send the whole plan again: a thought it made with " +
     "no parent would be made twice."
+  );
+}
+
+/**
+ * What follows a batch whose last reads failed: the ones that wait for each
+ * graph to list what was made next to its thought. Such a read used to count
+ * as a graph that listed nothing, and the result said "TheBrain does not yet
+ * list" of a graph nothing had read, and to wait a few seconds. Null when
+ * every graph answered.
+ *
+ * It is no failure of the batch: what the plan asked for is written.
+ */
+function listingNotRead(unread: IngestOutcome["listingUnread"]): string | null {
+  if (unread.length === 0) return null;
+  const lines = unread.map(
+    (u) =>
+      `${u.thoughtId}, with ${u.made} of them next to it: ${sentence(describeError(u.error))}`,
+  );
+  return (
+    "Whether TheBrain lists the new thoughts yet could not be read for the thoughts they " +
+    `were attached to:\n${bullet(lines)}\n` +
+    "No write failed by this. Before sending this plan again, read each of them with " +
+    "brain_get_thought and see that it lists them: sent before that, the plan would make " +
+    "them a second time."
   );
 }
 

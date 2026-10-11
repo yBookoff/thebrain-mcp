@@ -14,7 +14,7 @@ import { TheBrainError } from "../../api/errors.js";
 import { compareLogTime, logTime } from "../../api/log.js";
 import { ThoughtKind, aliasesOf, type ModificationLogDto } from "../../api/types.js";
 import { describeChange, isSettingNoise, subjectIds } from "../../operations/changes.js";
-import { traverse } from "../../operations/traverse.js";
+import { traverse, type TraverseUnread } from "../../operations/traverse.js";
 import { mapWithConcurrency } from "../../semantic/indexer.js";
 import {
   SearchFailedError,
@@ -151,6 +151,72 @@ function foundBody(outcome: SearchOutcome, hits: string): string {
     : `Nothing: TheBrain's search matched no thought for any of the ${answered} phrasings${which}.`;
 }
 
+/** A read that was answered, or the failure that came in its place. */
+type Read<T> = { value: T } | { error: unknown };
+
+/**
+ * Keeps a read's failure beside the reads that are awaited with it, so that
+ * the result can say what was not read. Dropped, it used to pass for the
+ * answer of something that is not there: `.catch(() => "")` made a note that
+ * was not read a thought with no note.
+ */
+function kept<T>(read: Promise<T>): Promise<Read<T>> {
+  return read.then(
+    (value) => ({ value }),
+    (error: unknown) => ({ error }),
+  );
+}
+
+/**
+ * What `brain_get_thought` prints where the note goes when the note's read
+ * failed. No section at all is what a thought with no note prints, and the
+ * model acts on that with a write that erases the note.
+ */
+function noteNotRead(error: unknown): string | null {
+  return section(
+    "Note not read",
+    "The read of this thought's note failed, so this result does not say whether it has " +
+      `one: ${sentence(describeError(error))} The rest is as TheBrain returned it. Call ` +
+      "brain_get_thought again before relying on the note or replacing it.",
+  );
+}
+
+/**
+ * What `brain_list` adds when the app's state could not be read. Without it
+ * no row is marked open and no active thought is printed, which is also what
+ * an app with no brain open prints.
+ */
+function stateNotRead(error: unknown): string | null {
+  return section(
+    "Open brain not read",
+    "Which brain is open in the app, and its active thought, could not be read: " +
+      `${sentence(describeError(error))} The brains above are all of them.`,
+  );
+}
+
+/**
+ * The thoughts a walk reached and could not look around, or null when it
+ * read them all. Each is listed in its hop like any other, and without this
+ * it reads as one with nothing next to it.
+ *
+ * One reason for all of them is given once, as `brain_search` gives it.
+ */
+function notReadSection(unread: readonly TraverseUnread[]): string | null {
+  if (unread.length === 0) return null;
+  const one = unread.length === 1;
+  const lead =
+    `${one ? "The graph of one thought" : `The graphs of ${unread.length} thoughts`} on the ` +
+    `way could not be read, so what lies beyond ${one ? "it" : "them"} is missing from this result`;
+  const named = (u: TraverseUnread): string => `${u.name} — ${u.id}`;
+  const why = (u: TraverseUnread): string => sentence(describeError(u.error));
+  const reasons = new Set(unread.map(why));
+  if (reasons.size > 1) {
+    return section("Not read", `${lead}:\n${bullet(unread.map((u) => `${named(u)}: ${why(u)}`))}`);
+  }
+  const [shared] = reasons;
+  return section("Not read", `${lead}: ${shared}\n${bullet(unread.map(named))}`);
+}
+
 export function registerReadTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
     "brain_list",
@@ -162,10 +228,11 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       inputSchema: {},
     },
     guard(async () => {
-      const [brains, state] = await Promise.all([
+      const [brains, appState] = await Promise.all([
         ctx.api.brains.list(),
-        ctx.api.app.state().catch(() => null),
+        kept(ctx.api.app.state()),
       ]);
+      const state = "value" in appState ? appState.value : null;
 
       const rows = brains.map((b) => {
         const status = ctx.indexer(b.id).status(b.id);
@@ -186,6 +253,9 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
                 `${state.activeThoughtName} (${state.activeThoughtId})`,
               )
             : null,
+          // The list is whole without it, so this is no error: nothing is
+          // written by which brain is open, and brainId is never taken from it.
+          "error" in appState ? stateNotRead(appState.error) : null,
         ]),
       );
     }),
@@ -212,7 +282,10 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
         ctx.api.thoughts.getGraph(bid, thoughtId, {
           includeSiblings: includeSiblings ?? false,
         }),
-        ctx.api.notes.get(bid, thoughtId).catch(() => ""),
+        // Kept when it fails: a thought with no note is a 200 from this read
+        // (docs/api-map.md, L3), so a failure is never that answer. The
+        // graph's own failure is the call's, as it was.
+        kept(ctx.api.notes.get(bid, thoughtId)),
       ]);
 
       // A type or a tag among them is marked: any of these lists can hold one,
@@ -221,7 +294,9 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
         list: ReadonlyArray<{ name: string | null; id: string; kind: number }>,
       ): string[] => list.map((t) => `${t.name ?? "(unnamed)"} — ${t.id}${kindMark(t.kind)}`);
 
-      return ok(
+      // A thought printed without its note is an error, so that it is not
+      // read as the thought in full: the rest is there, and the note is not.
+      return ("error" in note ? fail : ok)(
         join([
           `# ${graph.thought.name ?? "(unnamed)"}\n${graph.thought.id}${kindMark(graph.thought.kind)}`,
           // One per line: an alias may hold a comma, and the list gets edited by value.
@@ -247,7 +322,11 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
                 ),
               )
             : null,
-          note.trim() === "" ? null : section("Note", note),
+          "error" in note
+            ? noteNotRead(note.error)
+            : note.value.trim() === ""
+              ? null
+              : section("Note", note.value),
         ]),
       );
     }),
@@ -393,10 +472,14 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
                 ),
               )
             : null,
+          notReadSection(result.unread),
           section(
             "Totals",
             `thoughts ${result.nodes.length}, links ${result.edges.length}` +
-              (result.truncated ? " (traversal hit the limit, there is more)" : ""),
+              (result.truncated ? " (traversal hit the limit, there is more)" : "") +
+              (result.unread.length > 0
+                ? ` (${result.unread.length} not read, there may be more beyond)`
+                : ""),
           ),
         ]),
       );

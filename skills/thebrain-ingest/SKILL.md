@@ -111,7 +111,9 @@ and created again it is a duplicate. Write only the rest, to the identifier
 the result gives, with the tool its last section names. An error with no
 "Failed" section wrote nothing unless it says otherwise. One that says no
 answer came may have made the thought: look for it where the result says
-before creating it again.
+before creating it again. A note is the same: when `brain_append_note` says
+no answer came, read the thought before sending it again, or the text may
+land in the note twice.
 
 ### 5. Show the result
 

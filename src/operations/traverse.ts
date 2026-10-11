@@ -29,11 +29,26 @@ export interface TraverseEdge {
   name: string | null;
 }
 
+/** A thought on the way whose graph could not be read, and what came instead. */
+export interface TraverseUnread {
+  id: string;
+  name: string;
+  error: unknown;
+}
+
 export interface TraverseResult {
   nodes: TraverseNode[];
   edges: TraverseEdge[];
   /** Traversal stopped at the limit rather than exhausting the graph. */
   truncated: boolean;
+  /**
+   * The thoughts the walk reached and could not look around: each is among
+   * `nodes`, and what lies beyond it is not, unless another thought led there.
+   * The read that failed used to be dropped, and the thought passed for one
+   * with nothing next to it. Never the starting thought: with its graph
+   * unread there is no result, and `traverse` throws.
+   */
+  unread: TraverseUnread[];
 }
 
 export interface TraverseOptions {
@@ -62,6 +77,7 @@ export async function traverse(
   const nodes = new Map<string, TraverseNode>();
   const edges: TraverseEdge[] = [];
   const seenEdges = new Set<string>();
+  const unread: TraverseUnread[] = [];
   let truncated = false;
 
   const root = await api.thoughts.getGraph(brainId, rootId);
@@ -82,14 +98,22 @@ export async function traverse(
     const graphs = await mapWithConcurrency(frontier, concurrency, async (id) => {
       const cached = expanded.get(id);
       if (cached !== undefined) return { id, graph: cached };
-      const graph = await api.thoughts.getGraph(brainId, id).catch(() => null);
-      return { id, graph };
+      // A read that fails is kept, not taken for a thought with nothing next
+      // to it: the walk goes on without it, and the result names it.
+      try {
+        return { id, graph: await api.thoughts.getGraph(brainId, id) };
+      } catch (error) {
+        return { id, graph: null, error };
+      }
     });
 
     const next: string[] = [];
-    for (const { id, graph } of graphs) {
-      if (graph === null) continue;
+    for (const { id, graph, error } of graphs) {
       const parent = nodes.get(id)!;
+      if (graph === null) {
+        unread.push({ id, name: parent.name, error });
+        continue;
+      }
 
       const groups: Array<[EdgeKind, ThoughtDto[]]> = [
         ["child", graph.children],
@@ -131,7 +155,7 @@ export async function traverse(
     frontier = next;
   }
 
-  return { nodes: [...nodes.values()], edges, truncated };
+  return { nodes: [...nodes.values()], edges, truncated, unread };
 }
 
 function linkNameBetween(

@@ -163,6 +163,14 @@ export interface IngestOutcome {
    * them, and would make them again.
    */
   unlisted: number;
+  /**
+   * Thoughts that were there before the batch whose graph could not be read
+   * when the wait ran out, each with how many thoughts the batch made next to
+   * it. Whether TheBrain lists those yet is not known, so they are not among
+   * `unlisted`: a read that failed used to be counted there, as a graph that
+   * had answered and listed nothing.
+   */
+  listingUnread: Array<{ thoughtId: string; made: number; error: unknown }>;
 }
 
 export class IngestValidationError extends Error {
@@ -328,6 +336,7 @@ export async function ingest(
     failures: [],
     skipped: [],
     unlisted: 0,
+    listingUnread: [],
   };
 
   /** Thoughts given aliases. A set: one thought can be reached by two plan items. */
@@ -671,7 +680,9 @@ export async function ingest(
   });
 
   // Last, so that the notes and links have taken most of the wait already.
-  outcome.unlisted = await unlistedAfterWaiting(api, brainId, toBeListed);
+  const listing = await unlistedAfterWaiting(api, brainId, toBeListed);
+  outcome.unlisted = listing.unlisted;
+  outcome.listingUnread = listing.listingUnread;
 
   return outcome;
 }
@@ -701,26 +712,40 @@ async function readNeighbours(
  * after a create it lacked the new thought 112 times in 120, and a run of the
  * same plan sent then made that thought again. A thought the batch created
  * has no such copy, so only the thoughts that were there before are read.
+ *
+ * A read that fails has shown nothing, and the wait goes on: the next may be
+ * answered. When the last one failed too, its thought is returned apart, as
+ * one whose graph was not read. It used to be counted as a graph that listed
+ * nothing, and the result said of TheBrain what no read had shown.
  */
 async function unlistedAfterWaiting(
   api: TheBrainApi,
   brainId: string,
   made: ReadonlyMap<string, ReadonlyArray<{ thoughtId: string; relation: RelationName }>>,
-): Promise<number> {
-  const missing = await mapWithConcurrency([...made], 6, async ([anchorId, expected]) => {
+): Promise<Pick<IngestOutcome, "unlisted" | "listingUnread">> {
+  const waited = await mapWithConcurrency([...made], 6, async ([anchorId, expected]) => {
     const deadline = Date.now() + LISTED.timeoutMs;
     for (;;) {
-      // A read that fails has listed nothing.
-      const graph = await api.thoughts.getGraph(brainId, anchorId).catch(() => null);
+      const read = await api.thoughts.getGraph(brainId, anchorId).then(
+        (graph) => ({ graph, error: undefined }),
+        (error: unknown) => ({ graph: null, error }),
+      );
+      const { graph } = read;
       const lacking = expected.filter(
         ({ thoughtId, relation }) =>
           graph === null || !graph[LIST_OF[relation]].some((t) => t.id === thoughtId),
       ).length;
-      if (lacking === 0 || Date.now() >= deadline) return lacking;
+      if (lacking === 0 || Date.now() >= deadline) return { anchorId, lacking, read };
       await new Promise((resolve) => setTimeout(resolve, LISTED.stepMs));
     }
   });
-  return missing.reduce((sum, n) => sum + n, 0);
+  const answered = waited.filter((w) => w.read.graph !== null);
+  return {
+    unlisted: answered.reduce((sum, w) => sum + w.lacking, 0),
+    listingUnread: waited
+      .filter((w) => w.read.graph === null)
+      .map((w) => ({ thoughtId: w.anchorId, made: w.lacking, error: w.read.error })),
+  };
 }
 
 /**

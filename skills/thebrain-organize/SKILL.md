@@ -63,7 +63,8 @@ vocabulary, worth at most a line of its own in the report.
 
 The thought exists, the note does not, and there are one or two links. Either a
 forgotten placeholder or a deliberate rubric node. Tell them apart by context: a
-rubric usually has children.
+rubric usually has children. A `brain_get_thought` result that says the note
+was not read is no stub: read the thought again before judging it.
 
 ### Drifted branches
 

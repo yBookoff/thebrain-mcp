@@ -188,6 +188,31 @@ describe("error explanations point at the next step", () => {
     expect(text).not.toMatch(/denied|API key/i);
   });
 
+  it("the 403 a note's read gets is not explained as an identifier that names nothing", () => {
+    // Measured: the note of a thought nobody has is a 200 that says "no
+    // note", and the read answers the 403 for a moment after the note's
+    // attachment is deleted, on a thought that is there.
+    const note = `/api/notes/${BRAIN}/${NOBODY}`;
+    const text = answered("forbidden", ROUTER_403, "GET", note);
+    expect(text).toBe(
+      `TheBrain answered 403 and named no cause (GET ${note}). The read of a note gets that ` +
+        "answer for a moment after the note is deleted, and it says nothing of the thought " +
+        "or of its identifier.",
+    );
+    expect(text).not.toMatch(/names nothing|deleted, or be another|Take identifiers/);
+    // Only that read. A write to a note has not been seen to answer it, and
+    // is explained as any other request is.
+    for (const [method, path] of [
+      ["POST", `${note}/update`],
+      ["POST", `${note}/append`],
+      ["GET", `/api/thoughts/${BRAIN}/${NOBODY}/graph`],
+    ] as const) {
+      expect(answered("forbidden", ROUTER_403, method, path), path).toMatch(
+        /That is its answer when an identifier in the call names nothing in this brain/,
+      );
+    }
+  });
+
   it("an identifier nobody has is never explained as a wrong brainId or a wrong key", () => {
     for (const text of [
       answered("not_found", "Not Found", "GET", `/api/thoughts/${BRAIN}/${NOBODY}`),

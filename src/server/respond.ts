@@ -96,6 +96,17 @@ export function describeError(error: unknown, alone = true): string {
       case "not_found":
         return `${whatWasNotFound(error)} ${GONE} ${TAKE_IDENTIFIERS}`;
       case "forbidden":
+        // Not an identifier that names nothing, when it is a note's read:
+        // the note of a thought nobody has is a 200 that says "no note". This
+        // read gets the 403 for a moment after the note's attachment is
+        // deleted, on a thought that is there (docs/api-map.md, L3).
+        if (error.method === "GET" && NOTE_PATH.test(error.path ?? "")) {
+          return (
+            `TheBrain answered 403 and named no cause${requestOf(error)}. The read of a ` +
+            "note gets that answer for a moment after the note is deleted, and it says " +
+            "nothing of the thought or of its identifier."
+          );
+        }
         // The API's catch-all. It says nothing of access, and neither does this.
         return (
           `TheBrain answered 403 and named no cause${requestOf(error)}. That is its answer ` +
@@ -128,6 +139,9 @@ const TAKE_IDENTIFIERS = "Take identifiers from brain_search or brain_get_though
 
 /** The path of a thought or a link addressed by its own identifier: brain, then it. */
 const ADDRESSED = /^\/api\/(thought|link)s\/[^/]+\/([0-9a-f-]{36})$/i;
+
+/** The path a note is read from: brain, then the thought it is the note of. */
+const NOTE_PATH = /^\/api\/notes\/[^/]+\/[0-9a-f-]{36}$/i;
 
 /**
  * The first sentence for a 404. The API's own text is kept when it has one:

@@ -12,10 +12,12 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Relation, ThoughtKind } from "../../api/types.js";
 import {
   MAX_ALIASES,
+  TheBrainError,
   mayHaveLanded,
   normalizeAliases,
   warnIfFencedCode,
   type AliasOutcome,
+  type ApiErrorKind,
   type UpdateThoughtInput,
 } from "../../api/index.js";
 import { linkFound } from "../../operations/ingest.js";
@@ -30,6 +32,7 @@ import {
   kindMark,
   ok,
   section,
+  sentence,
   type ToolResponse,
 } from "../respond.js";
 
@@ -320,8 +323,44 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       },
     },
     guard(async ({ brainId: bid, thoughtId, markdown }) => {
-      const previous = await ctx.api.notes.get(bid, thoughtId).catch(() => "");
-      await ctx.api.notes.set(bid, thoughtId, markdown);
+      // Read, and not written over when the read fails. The failure used to
+      // be dropped: the note was replaced, and the result said "note
+      // created" of a note it had not seen. A thought with no note is a 200
+      // from this read, so a failure is never that answer.
+      let previous: string;
+      try {
+        previous = await ctx.api.notes.get(bid, thoughtId);
+      } catch (error) {
+        if (aboutTheCall(error)) throw error;
+        return fail(
+          "The note was not replaced, and nothing was written. The note this thought has " +
+            "now could not be read, so what a replacement would erase is not known: " +
+            `${sentence(describeError(error))} Read it with brain_get_thought, then send ` +
+            "this call again.",
+        );
+      }
+      try {
+        await ctx.api.notes.set(bid, thoughtId, markdown);
+      } catch (error) {
+        // A write with no answer is not a write that failed: the note may
+        // hold the new text, and what it held before is known here alone.
+        if (!mayHaveLanded(error)) throw error;
+        const before =
+          previous.trim() === ""
+            ? "The thought had no note before the call."
+            : `Before the call the note held ${previous.length} characters, and they are gone if it did.`;
+        return fail(
+          join([
+            describeError(error),
+            section(
+              "Next",
+              "No answer came to the write, so TheBrain may have replaced the note all the " +
+                `same. ${before} Read the thought with brain_get_thought to see which text ` +
+                "it has. Sent again, this call writes the same text.",
+            ),
+          ]),
+        );
+      }
       const warning = warnIfFencedCode(markdown);
       return ok(
         join([
@@ -351,7 +390,37 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       },
     },
     guard(async ({ brainId: bid, thoughtId, markdown }) => {
-      await ctx.api.notes.append(bid, thoughtId, markdown);
+      try {
+        await ctx.api.notes.append(bid, thoughtId, markdown);
+      } catch (error) {
+        // `append` reads the note and then writes once, and the two fail
+        // apart. Both used to be the request's error alone, and after a
+        // timeout that left the model to guess which it was.
+        if (mayHaveLanded(error)) {
+          // The one write whose repeat is not the same write: appended again
+          // after an append that went through, the text is in the note twice.
+          return fail(
+            join([
+              describeError(error),
+              section(
+                "Next",
+                "No answer came to the write, so TheBrain may have appended the text all " +
+                  "the same. Read the note with brain_get_thought before sending this call " +
+                  "again: sent again after an append that went through, the text would be " +
+                  "in the note twice.",
+              ),
+            ]),
+          );
+        }
+        // The read is the one GET of the call. Any other failure is the
+        // write's own answer, or the call's, and is passed on as it was.
+        const atTheRead = error instanceof TheBrainError && error.method === "GET";
+        if (!atTheRead || aboutTheCall(error)) throw error;
+        return fail(
+          "Nothing was appended. The note is read before it is added to, and that read " +
+            `failed: ${sentence(describeError(error))} This call can be sent again as it is.`,
+        );
+      }
       const warning = warnIfFencedCode(markdown);
       return ok(
         join([
@@ -573,7 +642,20 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       }
 
       const graph = await ctx.api.thoughts.getGraph(bid, thoughtId);
-      const note = await ctx.api.notes.get(bid, thoughtId).catch(() => "");
+      // No question is put without it. The failure used to be dropped, and
+      // the person was asked about a thought with no note line: consent to
+      // that is not consent to losing a note.
+      let note: string;
+      try {
+        note = await ctx.api.notes.get(bid, thoughtId);
+      } catch (error) {
+        if (aboutTheCall(error)) throw error;
+        return fail(
+          "Nothing was deleted. The thought's note could not be read, so the question for " +
+            "the person could not say whether a note goes with it: " +
+            `${sentence(describeError(error))} Call brain_delete_thought again.`,
+        );
+      }
       // Marked when it is a type or a tag, as a read result marks one: that
       // is not one thought's own, and the person asked should see which it is.
       const named = `"${graph.thought.name ?? "(unnamed)"}"${kindMark(graph.thought.kind)}`;
@@ -713,6 +795,18 @@ function writtenInPart(
 
 /** Added to a write that got no answer, which is not a write that failed. */
 const UNANSWERED = " — no answer came, so TheBrain may have carried it out all the same";
+
+/**
+ * Failures that are about the call and not about the request that met them:
+ * an identifier that is malformed, a `brainId` that is no brain, a key
+ * TheBrain rejects. The next request of the call would be refused in the
+ * same words, so each is passed on as it always was.
+ */
+const ABOUT_THE_CALL: readonly ApiErrorKind[] = ["invalid_uuid", "unknown_brain", "auth"];
+
+function aboutTheCall(error: unknown): boolean {
+  return error instanceof TheBrainError && ABOUT_THE_CALL.includes(error.kind);
+}
 
 /**
  * What follows a create that got no answer. The thought may be there with no

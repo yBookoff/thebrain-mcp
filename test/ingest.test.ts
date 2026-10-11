@@ -1028,6 +1028,89 @@ describe("a read that fails while a thought is looked for", () => {
   });
 });
 
+describe("a read that fails while the batch waits for the graphs", () => {
+  const OTHER = "cccccccc-0000-4000-8000-000000000003";
+  const boom = new TheBrainError("server", "boom", { status: 500 });
+  const plan: IngestPlan = {
+    thoughts: [
+      { tempId: "a", name: "A", parent: ROOT },
+      { tempId: "b", name: "B", parent: ROOT, relation: "jump" },
+      { tempId: "c", name: "C", parent: OTHER },
+    ],
+  };
+  const brain = () =>
+    fakeBrain([
+      { id: ROOT, name: "root" },
+      { id: OTHER, name: "other" },
+    ]);
+  /** What the reads of one graph throw: nothing for the first `answered`, then `error` each time. */
+  const failingAfter = (answered: number, error: Error, times = Infinity): Error[] => {
+    let reads = 0;
+    return Object.assign([] as Error[], {
+      shift: () => ((reads += 1) > answered && reads <= answered + times ? error : undefined),
+    });
+  };
+
+  it("a graph that cannot be read to the end of the wait is named as that, and not counted as one that lists nothing", async () => {
+    // A read that failed used to count as a graph that had answered and
+    // listed nothing: `unlisted` was 2, of a graph nothing had read.
+    vi.useFakeTimers();
+    try {
+      const fake = brain();
+      // Read once, to look for "A" and "B"; every read after the writes fails.
+      fake.failGraph.set(ROOT, failingAfter(1, boom));
+      const pending = ingest(fake.api, BRAIN, plan);
+      await vi.advanceTimersByTimeAsync(5000);
+      const outcome = await pending;
+
+      expect(outcome.listingUnread).toEqual([{ thoughtId: ROOT, made: 2, error: boom }]);
+      // "C" is listed next to OTHER, whose graph answered.
+      expect(outcome.unlisted).toBe(0);
+      // Nothing the plan asked for failed by it.
+      expect(outcome.created.map((c) => c.tempId)).toEqual(["a", "b", "c"]);
+      expect([outcome.failures, outcome.skipped]).toEqual([[], []]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a graph that answers and does not list is counted as it was, beside one that could not be read", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = brain();
+      // Every graph that has been read stays as it was read, to the end.
+      fake.lag.reads = Infinity;
+      fake.failGraph.set(OTHER, failingAfter(1, boom));
+      const pending = ingest(fake.api, BRAIN, plan);
+      await vi.advanceTimersByTimeAsync(5000);
+      const outcome = await pending;
+
+      expect(outcome.unlisted).toBe(2);
+      expect(outcome.listingUnread).toEqual([{ thoughtId: OTHER, made: 1, error: boom }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a read that fails and is then answered is a wait like any other", async () => {
+    // The wait goes on past a failure, as it did: the next read may get through.
+    const fake = brain();
+    fake.failGraph.set(ROOT, failingAfter(1, boom, 2));
+    const outcome = await ingest(fake.api, BRAIN, plan);
+
+    expect(outcome.unlisted).toBe(0);
+    expect(outcome.listingUnread).toEqual([]);
+    // Looked next to, failed twice, read from the copy, then read with them listed.
+    expect(fake.graphReads.filter((id) => id === ROOT).length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("with every graph read there is nothing unread", async () => {
+    const outcome = await ingest(brain().api, BRAIN, plan);
+    expect(outcome.unlisted).toBe(0);
+    expect(outcome.listingUnread).toEqual([]);
+  });
+});
+
 describe("a thought that fails in the middle of a batch", () => {
   const NOBODY = "99999999-0000-4000-8000-000000000009";
   const OTHER = "dddddddd-0000-4000-8000-000000000004";

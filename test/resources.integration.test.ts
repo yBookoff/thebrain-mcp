@@ -2181,6 +2181,39 @@ suite("resource layer against the live API", () => {
       }
     }, 30_000);
 
+    it("the note of a thought that is there reads as the catch-all 403 for a moment after its attachment is deleted, while the thought and its graph read", async () => {
+      // 12 of 12: the first read of the note after the deletion was the 403,
+      // and the last one came 0 to 162 ms after it; from then on the read
+      // was the "no note" sentinel. The thought and its graph were a 200
+      // throughout. So this 403 says nothing of the thought or of its
+      // identifier, which is what `describeError()` says of it, and a tool
+      // that reads a note takes it for a read that failed, not for no note.
+      for (let round = 0; round < 3; round += 1) {
+        const id = await make(`note-attachment-deleted-${round}`);
+        await api.notes.set(brainId, id, "a note");
+        const attached = await eventually(
+          () => api.attachments.ofThought(brainId, id),
+          (list) => list.some((a) => a.isNotes),
+        );
+        await api.attachments.delete(brainId, attached.find((a) => a.isNotes)!.id);
+
+        const [note, thought, graph] = await Promise.all([
+          answer(api.notes.getRaw(brainId, id)),
+          answer(api.thoughts.get(brainId, id)),
+          answer(api.thoughts.getGraph(brainId, id)),
+        ]);
+        // Not required to be the 403: the moment can be over by the read.
+        expect(["accepted", `403 forbidden: ${CATCH_ALL}`], `round ${round}`).toContain(note);
+        expect([thought, graph], `round ${round}`).toEqual(["accepted", "accepted"]);
+
+        const gone = await eventually(
+          () => api.notes.exists(brainId, id).catch(() => true),
+          (exists) => !exists,
+        );
+        expect(gone, `round ${round}`).toBe(false);
+      }
+    }, 30_000);
+
     it("a thought deleted a moment ago still reads for a moment, and a create under it is the 400 only while it does", async () => {
       // 96 deletions, each followed 0 to 300 ms later by a read and a create.
       // While the read was still a 200 the create was the 400 that names
