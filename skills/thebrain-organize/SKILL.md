@@ -37,27 +37,40 @@ the difference may be substantive.
 Thoughts with no links get lost: traversal cannot reach them, only search can.
 
 ```
-brain_recent_changes { limit: 200 }
+brain_recent_changes { limit: 200, identifiers: true }
 ```
 
-Take the thoughts it mentions and check their neighbourhood:
+`identifiers: true` adds a `Thoughts` section under the table: every thought the
+rows name that is still there, once, as `name — identifier`. Without `since` the
+rows cover the last seven days; give an earlier `since` to look further back.
+Take the identifiers from that section and check each thought's neighbourhood:
 
 ```
-brain_get_thought { thoughtId: "<id>" }
+brain_get_thought { thoughtId: "<identifier from the Thoughts section>" }
 ```
 
 Empty in every link section means an orphan. Propose where to attach it, based on
 a search for something similar.
 
+A thought the rows show as `name (deleted)` is gone, and is not in the section:
+there is nothing to attach.
+
 That holds for an ordinary thought only. A type or a tag is vocabulary, not a
 thought that lost its place: nothing is meant to sit above it, and one that
 nothing uses yet shows a heading and no sections at all, which is exactly what
 an orphan looks like. Tell them apart by the mark that only a type or a tag
-carries, `[type]` or `[tag]`: after the name in `brain_recent_changes`, after
-the identifier in `brain_get_thought`. Leave a marked thought out of the hunt,
-and never propose a parent for it. One that is in use lists its thoughts under
-`Thoughts of this type` or `Thoughts with this tag`; one that is not is unused
-vocabulary, worth at most a line of its own in the report.
+carries, `[type]` or `[tag]`: after the name in the rows of
+`brain_recent_changes`, after the identifier in its `Thoughts` section and in
+`brain_get_thought`. Leave a marked thought out of the hunt, and never propose a
+parent for it. One that is in use lists its thoughts under `Thoughts of this
+type` or `Thoughts with this tag`; one that is not is unused vocabulary, worth at
+most a line of its own in the report.
+
+`brain_recent_changes` reads sixty thoughts a call for their names and kinds.
+When the rows name more, `Totals` says how many were not read. Those are in the
+section all the same, under the name the log kept or as `(name not read)`, and
+none of them carries a mark, a type or a tag included: go by the mark
+`brain_get_thought` prints for them.
 
 ### Stubs
 

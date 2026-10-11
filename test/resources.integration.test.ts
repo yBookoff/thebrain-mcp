@@ -46,7 +46,12 @@ import {
   type ThoughtDto,
   type ThoughtGraphDto,
 } from "../src/api/index.js";
-import { describeChange, subjectIds } from "../src/operations/changes.js";
+import {
+  LOG_NAME_LIMIT,
+  describeChange,
+  loggedThoughts,
+  subjectIds,
+} from "../src/operations/changes.js";
 import {
   IngestMissingError,
   IngestValidationError,
@@ -1094,6 +1099,212 @@ suite("resource layer against the live API", () => {
       );
       store.close();
     }, 60_000);
+  });
+
+  /**
+   * What the log keeps of a thought's name. `brain_recent_changes` names a
+   * deleted thought by it, and a thought it does not read (docs/api-map.md,
+   * L37). Measured on TheBrain 15.0.640, over the 159,451 entries of one
+   * brain's log: 48,013 `101`s, 639 `103`s and 48,012 `102`s of a thought,
+   * every one with the name where these tests look for it.
+   */
+  describe("a thought's name in the log", () => {
+    /** A thought's own entries, oldest first, once there are `atLeast` of them. */
+    const own = async (id: string, atLeast: number): Promise<ModificationLogDto[]> => {
+      const mine = (l: ModificationLogDto): boolean =>
+        l.sourceType === EntityType.Thought && l.sourceId === id;
+      const logs = await eventually(
+        () => api.brains.modifications(brainId, { maxLogs: 300 }),
+        (entries) => entries.filter(mine).length >= atLeast,
+      );
+      return logs.filter(mine).sort((a, b) => compareLogTime(logTime(a), logTime(b)));
+    };
+    /** An entry as its code and its two values. */
+    const shape = (l: ModificationLogDto): [number, string | null, string | null] => [
+      l.modType,
+      l.oldValue,
+      l.newValue,
+    ];
+    const named = async (id: string, name: string): Promise<ThoughtDto> =>
+      eventually(
+        () => api.thoughts.get(brainId, id),
+        (t) => t.name === name,
+      );
+    const KINDS = [
+      ["an ordinary thought", ThoughtKind.Normal],
+      ["a type", ThoughtKind.Type],
+      ["a tag", ThoughtKind.Tag],
+    ] as const;
+
+    it.each(KINDS)(
+      "%s: its 101 has the name it was created with, its 103 the old and the new, its 102 the last",
+      async (_, kind) => {
+        const first = `${PREFIX}log-name-${kind}`;
+        const second = `${PREFIX}log-name-${kind} renamed`;
+        const id = await make(`log-name-${kind}`, kind);
+
+        // Created: the name, and nothing else of the thought. Not its kind.
+        const born = await own(id, 1);
+        expect(born.map(shape)).toEqual([[ModType.Created, null, first]]);
+        expect(born[0]).toMatchObject({
+          extraAType: EntityType.Unknown,
+          extraBType: EntityType.Unknown,
+        });
+        expect(loggedThoughts(born).get(id)).toEqual({ name: first, cut: false, deleted: false });
+
+        // Created and renamed: the newest name is the one the thought reads with.
+        await api.thoughts.update(brainId, id, { name: second });
+        const renamed = await own(id, 2);
+        expect(renamed.map(shape)).toEqual([
+          [ModType.Created, null, first],
+          [ModType.NameChanged, first, second],
+        ]);
+        expect((await named(id, second)).name).toBe(loggedThoughts(renamed).get(id)?.name);
+
+        // Renamed, then deleted: the name it had last, not the one it was made with.
+        await api.thoughts.delete(brainId, id);
+        const gone = await own(id, 3);
+        expect(gone.map(shape)).toEqual([
+          [ModType.Created, null, first],
+          [ModType.NameChanged, first, second],
+          [ModType.Deleted, second, null],
+        ]);
+        expect(loggedThoughts(gone).get(id)).toEqual({ name: second, cut: false, deleted: true });
+        // And the 102 alone is enough, as when the rest is past the limit of a read.
+        expect(loggedThoughts(gone.slice(-1)).get(id)).toEqual({
+          name: second,
+          cut: false,
+          deleted: true,
+        });
+      },
+      30_000,
+    );
+
+    it("a thought deleted with no rename has one name in its 101 and its 102", async () => {
+      const id = await make("log-name-plain");
+      await api.thoughts.delete(brainId, id);
+      expect((await own(id, 2)).map(shape)).toEqual([
+        [ModType.Created, null, `${PREFIX}log-name-plain`],
+        [ModType.Deleted, `${PREFIX}log-name-plain`, null],
+      ]);
+    }, 30_000);
+
+    it("the name logged is the name as the thought reads, not as it was sent", async () => {
+      // A name is stored with a tab or a line feed as a space and the blanks
+      // after it dropped (3 of 3 each), and that is what the log has.
+      const sent = `${PREFIX}log-name\ttab\nfeed  `;
+      const id = await api.thoughts.create(brainId, { name: sent });
+      created.push(id);
+      const stored = (await api.thoughts.get(brainId, id)).name;
+      expect(stored).toBe(`${PREFIX}log-name tab feed`);
+
+      const [born] = await own(id, 1);
+      expect(born!.newValue).toBe(stored);
+    }, 30_000);
+
+    it("a rename is in the log when its request is answered", async () => {
+      // So the newest name the log has is the thought's name: a read of the
+      // log holds every rename made before it. The thought's own read is
+      // behind for a moment (L28), which the log is not: 20 of 20.
+      for (let i = 0; i < 5; i++) {
+        const id = await make(`log-name-at-once-${i}`);
+        const to = `${PREFIX}log-name-at-once-${i} renamed`;
+        await api.thoughts.update(brainId, id, { name: to });
+        const logs = await api.brains.modifications(brainId, { maxLogs: 50 });
+        expect(loggedThoughts(logs).get(id)?.name, `rename ${i}`).toBe(to);
+      }
+    }, 30_000);
+
+    it("the log keeps the first 140 UTF-16 code units of a name, and the thought the whole of it", async () => {
+      expect(LOG_NAME_LIMIT).toBe(140);
+      const long = (length: number): string => PREFIX + "n".repeat(length - PREFIX.length);
+      const cases = [
+        { length: LOG_NAME_LIMIT - 1, cut: false },
+        // As long as the log keeps one: whole, and not to be told from one cut.
+        { length: LOG_NAME_LIMIT, cut: true },
+        { length: LOG_NAME_LIMIT + 1, cut: true },
+        { length: 300, cut: true },
+      ];
+      for (const { length, cut } of cases) {
+        const name = long(length);
+        const id = await api.thoughts.create(brainId, { name });
+        created.push(id);
+        expect((await api.thoughts.get(brainId, id)).name, `read at ${length}`).toBe(name);
+
+        const renamedTo = `${name.slice(0, -1)}Z`;
+        await api.thoughts.update(brainId, id, { name: renamedTo });
+        await named(id, renamedTo);
+        await api.thoughts.delete(brainId, id);
+
+        const kept = (text: string): string => text.slice(0, LOG_NAME_LIMIT);
+        const entries = await own(id, 3);
+        expect(entries.map(shape), `log at ${length}`).toEqual([
+          [ModType.Created, null, kept(name)],
+          [ModType.NameChanged, kept(name), kept(renamedTo)],
+          [ModType.Deleted, kept(renamedTo), null],
+        ]);
+        expect(loggedThoughts(entries).get(id), `flag at ${length}`).toEqual({
+          name: kept(renamedTo),
+          cut,
+          deleted: true,
+        });
+      }
+
+      // By code unit, not by character: a pair across the cut is halved.
+      const across = `${long(LOG_NAME_LIMIT - 1)}🦔 and more`;
+      const id = await api.thoughts.create(brainId, { name: across });
+      created.push(id);
+      expect((await api.thoughts.get(brainId, id)).name).toBe(across);
+      const [born] = await own(id, 1);
+      expect(born!.newValue).toHaveLength(LOG_NAME_LIMIT);
+      expect(born!.newValue!.slice(0, LOG_NAME_LIMIT - 1)).toBe(long(LOG_NAME_LIMIT - 1));
+      expect(across.startsWith(born!.newValue!)).toBe(false);
+    }, 60_000);
+
+    it("no other entry about a thought carries its name", async () => {
+      // A label, a note, a link at either end and a type: the thought is in
+      // `sourceId` or in an `extra`, and its name in neither value.
+      const name = `${PREFIX}log-name-elsewhere`;
+      const typeId = await make("log-name-its-type", ThoughtKind.Type);
+      const otherId = await make("log-name-other-end");
+      const id = await make("log-name-elsewhere");
+      await api.thoughts.update(brainId, id, { label: "a label" });
+      await api.notes.set(brainId, id, "a note");
+      await api.links.create(brainId, {
+        thoughtIdA: id,
+        thoughtIdB: otherId,
+        relation: Relation.Jump,
+        name: "a link",
+      });
+      await api.thoughts.update(brainId, id, { typeId });
+
+      // Every entry that names the thought, but for its own `101`.
+      const about = (l: ModificationLogDto): boolean =>
+        [l.sourceId, l.extraAId, l.extraBId].includes(id) &&
+        !(l.sourceType === EntityType.Thought && l.modType === ModType.Created);
+      const logs = await eventually(
+        () => api.brains.modifications(brainId, { maxLogs: 300 }),
+        (entries) => entries.filter(about).length >= 6,
+      );
+      const others = logs.filter(about);
+      // The label, the type set, the jump and the type's link, the jump's
+      // label, and the note.
+      expect(others.map((l) => `${l.sourceType}/${l.modType}`).sort()).toEqual([
+        `${EntityType.Thought}/${ModType.LabelChanged}`,
+        `${EntityType.Thought}/${ModType.TypeSet}`,
+        `${EntityType.Link}/${ModType.Created}`,
+        `${EntityType.Link}/${ModType.Created}`,
+        `${EntityType.Link}/${ModType.NameChanged}`,
+        `${EntityType.Attachment}/${ModType.NoteCreated}`,
+      ]);
+      for (const l of others) {
+        expect([l.oldValue, l.newValue], `entry ${l.modType}`).not.toContain(name);
+      }
+      // So only the thoughts with an entry of their own are named: the three made here.
+      const mine = loggedThoughts(logs.filter((l) => [id, otherId, typeId].includes(l.sourceId)));
+      expect(mine.get(id)).toEqual({ name, cut: false, deleted: false });
+      expect(loggedThoughts(others).size).toBe(0);
+    }, 30_000);
   });
 
   /**

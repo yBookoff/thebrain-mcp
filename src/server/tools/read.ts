@@ -13,7 +13,13 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { TheBrainError } from "../../api/errors.js";
 import { compareLogTime, logTime } from "../../api/log.js";
 import { ThoughtKind, aliasesOf, type ModificationLogDto } from "../../api/types.js";
-import { describeChange, isSettingNoise, subjectIds } from "../../operations/changes.js";
+import {
+  describeChange,
+  isSettingNoise,
+  loggedThoughts,
+  subjectIds,
+  type LoggedThought,
+} from "../../operations/changes.js";
 import { traverse, type TraverseUnread } from "../../operations/traverse.js";
 import {
   mapWithConcurrency,
@@ -47,24 +53,56 @@ const brainId = z
   .string()
   .describe("Brain identifier. Take it from brain_list — never guess it.");
 
-/** Cap on how many names the log resolves: beyond this the output is unreadable anyway. */
+/**
+ * Cap on how many thoughts `brain_recent_changes` reads in a call: beyond this
+ * the output is unreadable anyway. A thought past it still has the name the
+ * log kept for it, if it was created or renamed in what was read.
+ */
 const MAX_RESOLVED_NAMES = 60;
 
 /**
- * What `brain_recent_changes` prints for a thought it has no name for. Neither
- * is `(unnamed)`, which here as in the other tools is a thought that is there
- * and has no name.
+ * What `brain_recent_changes` prints for a thought it has not read. Neither is
+ * `(unnamed)`, which here as in the other tools is a thought that is there and
+ * has no name.
  *
- * `DELETED`: the read of the thought answered 404, as it does for an
- * identifier nobody has (docs/api-map.md, L3). The log is this brain's, so the
- * thought was here and is not now.
+ * `DELETED`: the log's last word on the thought is its deletion, or the read
+ * of it answered 404, as it does for an identifier nobody has
+ * (docs/api-map.md, L3). The log is this brain's, so the thought was here and
+ * is not now. It stands after the name the thought had, when the log has it.
  *
- * `NOT_READ`: the name was not looked up, being past the cap, or its read
- * failed some other way. Nothing is known of the thought, least of all that
- * it is gone.
+ * `NOT_READ`: the thought was not read, being past the cap, or its read failed
+ * some other way, and the log has no name for it either. Nothing is known of
+ * the thought, least of all that it is gone.
  */
 const DELETED = "(deleted)";
 const NOT_READ = "(name not read)";
+
+/** A thought as `brain_recent_changes` names it. */
+interface ChangedThought {
+  name: string;
+  /** ` [type]` or ` [tag]`, known only of a thought that was read. */
+  mark: string;
+  /** `unread`: neither read nor deleted by the log's account. */
+  state: "there" | "gone" | "unread";
+}
+
+/**
+ * The name the log has for a thought, or null, printed as a name a read gave
+ * is: one with no character that shows is spelled out. One as long as the log
+ * keeps is followed by an ellipsis: the thought's own name may go on (L37).
+ */
+function nameInLog(logged: LoggedThought | undefined): string | null {
+  if (logged === undefined || logged.name === null) return null;
+  return logged.cut ? `${shownName(logged.name)}…` : shownName(logged.name);
+}
+
+/** The read's answer for an identifier nobody has: a 404, or zeros refused ahead of it. */
+function nobodyHasIt(error: unknown): boolean {
+  return (
+    error instanceof TheBrainError &&
+    (error.kind === "not_found" || error.kind === "invalid_uuid")
+  );
+}
 
 /**
  * The title for what a graph lists as `children`. Under a type those are the
@@ -806,9 +844,16 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
               "Defaults to the last seven days.",
           ),
         limit: z.number().int().min(1).max(500).optional().describe("Defaults to 100."),
+        identifiers: z
+          .boolean()
+          .optional()
+          .describe(
+            "true adds a list of the thoughts in the result with their identifiers, " +
+              "for reading or changing one next. Defaults to false.",
+          ),
       },
     },
-    guard(async ({ brainId: bid, since, limit }) => {
+    guard(async ({ brainId: bid, since, limit, identifiers }) => {
       const from = since ?? new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
       const want = limit ?? 100;
 
@@ -836,40 +881,79 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
           ? settings.filter((t) => compareLogTime(t, oldestShown) >= 0).length
           : settings.length;
 
-      // Names are resolved in one bounded batch: otherwise a large `limit`
-      // turns into hundreds of sequential requests.
-      const unique = [...new Set(logs.flatMap(subjectIds))].slice(0, MAX_RESOLVED_NAMES);
-      const resolved = await mapWithConcurrency(unique, 10, async (id) => {
-        const name = await ctx.api.thoughts.get(bid, id).then(
-          // The read that resolves the name has the kind: a tag attached is
-          // logged as a link created, and reads as one unless the tag is marked.
-          (t) => `${shownName(t.name)}${kindMark(t.kind)}`,
-          // Not "(unnamed)" for a read that failed: a thought deleted since
-          // would read as one that is there, in every row about it. The
-          // identifier of zeros, which the log has for a note written to no
-          // thought, is that 404 too, and is refused ahead of the request.
-          (error: unknown) =>
-            error instanceof TheBrainError &&
-            (error.kind === "not_found" || error.kind === "invalid_uuid")
-              ? DELETED
-              : NOT_READ,
-        );
-        return [id, name] as const;
-      });
-      const thoughtNames = new Map(resolved);
+      // What the log itself says of the thoughts it names: the name of one
+      // created, renamed or deleted, and that it was deleted. From everything
+      // read, the entries past the limit included: nothing newer than any of
+      // them was left unread, so the newest name is the name now.
+      const logged = loggedThoughts(events);
+      const gone = (id: string): boolean => logged.get(id)?.deleted === true;
+      const named = (id: string): boolean => {
+        const l = logged.get(id);
+        return l !== undefined && l.name !== null && !l.cut;
+      };
+
+      // The rest is read, for the name and for the kind, in one bounded batch:
+      // otherwise a large `limit` turns into hundreds of requests. A thought
+      // the log says is deleted is not read at all, and one the log has no
+      // whole name for goes first, so that the cap falls on a mark and not on
+      // a name.
+      const subjects = [...new Set(logs.flatMap(subjectIds))];
+      const here = subjects.filter((id) => !gone(id));
+      const toRead = [...here.filter((id) => !named(id)), ...here.filter(named)];
+      const reads = new Map(
+        await mapWithConcurrency(
+          toRead.slice(0, MAX_RESOLVED_NAMES),
+          10,
+          async (id) => [id, await kept(ctx.api.thoughts.get(bid, id))] as const,
+        ),
+      );
+
+      const thought = (id: string): ChangedThought => {
+        const read = reads.get(id);
+        if (read !== undefined && "value" in read) {
+          // The read has the kind: a tag attached is logged as a link created,
+          // and reads as one unless the tag is marked.
+          const t = read.value;
+          return { state: "there", name: shownName(t.name), mark: kindMark(t.kind) };
+        }
+        const inLog = nameInLog(logged.get(id));
+        // Not "(unnamed)" for a thought that is gone: it would read as one
+        // that is there, in every row about it. The identifier of zeros, which
+        // the log has for a note written to no thought, is the read's 404 too,
+        // and is refused ahead of the request.
+        if (gone(id) || (read !== undefined && nobodyHasIt(read.error))) {
+          const name = inLog === null ? DELETED : `${inLog} ${DELETED}`;
+          return { state: "gone", name, mark: "" };
+        }
+        return { state: "unread", name: inLog ?? NOT_READ, mark: "" };
+      };
+      const changed = subjects.map((id) => ({ id, ...thought(id) }));
+      const shown = new Map(changed.map((t) => [t.id, `${t.name}${t.mark}`]));
+      const unread = changed.filter((t) => t.state === "unread").length;
 
       const rows = logs.map((l) => [
         logTime(l).slice(0, 16).replace("T", " "),
         describeChange(l),
         subjectIds(l)
-          .map((id) => thoughtNames.get(id) ?? NOT_READ)
+          .map((id) => shown.get(id) ?? NOT_READ)
           .join(" ↔ "),
       ]);
+
+      // The identifiers are the log's own, so the list costs no request. A
+      // thought that is gone is left out: nothing can be done with its
+      // identifier. The mark goes after the identifier, as in the other tools.
+      const listed =
+        identifiers === true
+          ? changed.filter((t) => t.state !== "gone").map((t) => `${t.name} — ${t.id}${t.mark}`)
+          : [];
 
       const totals = [
         `events ${logs.length}`,
         hidden > 0 ? `brain-setting changes hidden: ${hidden}` : null,
         cut ? "older events not shown — raise `limit`" : null,
+        unread > 0
+          ? `thoughts not read: ${unread}, so a type or a tag among them is not marked`
+          : null,
       ].filter((s) => s !== null);
 
       return ok(
@@ -878,6 +962,7 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
             `Changes since ${from.slice(0, 16).replace("T", " ")}`,
             table(["When (UTC)", "What", "Thought"], rows),
           ),
+          section("Thoughts", bullet(listed)),
           section("Totals", totals.join("; ")),
         ]),
       );

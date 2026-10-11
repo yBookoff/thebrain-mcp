@@ -17,15 +17,23 @@ The job is to turn it into an account of what the person was doing.
 ## How to gather it
 
 ```
-brain_recent_changes { since: "2026-08-04T00:00:00Z", limit: 200 }
+brain_recent_changes { since: "2026-08-04T00:00:00Z", limit: 200, identifiers: true }
 ```
 
 Without `since` it takes a week. The tool already decodes the numeric codes into
-readable phrasings and resolves thought names.
+readable phrasings and names the thoughts. `identifiers: true` adds a `Thoughts`
+section: every thought the rows name that is still there, once, as
+`name — identifier`. Leave it out if you will not open any thought: it makes the
+result about a third longer.
 
-**Limit:** names are resolved for at most sixty thoughts. Over a long period some
-lines will have no names — that is not lost data, it is saved requests. If you
-need a full breakdown, take a shorter period.
+A thought created, renamed or deleted in the period is named from the log
+itself, and a deleted one reads `name (deleted)`.
+
+**Limit:** the tool reads at most sixty thoughts a call. Over a long period a
+thought past that has the name the log kept, or reads `(name not read)` when it
+was only edited or linked in the period, and `Totals` says how many were not
+read — that is not lost data, it is saved requests. If you need a full
+breakdown, take a shorter period.
 
 ## How to narrate it
 
@@ -57,7 +65,7 @@ wrong.
 To narrate like that, look at which thoughts changed:
 
 ```
-brain_get_thought { thoughtId: "<from the log>" }
+brain_get_thought { thoughtId: "<identifier from the Thoughts section>" }
 ```
 
 A few key ones are enough, not every single one.

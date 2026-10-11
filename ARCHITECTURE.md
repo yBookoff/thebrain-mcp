@@ -202,8 +202,10 @@ result is where the model takes identifiers from. So wherever a read tool
 names a thought that is not an ordinary one, it says which. `brain_get_thought`
 and `brain_traverse` put `[type]` or `[tag]` after the identifier, where it
 cannot pass for part of the name: on the thought itself and on every
-neighbour. `brain_recent_changes` prints no identifiers and puts the mark
-after the name, which is what tells a tag attached from a link created.
+neighbour. `brain_recent_changes` puts the mark after the name in its rows,
+which is what tells a tag attached from a link created, and after the
+identifier in the list it prints on request (*What changed, and to which
+thought*, below).
 `brain_search` gains a `Kind` column, there only when a hit is not ordinary:
 for a type or a tag that takes `includeAuxiliary`. And `brain_get_thought`
 gives a thought's type as name and identifier, the form a `typeId` takes. A
@@ -213,7 +215,7 @@ Only the exception is spelled out, so the common row costs nothing: a result
 that holds ordinary thoughts alone is what it was, to the character. No
 request is spent either. The kind is on every thought the API returns, in a
 graph's lists and in a search hit (contract test); the index keeps it beside
-the name; and `brain_recent_changes` already reads each thought it names.
+the name; and `brain_recent_changes` marks a thought it has read for its name.
 Measured on a brain of two types, two tags and five thoughts: a mark is 7 or
 6 characters, the type's identifier 39, the column 6 a row. A thought with a
 type and two tags went from 339 characters to 378, a search that asked for
@@ -281,6 +283,124 @@ nothing, which covers a search hit and a batch's table. A name that shows
 costs nothing: its result is what it was, to the character. Left as they
 were: the active thought `brain_list` prints, a refusal that quotes the
 name of a type or a tag, and a batch's lines under "Failed" and "Skipped".
+
+### What changed, and to which thought
+
+`brain_recent_changes` printed names and no identifiers, and read the name of
+at most sixty thoughts a call. The organize skill's hunt for orphans is that
+call and then `brain_get_thought` on what it lists, and it stopped at the
+second step: carried out through the real handlers on 15.0.640, the result
+of the first call held 25 rows and not one identifier. The way from a name to
+an identifier is a search, and `brain_search` by the exact name found neither
+of two thoughts made a moment before: a name is found some five seconds after
+a create (§7). Past sixty thoughts a row read `(name not read)`, and every row
+about a deleted thought `(deleted)`, with nothing to say what had been
+deleted.
+
+**The log has the name.** A thought's own `101` carries the name it was
+created with, its `103` the old name and the new, its `102` the name it had
+when it was deleted (`docs/api-map.md`, row L37; over one brain's 159,451
+entries, every one of 48,013, 639 and 48,012). Of the kinds of entry that log
+holds, no other names a thought. A `101` says nothing of the thought's kind,
+which the log has only where a kind was changed (`304`). The name is the first
+140 UTF-16 code units of the thought's own.
+
+So a row about a thought that is gone reads `name (deleted)`, by the name its
+`102` kept: the name it had last, after a rename too. The log's word is taken
+for it and the thought is not read. A thought that is read keeps the name and
+the mark of its read. One that is not read, past the sixty or because its read
+failed, has the newest name the log has for it, and `(name not read)` only when
+the log has none. The reads go first to the thoughts the log has no name for,
+so the cap falls on a mark before it falls on a name.
+
+*The name then or the name now* does not come apart in the log. It is read
+newest first with no gap, and a rename is in it when its request is answered,
+20 of 20. So the newest name among the entries read is the thought's name as
+of that read: a later rename would be a newer `103`, which was read too. Every
+row about a thought shows that one name, as it did when the name came from a
+read. A name as long as the log keeps one ends in `…`, and one with no
+character that shows is spelled out as a read's is (`shownName()`, above).
+
+Where there are both, the read's name is printed, not the log's, and that is
+the older of the two for a moment: read straight after a rename, the thought
+had its old name 18 times of 20, and the new one 31 to 197 ms later (row L28).
+A call inside that moment shows the old name in every row about the thought,
+the row `renamed` included, as it did before. The log's name would be right
+there. It was not put first because a rename made in TheBrain's own window
+was not measured: the log's name over the read's is wrong for good if some
+rename logs no `103`, and the read's over the log's for 0.2 s.
+
+What the log cannot give is the kind. A thought that was not read is unmarked
+whatever it is, and `Totals` says how many there are: `thoughts not read: 2,
+so a type or a tag among them is not marked`.
+
+**Identifiers on request.** `identifiers: true` adds a section under the
+table: each thought the rows name that is still there, once, in the form the
+other read tools use. For instance:
+
+```
+## Changes since 2026-10-11 10:07
+When (UTC)        What          Thought
+────────────────  ────────────  ────────────────────────────────────
+2026-10-11 10:07  deleted       Duplicate of Hybrid search (deleted)
+2026-10-11 10:07  link created  gotcha [tag] ↔ Hybrid search
+2026-10-11 10:07  created       Hybrid search
+
+## Thoughts
+- gotcha — 922104f9-3793-4964-a091-7ebdc791a632 [tag]
+- Hybrid search — 3ffba89e-91b9-4caa-b45b-441b452cafc7
+
+## Totals
+events 3
+```
+
+The identifiers are the log's own, so the section costs no request, and it
+lists a thought that was not read as well. A thought that is gone is left
+out: nothing takes its identifier.
+
+Measured on a week of work made for it in a throwaway brain, four articles
+through `brain_ingest`, edits to fourteen older thoughts and two deletions, 77
+thoughts, with a token at four characters:
+
+| | 50 rows | 200 rows |
+|---|---|---|
+| Before | 4,006 characters (1,002 tokens), 27 requests | 15,915 (3,979), 61 requests, 9 names not read |
+| Now | 4,138 (1,035), 25 requests | 16,154 (4,039), 61 requests, no name not read, 2 thoughts not read |
+| Now, with `identifiers` | 5,737 (1,434), 24 thoughts listed | 20,176 (5,044), 62 listed |
+| An identifier at every mention | 6,556 | 27,464 |
+| An identifier at a thought's first mention | 5,074 | 18,572 |
+
+The last two rows are worked out from the same results, not built. The week
+was made three times. The 200 rows came to the same sizes each time; the 50
+newest moved by up to 14 characters, by the order a batch's writes landed in,
+and the differences between the rows of this table did not move.
+
+The default is the table alone, because the section is a quarter to two
+fifths on top of it, 400 and 1,000 tokens here, and a caller who only
+narrates the period has no use for it. The argument is 173 characters of
+`tools/list`, 43 tokens, which every session pays: 17,930 characters to
+18,103. An identifier beside every mention is 58% and 70% on top of the
+table. One at a thought's first mention is the cheapest of the three, and
+leaves the model to find which row that was; the section is one place to
+look, and its lines are the ones `brain_get_thought` prints.
+
+The default grew by 132 and 239 characters in that week, 3.3% and 1.5%: the
+names of the two thoughts deleted and, at 200 rows, the nine names that had
+not been read and the words about the two thoughts still not read. A deleted
+name costs in proportion to the rows about deleted thoughts, and a period
+that is nothing but those is twice the size it was. The 50 and 200 newest
+rows of a brain where only this project's tests had run, every row about a
+thought since deleted, went from 2,400 characters to 5,405 and from 9,091 to
+18,983, and from 16 and 61 requests to one. Before, such a result was
+`(deleted)` in every cell. Those are test names, some of them the full 140.
+
+**Not known.** How a thought renamed or deleted in TheBrain's own window is
+logged: all of it was measured through the API. What the kinds of entry that
+log has none of carry, a thought pasted in (`104`) among them: only `101`,
+`103` and `102` are read for a name. And whether a `102` is always the last
+entry about its thought: in that log 14 entries, attachments made and
+removed, name a thought after its `102`, which was not reproduced. Nothing
+here goes by its being the last.
 
 ### `brain_ingest` — the tool the product is built around
 
@@ -1105,8 +1225,9 @@ tells the two apart: with a 400 in other words put in, `brain_list_types_and_tag
 answered "This brain has no types or tags yet". `supportsAliases()` answers
 yes when it cannot ask, and the write goes ahead (§7, on aliases). The read
 that waits for an alias or a type to read back takes a failure for "not yet"
-(above). `brain_recent_changes` prints "(name not read)" for a thought whose
-read failed. The indexer's own reads are in §8, *A read that fails while the
+(above). `brain_recent_changes` prints the name the log kept for a thought
+whose read failed, or "(name not read)" when the log has none, and counts it
+among the thoughts not read. The indexer's own reads are in §8, *A read that fails while the
 index is built*. And one thing about notes that is no read: a note written to
 an identifier nobody has is stored, and reported as written (L3).
 
