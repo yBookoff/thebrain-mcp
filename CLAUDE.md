@@ -125,6 +125,22 @@ silent wrong behaviour rather than a loud failure:
   type. `createdId()` turns that into `zero_id` for both creates;
   `links.create()` and `planLevels()` refuse a thought linked to itself before
   anything is sent.
+- **The all-zero UUID is well formed, names nothing, and a create takes it for
+  none given.** A `sourceThoughtId` or `typeId` of zeros is a 200 and a thought
+  with no parent or no type; a note written to it is a 200 that never reads
+  back. `assertUuid()` refuses it with `invalid_uuid` before any request; in
+  an *answer* it is `zero_id` (`createdId()`).
+- **Two thoughts share one link only when the posts come one after another.**
+  Two `POST /api/links` at once for a pair with none were two links 51 times
+  in 60; from then on `between()` is a 404 where both go the same way, and a
+  further post a 400. `ingest()` sends one link a pair and one attach for a
+  tag on a thought: never write to one pair twice at once.
+- **Asking for what is there is not free, and `between()` is how to look.** A
+  link posted over the pair's own, a tag attached again included, is a 200
+  with the same identifier and a `402` in the log; `PATCH /name` with the name
+  a link has logs nothing. The lookup of a pair is not behind a write; the
+  link by its own identifier is. Look first (`links.hasTag()`, `linkFound()`),
+  and compare a label as it is stored (`linkNameAsStored()`).
 - **Two thoughts share one link, and no link reads back with `relation` 2.** A
   parent's link is stored as a child's from the other end, so `thoughtIdA` is
   the upper end, the tag or the type. Never compare a stored `relation` with
