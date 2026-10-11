@@ -31,6 +31,12 @@
  *  7. A brain that is not there fails the plan once, ahead of its writes. A
  *     plan that names nothing in the brain used to read nothing first, and
  *     each of its creates was refused in turn.
+ *  8. A thought that was there keeps its note. The plan's note is written to
+ *     a thought with none, and never over one: the note of every thought a
+ *     plan found in place used to be replaced by the plan's, on a first run
+ *     as on a second, and what a person had written there was gone.
+ *  9. Two thoughts of one name in one list are not one thought to land on.
+ *     The last the graph listed used to be taken, without a word of the other.
  */
 
 import {
@@ -64,22 +70,38 @@ const LIST_OF = {
 const RELATION_NAMES = Object.keys(LIST_OF) as RelationName[];
 
 /**
- * What a thought has next to it: for each relation, the thought of each
- * trimmed name, with its kind as the graph gave it. A plan makes ordinary
- * thoughts, and the one it finds there may be a type or a tag.
+ * What a thought has next to it: for each relation, the thoughts of each
+ * trimmed name, each with its kind as the graph gave it. A plan makes
+ * ordinary thoughts, and the one it finds there may be a type or a tag. One
+ * list can hold two thoughts of a name, and a map of names to one thought
+ * each used to keep the last of them alone.
  */
-type Neighbours = Record<RelationName, Map<string, { id: string; kind?: number }>>;
+type Neighbours = Record<RelationName, Map<string, Array<{ id: string; kind?: number }>>>;
 
 /**
  * How long a batch waits for the graphs to list what it made. Measured on a
- * quiet brain: about 80 ms at the median, 205 ms at the most.
+ * quiet brain: about 80 ms at the median, 205 ms at the most. A graph that
+ * answers and does not list yet is asked again a step later; one whose read
+ * failed after twice the pause before, up to `maxStepMs`.
  */
-const LISTED = { stepMs: 25, timeoutMs: 2000 };
+const LISTED = { stepMs: 25, maxStepMs: 400, timeoutMs: 2000 };
+
+/**
+ * How long after this process's last write a graph is read to look for a
+ * thought. The copy a graph is answered from was 205 ms behind a create at
+ * the most, and a plan sent 200 ms after a write made nothing twice (0 of
+ * 60).
+ */
+const COPY_LAG_MS = 300;
 
 export interface IngestThought {
   /** Local label within the batch, for referencing before creation. */
   tempId: string;
   name: string;
+  /**
+   * Written to a thought the batch creates, and to one that was there with
+   * no note. A thought that has a note keeps it: see `notesKept`.
+   */
   note?: string | undefined;
   typeId?: string | undefined;
   /** UUIDs of tags the brain has: a plan makes none, and takes no `tempId` here. */
@@ -109,8 +131,8 @@ export interface IngestPlan {
    * Skip creating a thought when the thought it hangs on already has one of
    * that name under the same relation, reusing the existing one. Makes a
    * repeat run safe. One of that name under another relation is neither
-   * reused nor made again: it fails, with the identifier. A thought with no
-   * parent is not looked for.
+   * reused nor made again: it fails, with the identifier. So do two of that
+   * name under the same relation. A thought with no parent is not looked for.
    */
   deduplicate?: boolean | undefined;
 }
@@ -142,14 +164,32 @@ export interface IngestOutcome {
   notesWritten: number;
   /** The `tempId` of each plan thought whose note was written: what `notesWritten` counts. */
   notesWrittenFor: string[];
+  /**
+   * The plan's notes that were not written, because the thought has a note:
+   * the one it had before the batch, or, for the second of two plan items
+   * that are one thought, the first item's. `same` says that the note it
+   * has is the plan's text, as a second run of a plan finds it. A note that
+   * could not be read is not here but among `failures`, and not written
+   * either.
+   */
+  notesKept: Array<{ tempId: string; thoughtId: string; same: boolean }>;
   tagsAttached: number;
   /** Thoughts whose alias list was written, at creation or by adding to it. */
   aliasesWritten: number;
   /**
-   * What was tried and failed. `unanswered` marks a create that went out and
-   * got no answer: the thought may be there, with no identifier to report.
+   * What was tried and failed. `of` is what the write was to make. `reason`
+   * is the failure in the API's words or this module's, and `error` what was
+   * thrown, for a caller that explains failures in its own. `unanswered`
+   * marks a write that went out and got no answer: it may have been carried
+   * out, and a thought may be there with no identifier to report.
    */
-  failures: Array<{ what: string; reason: string; unanswered?: true }>;
+  failures: Array<{
+    of: "thought" | "note" | "tag" | "aliases" | "link";
+    what: string;
+    reason: string;
+    error: unknown;
+    unanswered?: true;
+  }>;
   /**
    * What was not tried, because a thought it needs was not created: the
    * thoughts under one that failed, with their notes, tags and aliases, and
@@ -177,6 +217,21 @@ export class IngestValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "IngestValidationError";
+  }
+}
+
+/**
+ * A write that was not sent because a read ahead of it failed. `context` is
+ * the sentence without the cause, for a caller that explains the cause in its
+ * own words; the message has both.
+ */
+export class IngestReadError extends Error {
+  readonly context: string;
+
+  constructor(context: string, cause: unknown) {
+    super(`${context}: ${describe(cause)}`, { cause });
+    this.name = "IngestReadError";
+    this.context = context;
   }
 }
 
@@ -331,12 +386,29 @@ export async function ingest(
     linksNotAdded: [],
     notesWritten: 0,
     notesWrittenFor: [],
+    notesKept: [],
     tagsAttached: 0,
     aliasesWritten: 0,
     failures: [],
     skipped: [],
     unlisted: 0,
     listingUnread: [],
+  };
+  // Any write that got no answer is marked, not a create alone: a note, a
+  // tag, an alias and a link may have been carried out as well, and used to
+  // stand among the failures as if they had been refused.
+  const failed = (
+    of: IngestOutcome["failures"][number]["of"],
+    what: string,
+    error: unknown,
+  ): void => {
+    outcome.failures.push({
+      of,
+      what,
+      reason: describe(error),
+      error,
+      ...(mayHaveLanded(error) ? { unanswered: true as const } : {}),
+    });
   };
 
   /** Thoughts given aliases. A set: one thought can be reached by two plan items. */
@@ -410,9 +482,10 @@ export async function ingest(
         (e: unknown) => e instanceof TheBrainError && e.kind === "not_found",
       );
       if (nobodyHasIt) return null;
-      throw new Error(
+      throw new IngestReadError(
         `${anchorId} could not be read to look for a thought of this name next to it, ` +
-          `so nothing was created: ${describe(error)}`,
+          "so nothing was created",
+        error,
       );
     }
   };
@@ -422,13 +495,45 @@ export async function ingest(
     anchorId: string,
     asked: RelationName,
     found: RelationName,
-    thoughtId: string,
-  ): Error =>
-    new Error(
+    thoughtIds: readonly string[],
+  ): Error => {
+    const [thoughtId, ...more] = thoughtIds as [string, ...string[]];
+    if (more.length > 0) {
+      return new Error(
+        `${anchorId} already has ${thoughtIds.length} thoughts of this name as its ${found}, ` +
+          `${thoughtIds.join(" and ")}, and the plan asks for a ${asked}. None was taken for ` +
+          `the same thought, and no further one was made. To use one of them, name its ` +
+          `identifier where the plan has "${t.tempId}"; to make another of that name, send ` +
+          "this thought in a plan with deduplicate set to false",
+      );
+    }
+    return new Error(
       `${anchorId} already has a thought of this name as its ${found}, ${thoughtId}, and the ` +
         `plan asks for a ${asked}. It was not taken for the same thought, and no second one ` +
         `was made. To use it, name ${thoughtId} where the plan has "${t.tempId}"; to make ` +
         "another of that name, send this thought in a plan with deduplicate set to false",
+    );
+  };
+  /**
+   * Why two thoughts of the plan's name under the plan's own relation stop
+   * this one. Which of them the plan means is no more the server's to say
+   * than whether a namesake under another relation is the plan's thought:
+   * the plan's children, tags, aliases and links would go to one of two.
+   * The last the graph listed used to be taken, and the result said nothing
+   * of the other.
+   */
+  const twins = (
+    t: IngestThought,
+    anchorId: string,
+    relation: RelationName,
+    thoughtIds: readonly string[],
+  ): Error =>
+    new Error(
+      `${anchorId} has ${thoughtIds.length} thoughts of this name as its ${relation}: ` +
+        `${thoughtIds.join(" and ")}. Which of them the plan means was not decided: none was ` +
+        `taken, and no further one was made. To use one of them, name its identifier where ` +
+        `the plan has "${t.tempId}"; to make another of that name, send this thought in a ` +
+        "plan with deduplicate set to false",
     );
 
   /**
@@ -451,6 +556,22 @@ export async function ingest(
    */
   const toBeListed = new Map<string, Array<{ thoughtId: string; relation: RelationName }>>();
 
+  // A thought is looked for in a graph, and that graph can be a copy from
+  // before this process's last write. A batch waits for the graphs to list
+  // what it made; the other tools return at once, and a create that got no
+  // answer leaves nothing to wait for. A plan sent straight after
+  // brain_create_thought, brain_link or a rename made the thought again 25
+  // times in 300 when it followed within 150 ms, and never from 200 ms on.
+  // So the first look waits until the copy has had its time. By the clock,
+  // since nothing in a graph tells a copy that is behind, and only when a
+  // write came back less than that long ago: any other call costs nothing.
+  // The read of a note is behind a first write in the same way, once in ten
+  // still at 150 ms and never from 200 on, and comes after this wait too.
+  if (dedupe && plan.thoughts.some((t) => t.parent !== undefined && !tempIds.has(t.parent))) {
+    const wait = COPY_LAG_MS - api.client.sinceLastWrite();
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+  }
+
   for (const level of levels) {
     await mapWithConcurrency(level, 6, async (t) => {
       // Its parent is of an earlier level, so what became of it is known.
@@ -471,7 +592,11 @@ export async function ingest(
         if (dedupe) {
           if (parentId !== null) {
             near = await lookAround(parentId);
-            const existing = near?.[relation].get(t.name.trim());
+            const there = near?.[relation].get(t.name.trim()) ?? [];
+            if (there.length > 1) {
+              throw twins(t, parentId, relation, there.map((n) => n.id));
+            }
+            const [existing] = there;
             if (existing !== undefined) {
               resolved.set(t.tempId, existing.id);
               outcome.reused.push({
@@ -484,10 +609,13 @@ export async function ingest(
             }
             // The same name under another relation. Whether it is the plan's
             // thought is not for the server to say: reused, it would take the
-            // plan's note and children; made again, it would be a duplicate.
+            // plan's children, tags and links; made again, it would be a
+            // duplicate.
             for (const other of RELATION_NAMES) {
-              const namedSo = near?.[other].get(t.name.trim());
-              if (namedSo !== undefined) throw namesake(t, parentId, relation, other, namedSo.id);
+              const namedSo = near?.[other].get(t.name.trim()) ?? [];
+              if (namedSo.length > 0) {
+                throw namesake(t, parentId, relation, other, namedSo.map((n) => n.id));
+              }
             }
           }
           const pending = inFlight.get(key);
@@ -512,7 +640,7 @@ export async function ingest(
               return;
             }
             if (pending.relation !== relation && parentId !== null) {
-              throw namesake(t, parentId, relation, pending.relation, thoughtId);
+              throw namesake(t, parentId, relation, pending.relation, [thoughtId]);
             }
             resolved.set(t.tempId, thoughtId);
             outcome.reused.push({ tempId: t.tempId, thoughtId, name: t.name });
@@ -543,7 +671,7 @@ export async function ingest(
         }
 
         if (parentId !== null) {
-          near?.[relation].set(t.name.trim(), { id: thoughtId, kind: ThoughtKind.Normal });
+          near?.[relation].set(t.name.trim(), [{ id: thoughtId, kind: ThoughtKind.Normal }]);
           if (!madeHere.has(parentId)) {
             const made = toBeListed.get(parentId) ?? [];
             toBeListed.set(parentId, [...made, { thoughtId, relation }]);
@@ -551,36 +679,61 @@ export async function ingest(
         }
       } catch (error) {
         blocked.set(t.tempId, t.tempId);
-        outcome.failures.push({
-          what: `thought "${t.name}" (${t.tempId})`,
-          reason: describe(error),
-          ...(mayHaveLanded(error) ? { unanswered: true as const } : {}),
-        });
+        failed("thought", `thought "${t.name}" (${t.tempId})`, error);
       }
     });
   }
 
-  // Notes and tags are independent of each other, so write them in parallel.
-  await mapWithConcurrency(
-    plan.thoughts.filter((t) => t.note !== undefined && t.note.trim() !== ""),
-    6,
-    async (t) => {
-      const id = resolved.get(t.tempId);
-      if (id === undefined) return;
+  // A note goes to a thought that has none, and never over one. It used to
+  // be written to every thought of the plan, and a thought the plan found in
+  // place lost the note it had: 6 times of 6 on a live TheBrain 15.0.640, on
+  // a first run as on a second, a note a person had edited between two runs
+  // included. So a thought that was there is read first, and keeps what it
+  // has. One the batch made has no note, and is not read.
+  //
+  // By thought, one item after another: two plan items can be one thought.
+  // The first item's note is the thought's then, and the second item finds
+  // it there. Their notes used to be sent at once, and which of the two the
+  // thought kept was not the plan's to say.
+  const noted = new Map<string, IngestThought[]>();
+  for (const t of plan.thoughts) {
+    const id = resolved.get(t.tempId);
+    if (id === undefined || t.note === undefined || t.note.trim() === "") continue;
+    noted.set(id, [...(noted.get(id) ?? []), t]);
+  }
+  await mapWithConcurrency([...noted], 6, async ([id, items]) => {
+    /** The note the thought has, null until it is read. */
+    let held: string | null = madeHere.has(id) ? "" : null;
+    for (const t of items) {
       try {
+        // A read that fails is not the answer "no note", which is a 200: the
+        // plan's note is not written over what could not be read.
+        held ??= await api.notes.get(brainId, id).catch((error: unknown) => {
+          throw new IngestReadError(
+            "not written, because the note this thought has could not be read and a " +
+              "note is not written over one that was not",
+            error,
+          );
+        });
+        if (held.trim() !== "") {
+          outcome.notesKept.push({
+            tempId: t.tempId,
+            thoughtId: id,
+            same: sameText(held, t.note!),
+          });
+          continue;
+        }
         await api.notes.set(brainId, id, t.note!);
+        held = t.note!;
         outcome.notesWritten += 1;
         outcome.notesWrittenFor.push(t.tempId);
       } catch (error) {
         // By identifier: two plan thoughts can share a title, and the note
         // is written afterwards with a tool that takes the identifier.
-        outcome.failures.push({
-          what: `note for "${t.name}" (${id})`,
-          reason: describe(error),
-        });
+        failed("note", `note for "${t.name}" (${id})`, error);
       }
-    },
-  );
+    }
+  });
 
   const tagJobs = plan.thoughts.flatMap((t) =>
     (t.tagIds ?? []).map((tagId) => ({ t, tagId })),
@@ -592,10 +745,7 @@ export async function ingest(
       await api.links.attachTag(brainId, id, tagId);
       outcome.tagsAttached += 1;
     } catch (error) {
-      outcome.failures.push({
-        what: `tag ${tagId} on "${t.name}" (${id})`,
-        reason: describe(error),
-      });
+      failed("tag", `tag ${tagId} on "${t.name}" (${id})`, error);
     }
   });
 
@@ -622,10 +772,7 @@ export async function ingest(
       const { added } = await api.thoughts.changeAliases(brainId, id, { add: job.add });
       if (added.length > 0) aliased.add(id);
     } catch (error) {
-      outcome.failures.push({
-        what: `aliases for "${job.name}" (${id})`,
-        reason: describe(error),
-      });
+      failed("aliases", `aliases for "${job.name}" (${id})`, error);
     }
   });
   outcome.aliasesWritten = aliased.size;
@@ -672,10 +819,7 @@ export async function ingest(
       });
       outcome.linksCreated += 1;
     } catch (error) {
-      outcome.failures.push({
-        what: `link ${link.from} -> ${link.to}`,
-        reason: describe(error),
-      });
+      failed("link", `link ${link.from} -> ${link.to}`, error);
     }
   });
 
@@ -694,13 +838,25 @@ async function readNeighbours(
   thoughtId: string,
 ): Promise<Neighbours> {
   const graph = await api.thoughts.getGraph(brainId, thoughtId);
-  const byName = (relation: RelationName): Neighbours[RelationName] =>
-    new Map(
-      graph[LIST_OF[relation]].map(
-        (t) => [(t.name ?? "").trim(), { id: t.id, kind: t.kind }] as const,
-      ),
-    );
+  const byName = (relation: RelationName): Neighbours[RelationName] => {
+    const named: Neighbours[RelationName] = new Map();
+    for (const t of graph[LIST_OF[relation]]) {
+      const name = (t.name ?? "").trim();
+      named.set(name, [...(named.get(name) ?? []), { id: t.id, kind: t.kind }]);
+    }
+    return named;
+  };
   return { child: byName("child"), parent: byName("parent"), jump: byName("jump") };
+}
+
+/**
+ * Whether the note a thought has is the text a plan has for it. A note reads
+ * back as it was written but for its line ends, which come back as `\n`
+ * (contract test), so those and the blanks around the text are set aside.
+ */
+function sameText(held: string, planned: string): boolean {
+  const plain = (text: string): string => text.replaceAll("\r\n", "\n").trim();
+  return plain(held) === plain(planned);
 }
 
 /**
@@ -717,16 +873,23 @@ async function readNeighbours(
  * answered. When the last one failed too, its thought is returned apart, as
  * one whose graph was not read. It used to be counted as a graph that listed
  * nothing, and the result said of TheBrain what no read had shown.
+ *
+ * A graph that fails is asked again after twice the pause each time, not a
+ * step later: at a step it was read 74 to 78 times in the two seconds. And
+ * the wait is over when its time is, for every graph at once. A read is
+ * given up on then, answered or not: a batch whose writes are done used to
+ * wait out the request's own timeout, which is 30 s, to say so.
  */
 async function unlistedAfterWaiting(
   api: TheBrainApi,
   brainId: string,
   made: ReadonlyMap<string, ReadonlyArray<{ thoughtId: string; relation: RelationName }>>,
 ): Promise<Pick<IngestOutcome, "unlisted" | "listingUnread">> {
+  const deadline = Date.now() + LISTED.timeoutMs;
   const waited = await mapWithConcurrency([...made], 6, async ([anchorId, expected]) => {
-    const deadline = Date.now() + LISTED.timeoutMs;
+    let pause = LISTED.stepMs;
     for (;;) {
-      const read = await api.thoughts.getGraph(brainId, anchorId).then(
+      const read = await answeredBy(deadline, api.thoughts.getGraph(brainId, anchorId)).then(
         (graph) => ({ graph, error: undefined }),
         (error: unknown) => ({ graph: null, error }),
       );
@@ -735,8 +898,10 @@ async function unlistedAfterWaiting(
         ({ thoughtId, relation }) =>
           graph === null || !graph[LIST_OF[relation]].some((t) => t.id === thoughtId),
       ).length;
-      if (lacking === 0 || Date.now() >= deadline) return { anchorId, lacking, read };
-      await new Promise((resolve) => setTimeout(resolve, LISTED.stepMs));
+      const left = deadline - Date.now();
+      if (lacking === 0 || left <= 0) return { anchorId, lacking, read };
+      pause = graph === null ? Math.min(pause * 2, LISTED.maxStepMs) : LISTED.stepMs;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(pause, left)));
     }
   });
   const answered = waited.filter((w) => w.read.graph !== null);
@@ -746,6 +911,32 @@ async function unlistedAfterWaiting(
       .filter((w) => w.read.graph === null)
       .map((w) => ({ thoughtId: w.anchorId, made: w.lacking, error: w.read.error })),
   };
+}
+
+/**
+ * A graph read, or the failure that it had not been answered when the wait
+ * for the graphs ran out. The request is left to end by itself: it is a read,
+ * and whatever comes of it is dropped.
+ */
+function answeredBy<T>(deadline: number, read: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () =>
+        reject(
+          new TheBrainError(
+            "network",
+            `the graph had not answered when the ${LISTED.timeoutMs} ms a batch waits for ` +
+              "the graphs to list what it made ran out",
+          ),
+        ),
+      Math.max(deadline - Date.now(), 0),
+    );
+    const settle = <V>(pass: (value: V) => void) => (value: V): void => {
+      clearTimeout(timer);
+      pass(value);
+    };
+    read.then(settle(resolve), settle(reject));
+  });
 }
 
 /**

@@ -412,3 +412,57 @@ describe("emptyOn400", () => {
     ).resolves.toEqual([{ name: "Decision" }]);
   });
 });
+
+describe("how long ago the client last wrote", () => {
+  it("is never, until it has sent something that is not a read", async () => {
+    const { client } = clientReturning("{}");
+    expect(client.sinceLastWrite()).toBe(Number.POSITIVE_INFINITY);
+    await client.get("/api/brains");
+    await client.getBytes("/api/attachments/x/y/file-content");
+    expect(client.sinceLastWrite()).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("counts from the moment a write came back, by any method, and a read after it changes nothing", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const method of ["post", "patch", "delete"] as const) {
+        const { client } = clientReturning("{}");
+        await client[method]("/api/thoughts/x");
+        expect(client.sinceLastWrite(), method).toBe(0);
+        await vi.advanceTimersByTimeAsync(120);
+        await client.get("/api/brains");
+        expect(client.sinceLastWrite(), method).toBe(120);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a write that was refused, or got no answer, is a write that came back all the same", async () => {
+    // Refused, it wrote nothing, but nothing here knows what the next
+    // refusal means; unanswered, it may have been carried out.
+    vi.useFakeTimers();
+    try {
+      const refused = clientReturning(JSON.stringify("Could not create thought."), { status: 400 });
+      await expect(refused.client.post("/api/thoughts/x")).rejects.toMatchObject({
+        kind: "bad_request",
+      });
+      expect(refused.client.sinceLastWrite()).toBe(0);
+
+      const deaf = new TheBrainClient({
+        apiKey: KEY,
+        fetchImpl: (async () => {
+          throw new DOMException("timed out", "TimeoutError");
+        }) as unknown as typeof fetch,
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(deaf.post("/api/thoughts/x")).rejects.toMatchObject({ kind: "network" });
+      expect(deaf.sinceLastWrite()).toBe(0);
+      await expect(deaf.get("/api/brains")).rejects.toMatchObject({ kind: "network" });
+      await vi.advanceTimersByTimeAsync(40);
+      expect(deaf.sinceLastWrite()).toBe(40);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

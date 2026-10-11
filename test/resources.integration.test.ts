@@ -3744,8 +3744,10 @@ suite("resource layer against the live API", () => {
       // The API's own answer for a parent nobody has, and no mark on it: it answered.
       expect(first.failures).toEqual([
         {
+          of: "thought",
           what: `thought "${name("top")}" (top)`,
           reason: `Source Thought ${nobody} could not be located`,
+          error: expect.objectContaining({ kind: "not_found", status: 404 }),
         },
       ]);
       expect(first.skipped).toEqual([
@@ -3825,8 +3827,13 @@ suite("resource layer against the live API", () => {
       const first = await ingest(deaf, brainId, plan);
       for (const c of first.created) created.push(c.thoughtId);
       expect(first.created.map((c) => c.tempId)).toEqual(["top"]);
-      expect(first.failures).toEqual([
-        { what: `thought "${lost}" (mid)`, reason: "request exceeded 30000 ms", unanswered: true },
+      expect(first.failures).toMatchObject([
+        {
+          of: "thought",
+          what: `thought "${lost}" (mid)`,
+          reason: "request exceeded 30000 ms",
+          unanswered: true,
+        },
       ]);
       expect(first.skipped).toEqual([
         { what: `thought "${PREFIX}pf-lost-leaf" (leaf)`, reason: needs("mid") },
@@ -4050,6 +4057,266 @@ suite("resource layer against the live API", () => {
       });
       for (const c of named.created) created.push(c.thoughtId);
       expect(named.created.map((c) => c.tempId)).toEqual(["leaf"]);
+    }, 30_000);
+
+    it("ingest sent straight after another call made a thought finds it, though the graph it looks in had been read", async () => {
+      // The tools that write one thought return at once, and a plan sent
+      // straight after one read the copy from before it. Through the real
+      // handlers, 20 times each at 0 to 150 ms after the write: after
+      // brain_create_thought the thought was made again 8 times in 100,
+      // after brain_link 14, after a rename 3, and never from 200 ms on (0
+      // of 60). Now ingest waits out what is left of 300 ms since this
+      // client's last write before it looks: 0 of 360. Eight tries here are
+      // no proof by themselves: without the wait they made no thought twice
+      // about one run in two. The unit tests hold the wait to its time.
+      const name = (what: string): string => `${PREFIX}sr-after-${what}`;
+      for (let i = 0; i < 8; i += 1) {
+        const root = await make(`sr-after-root-${i}`);
+        await api.thoughts.getGraph(brainId, root);
+        await settle(300);
+        const made = await api.thoughts.create(brainId, {
+          name: name(String(i)),
+          sourceThoughtId: root,
+        });
+        created.push(made);
+
+        const outcome = await ingest(api, brainId, {
+          thoughts: [{ tempId: "x", name: name(String(i)), parent: root }],
+        });
+        for (const c of outcome.created) created.push(c.thoughtId);
+        expect(outcome.reused.map((r) => r.thoughtId), String(i)).toEqual([made]);
+        expect(outcome.created, String(i)).toEqual([]);
+      }
+    }, 30_000);
+
+    it("a create whose answer is lost is found by the same plan sent at once", async () => {
+      // A batch waits for the graphs to list what it made, and of this
+      // thought it has no identifier to wait for: the plan sent again
+      // straight after it made the thought a second time, 6 times of 6.
+      const root = await make("sr-lost-root");
+      await api.thoughts.getGraph(brainId, root);
+      const lost = `${PREFIX}sr-lost`;
+      let deafTo = lost;
+      const deaf = new TheBrainApi({
+        apiKey: apiKey!,
+        fetchImpl: async (input, init) => {
+          const response = await fetch(input, init);
+          if (typeof init?.body === "string" && init.body.includes(`"${deafTo}"`)) {
+            throw new DOMException("timed out", "TimeoutError");
+          }
+          return response;
+        },
+      });
+      const plan = { thoughts: [{ tempId: "x", name: lost, parent: root }] };
+
+      const first = await ingest(deaf, brainId, plan);
+      expect(first.failures).toMatchObject([{ of: "thought", unanswered: true }]);
+      deafTo = "nothing";
+      const second = await ingest(deaf, brainId, plan);
+      for (const c of second.created) created.push(c.thoughtId);
+
+      await settle(400);
+      const { children } = await api.thoughts.getGraph(brainId, root);
+      for (const c of children) created.push(c.id);
+      expect(children.map((c) => c.name)).toEqual([lost]);
+      expect(second.reused.map((r) => r.thoughtId)).toEqual([children[0]!.id]);
+      expect(second.created).toEqual([]);
+    }, 30_000);
+  });
+
+  /**
+   * What ingest does with the note of a thought that was there, and the API
+   * facts it goes by. The plan's note used to be written over it on every
+   * run, a first one that landed on the thought included: 6 times of 6 for
+   * each relation through the real handler, and a note edited between two
+   * runs was gone after the second, 6 of 6. Measured on TheBrain 15.0.640.
+   */
+  describe("the note of a thought a plan finds in place", () => {
+    const HUMAN = "A person wrote this.\n\nSecond paragraph, by hand.";
+    const read = (id: string, text: string): Promise<string> =>
+      eventually(
+        () => api.notes.get(brainId, id),
+        (note) => note === text,
+        { timeoutMs: 2000, stepMs: 50 },
+      );
+
+    it("a note reads back as it was written, but for its line ends, which come back as \\n", async () => {
+      // What "the plan's text" is compared with. Nineteen samples of
+      // Markdown read back to the character, 19 of 19: headings, the three
+      // kinds of list, emphasis, links, indented code, a table, a quote,
+      // blank lines and blanks at either end. A twentieth, sent with "\r\n",
+      // came back with "\n".
+      const samples = [
+        "One paragraph.\n\nAnother.",
+        "  padded, with a trailing line end  \n",
+        "# Title\n\n- one\n- two\n\n1. first\n2. second\n\n* star",
+        "Some **bold**, *italic*, `code` and [a link](https://example.com/a?b=1).",
+        "Code:\n\n    const a = 1;\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n> quoted",
+        "three\n\n\n\nblank lines, «кавычки» — and a < b && c > d",
+      ];
+      const ids: string[] = [];
+      for (const [i, text] of samples.entries()) {
+        const id = await make(`note-roundtrip-${i}`);
+        await api.notes.set(brainId, id, text);
+        ids.push(id);
+      }
+      for (const [i, text] of samples.entries()) expect(await read(ids[i]!, text), text).toBe(text);
+
+      const crlf = await make("note-roundtrip-crlf");
+      await api.notes.set(brainId, crlf, "line one\r\nline two\r\n\r\npara two");
+      expect(await read(crlf, "line one\nline two\n\npara two")).toBe(
+        "line one\nline two\n\npara two",
+      );
+    }, 30_000);
+
+    it("a first note reads back as no note for a moment after it is written, when the note had been read before", async () => {
+      // The read that decides whether a thought has a note is behind a first
+      // write as a graph is behind a create (L27). Of 52 thoughts whose
+      // empty note had been read, the read straight after the write still
+      // answered "no note" for 33, and polled it had the text within 102 ms.
+      // Read once after a pause it was stale 2 times in 20 at 150 ms and
+      // never from 200 ms on (0 of 60). A note that replaced another read
+      // back at once, 12 of 12. Ingest reads a note no sooner than 300 ms
+      // after this client's last write.
+      let stale = 0;
+      for (let i = 0; i < 8; i += 1) {
+        const id = await make(`note-first-${i}`);
+        expect(await api.notes.get(brainId, id)).toBe("");
+        await api.notes.set(brainId, id, "first text");
+        if ((await api.notes.get(brainId, id)) === "") stale += 1;
+        expect(await read(id, "first text")).toBe("first text");
+      }
+      expect(stale).toBeGreaterThan(0);
+    }, 30_000);
+
+    it("ingest keeps a note that is there and writes one where there is none, under each relation, and a second run changes neither", async () => {
+      const NUMBER = { child: Relation.Child, parent: Relation.Parent, jump: Relation.Jump };
+      for (const relation of ["child", "parent", "jump"] as const) {
+        const root = await make(`note-kept-root-${relation}`);
+        const name = (what: string): string => `${PREFIX}note-kept-${relation}-${what}`;
+        const there = async (what: string): Promise<string> => {
+          const id = await api.thoughts.create(brainId, {
+            name: name(what),
+            sourceThoughtId: root,
+            relation: NUMBER[relation],
+          });
+          created.push(id);
+          return id;
+        };
+        const held = await there("held");
+        const same = await there("same");
+        const bare = await there("bare");
+        await api.notes.set(brainId, held, HUMAN);
+        await api.notes.set(brainId, same, "the plan's");
+        await read(held, HUMAN);
+        await read(same, "the plan's");
+        // A thought with no note reads as an empty text, with a 200.
+        expect(await api.notes.get(brainId, bare)).toBe("");
+
+        const plan = {
+          thoughts: ["held", "same", "bare", "new"].map((what) => ({
+            tempId: what,
+            name: name(what),
+            parent: root,
+            relation,
+            note: "the plan's",
+          })),
+        };
+        const first = await ingest(api, brainId, plan);
+        for (const c of first.created) created.push(c.thoughtId);
+        const made = first.created[0]!.thoughtId;
+
+        expect(first.created.map((c) => c.tempId), relation).toEqual(["new"]);
+        expect([first.failures, first.skipped], relation).toEqual([[], []]);
+        expect(first.notesWrittenFor.sort(), relation).toEqual(["bare", "new"]);
+        const byTempId = (a: { tempId: string }, b: { tempId: string }): number =>
+          a.tempId.localeCompare(b.tempId);
+        expect(first.notesKept.sort(byTempId), relation).toEqual([
+          { tempId: "held", thoughtId: held, same: false },
+          { tempId: "same", thoughtId: same, same: true },
+        ]);
+        expect(await read(bare, "the plan's"), relation).toBe("the plan's");
+        expect(await read(made, "the plan's"), relation).toBe("the plan's");
+        expect(await api.notes.get(brainId, held), relation).toBe(HUMAN);
+
+        const second = await ingest(api, brainId, plan);
+        for (const c of second.created) created.push(c.thoughtId);
+        expect([second.created, second.failures, second.notesWrittenFor], relation).toEqual([
+          [],
+          [],
+          [],
+        ]);
+        expect(second.notesKept.sort(byTempId), relation).toEqual([
+          { tempId: "bare", thoughtId: bare, same: true },
+          { tempId: "held", thoughtId: held, same: false },
+          { tempId: "new", thoughtId: made, same: true },
+          { tempId: "same", thoughtId: same, same: true },
+        ]);
+        await settle(400);
+        expect(await api.notes.get(brainId, held), relation).toBe(HUMAN);
+      }
+    }, 60_000);
+
+    it("a note changed between two runs of a plan is still there after the second", async () => {
+      const root = await make("note-edited-root");
+      const plan = {
+        thoughts: [
+          { tempId: "x", name: `${PREFIX}note-edited`, parent: root, note: "the plan's" },
+        ],
+      };
+      const first = await ingest(api, brainId, plan);
+      for (const c of first.created) created.push(c.thoughtId);
+      const made = first.created[0]!.thoughtId;
+      await read(made, "the plan's");
+
+      const edited = "the plan's\n\nand a line added by hand";
+      await api.notes.set(brainId, made, edited);
+      await read(made, edited);
+      const second = await ingest(api, brainId, plan);
+      for (const c of second.created) created.push(c.thoughtId);
+
+      expect(second.notesKept).toEqual([{ tempId: "x", thoughtId: made, same: false }]);
+      expect([second.created, second.notesWritten, second.failures]).toEqual([[], 0, []]);
+      await settle(400);
+      expect(await api.notes.get(brainId, made)).toBe(edited);
+    }, 30_000);
+  });
+
+  /**
+   * Two thoughts of one name in one list of a graph. Ingest took the one the
+   * graph listed last for the plan's thought, and its result said nothing of
+   * the other: 8 times of 8. Which is last is not the order they were made
+   * in, and not the same from one read to the next. Measured on 15.0.640.
+   */
+  describe("two thoughts of one name next to one thought", () => {
+    it("a graph lists both, and ingest takes neither for the plan's thought", async () => {
+      const root = await make("twins-root");
+      const name = `${PREFIX}twins`;
+      const twins: string[] = [];
+      for (let i = 0; i < 2; i += 1) {
+        twins.push(await api.thoughts.create(brainId, { name, sourceThoughtId: root }));
+      }
+      created.push(...twins);
+      const { children } = await api.thoughts.getGraph(brainId, root);
+      expect(children.map((c) => c.id).sort()).toEqual([...twins].sort());
+      expect(children.map((c) => c.name)).toEqual([name, name]);
+
+      const outcome = await ingest(api, brainId, {
+        thoughts: [
+          { tempId: "x", name, parent: root, note: "mine" },
+          { tempId: "leaf", name: `${PREFIX}twins-leaf`, parent: "x" },
+        ],
+      });
+      for (const c of outcome.created) created.push(c.thoughtId);
+
+      expect([outcome.created, outcome.reused]).toEqual([[], []]);
+      expect(outcome.failures).toHaveLength(1);
+      expect(outcome.failures[0]!.reason).toContain(`${root} has 2 thoughts of this name as its child: `);
+      for (const id of twins) expect(outcome.failures[0]!.reason).toContain(id);
+      expect(outcome.skipped.map((s) => s.what)).toEqual([`thought "${PREFIX}twins-leaf" (leaf)`]);
+      await settle(400);
+      expect((await api.thoughts.getGraph(brainId, root)).children).toHaveLength(2);
+      for (const id of twins) expect(await api.notes.get(brainId, id)).toBe("");
     }, 30_000);
   });
 

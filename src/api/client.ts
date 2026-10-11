@@ -115,6 +115,8 @@ export class TheBrainClient {
   #baseUrls: readonly string[];
   readonly #timeoutMs: number;
   readonly #fetch: typeof fetch;
+  /** When the last request that was not a read came back, answered or not. */
+  #lastWrite = Number.NEGATIVE_INFINITY;
 
   constructor(options: ClientOptions) {
     if (!options.apiKey) {
@@ -150,6 +152,20 @@ export class TheBrainClient {
     return this.#request<Uint8Array>("GET", path, { ...options, raw: true });
   }
 
+  /**
+   * Milliseconds since this client last had a write come back, to any brain:
+   * a request that was not a `GET`, whether it was answered, refused or got
+   * no answer. Infinity when it has sent none.
+   *
+   * It is for a read that has to follow a write: a graph that has been read
+   * is answered from a copy up to 0.2 s behind one (docs/api-map.md, L27),
+   * and nothing in the answer tells a copy that is behind from one that is
+   * not. Only this process's own writes are known here.
+   */
+  sinceLastWrite(): number {
+    return Date.now() - this.#lastWrite;
+  }
+
   async #request<T>(method: string, path: string, options: RequestOptions): Promise<T> {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.#apiKey}`,
@@ -164,7 +180,9 @@ export class TheBrainClient {
       body = JSON.stringify(options.json);
     }
 
-    const response = await this.#send(method, path, options.query, headers, body);
+    const response = await this.#send(method, path, options.query, headers, body).finally(() => {
+      if (method !== "GET") this.#lastWrite = Date.now();
+    });
 
     const contentType = response.headers.get("content-type");
 

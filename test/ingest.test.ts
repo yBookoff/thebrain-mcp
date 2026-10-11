@@ -2,12 +2,22 @@ import { describe, expect, it, vi } from "vitest";
 
 import { TheBrainError, type TheBrainApi } from "../src/api/index.js";
 import {
+  IngestReadError,
   IngestValidationError,
   ingest,
   linkFound,
   planLevels,
+  type IngestOutcome,
   type IngestPlan,
 } from "../src/operations/ingest.js";
+
+/**
+ * A batch's failures as they read: what failed, why, and the mark of a write
+ * that got no answer. Each carries what was thrown beside that, for a caller
+ * that explains failures in its own words, and what the write was to make.
+ */
+const said = (outcome: Pick<IngestOutcome, "failures">) =>
+  outcome.failures.map(({ of: _of, error: _error, ...line }) => line);
 
 const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
 const ROOT = "bbbbbbbb-0000-4000-8000-000000000002";
@@ -33,13 +43,15 @@ function fakeBrain(
     typeId?: string;
     /** Tags it carries from the start. */
     tags?: string[];
+    /** The note it has from the start; none when absent. */
+    note?: string;
   }> = [],
 ) {
   let counter = 0;
   const thoughts = new Map(
     existing.map(({ parentOf: _parentOf, jumpOf: _jumpOf, ...e }) => [
       e.id,
-      { ...e, note: "", tags: [...(e.tags ?? [])], aliases: e.aliases ?? [] },
+      { ...e, note: e.note ?? "", tags: [...(e.tags ?? [])], aliases: e.aliases ?? [] },
     ]),
   );
   /** Whole-list alias writes after creation: the only kind the API offers. */
@@ -113,14 +125,19 @@ function fakeBrain(
    * A graph that has been read is answered from a copy. On the live API the
    * copy is brought up to date about every 0.1 s, so a read straight after a
    * create misses the new thought; here it misses it for the next
-   * `lag.reads` reads. A graph not read before is read live, as there.
+   * `lag.reads` reads, and for `lag.ms` by the clock, which is how the API
+   * goes and what a wait that polls nothing can be tested by. A graph not
+   * read before is read live, as there.
    */
-  const lag = { reads: 1 };
-  const copies = new Map<string, { graph: unknown; stale: number }>();
+  const lag = { reads: 1, ms: 0 };
+  const copies = new Map<string, { graph: unknown; stale: number; until: number }>();
   const list = (of: string, where: keyof Lists, id: string): void => {
     listsOf(of)[where].push(id);
     const copy = copies.get(of);
-    if (copy !== undefined) copy.stale = lag.reads;
+    if (copy !== undefined) {
+      copy.stale = lag.reads;
+      copy.until = Date.now() + lag.ms;
+    }
   };
   /** `relation` is what `id` is to `source`, as in a create and in a link. */
   const relate = (source: string, id: string, relation: number): void => {
@@ -148,6 +165,19 @@ function fakeBrain(
   /** Every graph read, by thought, and by thought what the next reads throw. */
   const graphReads: string[] = [];
   const failGraph = new Map<string, Error[]>();
+  /** Thoughts whose graph gets no answer from now on: the read never comes back. */
+  const hungGraph = new Set<string>();
+  /** Every note read and every note written, by thought, and what the next reads throw. */
+  const noteReads: string[] = [];
+  const noteWrites: Array<{ id: string; markdown: string }> = [];
+  const failNote = new Map<string, Error[]>();
+  /**
+   * How long ago the client had its last write come back. The real client
+   * goes by the clock; here the calls of a test follow one another with no
+   * time between them, where a model takes seconds, so it is "long ago"
+   * unless a test says otherwise.
+   */
+  const idle = { ms: Number.POSITIVE_INFINITY };
   /** How many times the brain itself was read, and whether it is there to read. */
   const brain = { reads: 0, there: true };
   // As the API: every request to a brain that is not there is this 401.
@@ -157,6 +187,7 @@ function fakeBrain(
     });
 
   const api = {
+    client: { sinceLastWrite: () => idle.ms },
     brains: {
       async get(_b: string) {
         brain.reads += 1;
@@ -229,13 +260,14 @@ function fakeBrain(
       },
       async getGraph(_b: string, id: string) {
         graphReads.push(id);
+        if (hungGraph.has(id)) await new Promise(() => undefined);
         const failure = failGraph.get(id)?.shift();
         if (failure !== undefined) throw failure;
         // As the API: the graph of an identifier nobody has is the generic 403.
         if (!known(id)) throw new TheBrainError("forbidden", GENERIC_403, { status: 403 });
         const copy = copies.get(id);
-        if (copy !== undefined && copy.stale > 0) {
-          copy.stale -= 1;
+        if (copy !== undefined && (copy.stale > 0 || Date.now() < copy.until)) {
+          copy.stale = Math.max(copy.stale - 1, 0);
           return copy.graph;
         }
         // As the API: every thought in a graph's lists carries its kind.
@@ -253,7 +285,7 @@ function fakeBrain(
           jumps: named(has.jumps),
           tags: named(thoughts.get(id)?.tags ?? []),
         };
-        copies.set(id, { graph, stale: 0 });
+        copies.set(id, { graph, stale: 0, until: 0 });
         return graph;
       },
       async supportsAliases() {
@@ -289,11 +321,28 @@ function fakeBrain(
       },
     },
     notes: {
+      // As the API: the note's text, and "" for a thought that has none, which
+      // is a 200 there too. So is the note of an identifier nobody has.
+      async get(_b: string, id: string) {
+        noteReads.push(id);
+        const failure = failNote.get(id)?.shift();
+        if (failure !== undefined) throw failure;
+        return thoughts.get(id)?.note ?? "";
+      },
       async set(_b: string, id: string, markdown: string) {
         // By its text: two thoughts of one name are told apart by their notes.
         if (failOn.has(`note: ${markdown}`)) throw new Error("server refused");
+        if (failWith.has(`note: ${markdown}`)) throw failWith.get(`note: ${markdown}`)!;
+        noteWrites.push({ id, markdown });
         const t = thoughts.get(id);
         if (t !== undefined) t.note = markdown;
+        // As a create whose answer is lost: the note is written all the same.
+        if (lostOn.has(`note: ${markdown}`)) {
+          throw new TheBrainError("network", "request exceeded 30000 ms", {
+            method: "POST",
+            path: `/api/notes/${BRAIN}/${id}/update`,
+          });
+        }
       },
     },
     links: {
@@ -354,6 +403,7 @@ function fakeBrain(
       // at its head, and the tag's graph lists the thought as a child.
       async attachTag(_b: string, thoughtId: string, tagId: string) {
         if (failOn.has(`tag on ${thoughtId}`)) throw new Error("server refused");
+        if (failWith.has(`tag on ${thoughtId}`)) throw failWith.get(`tag on ${thoughtId}`)!;
         const carried = thoughts.get(thoughtId)?.tags;
         if (carried !== undefined && !carried.includes(tagId)) carried.push(tagId);
         const there = joining(thoughtId, tagId);
@@ -392,6 +442,11 @@ function fakeBrain(
     lag,
     graphReads,
     failGraph,
+    hungGraph,
+    noteReads,
+    noteWrites,
+    failNote,
+    idle,
     brain,
   };
 }
@@ -684,6 +739,221 @@ describe("writing a batch", () => {
   });
 });
 
+describe("the note of a thought that was there", () => {
+  const THERE = "dddddddd-0000-4000-8000-000000000004";
+  const RELATIONS = ["child", "parent", "jump"] as const;
+  const HUMAN = "A person wrote this.\n\nBy hand.";
+  /** A brain where ROOT has "Held" next to it, as its `have`, with `note` or with none. */
+  const brain = (note?: string, have: (typeof RELATIONS)[number] = "child") =>
+    fakeBrain([
+      { id: ROOT, name: "root" },
+      {
+        id: THERE,
+        name: "Held",
+        ...(have === "child" && { parent: ROOT }),
+        ...(have === "parent" && { parentOf: ROOT }),
+        ...(have === "jump" && { jumpOf: ROOT }),
+        ...(note !== undefined && { note }),
+      },
+    ]);
+  const plan = (note?: string, relation?: (typeof RELATIONS)[number]): IngestPlan => ({
+    thoughts: [
+      {
+        tempId: "held",
+        name: "Held",
+        parent: ROOT,
+        ...(relation !== undefined && { relation }),
+        ...(note !== undefined && { note }),
+      },
+    ],
+  });
+
+  it("is kept when the plan has another, on a first run and on a second, whatever the relation", async () => {
+    // The plan's note used to be written over it, on every run: on a live
+    // TheBrain 6 times of 6 for each relation, and nothing in the result
+    // said that a note had been there.
+    for (const relation of RELATIONS) {
+      const fake = brain(HUMAN, relation);
+      for (const run of ["first", "second"]) {
+        const outcome = await ingest(fake.api, BRAIN, plan("the plan's", relation));
+        const where = `${relation}, ${run} run`;
+
+        expect(fake.thoughts.get(THERE)?.note, where).toBe(HUMAN);
+        expect(outcome.reused.map((r) => r.thoughtId), where).toEqual([THERE]);
+        expect(outcome.notesKept, where).toEqual([
+          { tempId: "held", thoughtId: THERE, same: false },
+        ]);
+        expect([outcome.notesWritten, outcome.notesWrittenFor], where).toEqual([0, []]);
+        expect([outcome.failures, outcome.skipped], where).toEqual([[], []]);
+      }
+      expect(fake.noteWrites, relation).toEqual([]);
+    }
+  });
+
+  it("is kept, and said to be the plan's text, when it is: line ends and the blanks around it aside", async () => {
+    // What a second run of a plan finds. A note reads back as it was written
+    // but for its line ends, which come back as "\n".
+    for (const [held, planned] of [
+      [HUMAN, HUMAN],
+      ["one\ntwo\n\nthree", "one\r\ntwo\r\n\r\nthree"],
+      ["text", "  text\n"],
+    ] as const) {
+      const fake = brain(held);
+      const outcome = await ingest(fake.api, BRAIN, plan(planned));
+
+      expect(outcome.notesKept, planned).toEqual([
+        { tempId: "held", thoughtId: THERE, same: true },
+      ]);
+      expect(fake.noteWrites, planned).toEqual([]);
+      expect(fake.thoughts.get(THERE)?.note, planned).toBe(held);
+    }
+  });
+
+  it("a thought with no note is given the plan's, and the next run finds it there", async () => {
+    // Nothing is lost by it, and a batch that failed at the note is finished
+    // by the run that follows. A note of blanks alone is no note either.
+    for (const held of [undefined, " \n"]) {
+      const fake = brain(held);
+      const first = await ingest(fake.api, BRAIN, plan("the plan's"));
+
+      expect(fake.thoughts.get(THERE)?.note).toBe("the plan's");
+      expect([first.notesWritten, first.notesWrittenFor, first.notesKept]).toEqual([
+        1,
+        ["held"],
+        [],
+      ]);
+      // Read once, then written once.
+      expect([fake.noteReads, fake.noteWrites]).toEqual([
+        [THERE],
+        [{ id: THERE, markdown: "the plan's" }],
+      ]);
+
+      const second = await ingest(fake.api, BRAIN, plan("the plan's"));
+      expect(second.notesKept).toEqual([{ tempId: "held", thoughtId: THERE, same: true }]);
+      expect(second.notesWritten).toBe(0);
+      expect(fake.noteWrites).toHaveLength(1);
+    }
+  });
+
+  it("a note a person changed between two runs is still there after the second", async () => {
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    const first = await ingest(fake.api, BRAIN, plan("the plan's"));
+    const made = first.created[0]!.thoughtId;
+    expect(fake.thoughts.get(made)?.note).toBe("the plan's");
+
+    const edited = "the plan's\n\nand a line added by hand";
+    fake.thoughts.get(made)!.note = edited;
+    const second = await ingest(fake.api, BRAIN, plan("the plan's"));
+
+    expect(fake.thoughts.get(made)?.note).toBe(edited);
+    expect(second.notesKept).toEqual([{ tempId: "held", thoughtId: made, same: false }]);
+    expect(second.failures).toEqual([]);
+  });
+
+  it("a thought the batch made is not read: its note is written as it was", async () => {
+    // A plan that lands on nothing sends what it sent, a request for a request.
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    const outcome = await ingest(fake.api, BRAIN, {
+      thoughts: [
+        { tempId: "top", name: "Top", parent: ROOT, note: "summary" },
+        { tempId: "leaf", name: "Leaf", parent: "top", note: "body" },
+      ],
+    });
+
+    expect(fake.noteReads).toEqual([]);
+    expect(fake.noteWrites.map((w) => w.markdown).sort()).toEqual(["body", "summary"]);
+    expect([outcome.notesWritten, outcome.notesKept]).toEqual([2, []]);
+  });
+
+  it("a plan with no note for it reads none", async () => {
+    const fake = brain(HUMAN);
+    const outcome = await ingest(fake.api, BRAIN, plan());
+
+    expect(fake.noteReads).toEqual([]);
+    expect([outcome.notesKept, outcome.notesWritten]).toEqual([[], 0]);
+    expect(fake.thoughts.get(THERE)?.note).toBe(HUMAN);
+  });
+
+  it("a note that cannot be read is not written over: it fails, by the thought's identifier", async () => {
+    // A failed read is not the answer "no note", which is a 200.
+    const boom = new TheBrainError("server", "boom", { status: 500 });
+    const fake = brain(HUMAN);
+    fake.failNote.set(THERE, [boom]);
+    const outcome = await ingest(fake.api, BRAIN, plan("the plan's"));
+
+    expect(fake.noteWrites).toEqual([]);
+    expect(fake.thoughts.get(THERE)?.note).toBe(HUMAN);
+    expect(outcome.failures).toEqual([
+      {
+        of: "note",
+        what: `note for "Held" (${THERE})`,
+        reason:
+          "not written, because the note this thought has could not be read and a note " +
+          "is not written over one that was not: boom",
+        error: expect.any(IngestReadError),
+      },
+    ]);
+    expect((outcome.failures[0]!.error as IngestReadError).cause).toBe(boom);
+    expect([outcome.notesKept, outcome.notesWritten]).toEqual([[], 0]);
+
+    // The read answers again: the next run sees the note, and keeps it.
+    const second = await ingest(fake.api, BRAIN, plan("the plan's"));
+    expect(second.failures).toEqual([]);
+    expect(second.notesKept).toEqual([{ tempId: "held", thoughtId: THERE, same: false }]);
+  });
+
+  it("two plan items that are one thought: the first one's note is written, and the second finds it there", async () => {
+    // Both used to be written at once, and which the thought kept was not
+    // the plan's to say.
+    for (const [second, same] of [
+      ["another", false],
+      ["one", true],
+    ] as const) {
+      const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+      const outcome = await ingest(fake.api, BRAIN, {
+        thoughts: [
+          { tempId: "x", name: "Same", parent: ROOT, note: "one" },
+          { tempId: "y", name: "Same", parent: ROOT, note: second },
+        ],
+      });
+      const made = outcome.created[0]!.thoughtId;
+
+      expect(fake.noteWrites, second).toEqual([{ id: made, markdown: "one" }]);
+      expect(outcome.notesWrittenFor, second).toEqual(["x"]);
+      expect(outcome.notesKept, second).toEqual([{ tempId: "y", thoughtId: made, same }]);
+      // Made here, so not read.
+      expect(fake.noteReads, second).toEqual([]);
+    }
+  });
+
+  it("two plan items that land on one thought with a note read it once, and both are kept", async () => {
+    const fake = brain(HUMAN);
+    const outcome = await ingest(fake.api, BRAIN, {
+      thoughts: [
+        { tempId: "x", name: "Held", parent: ROOT, note: "one" },
+        { tempId: "y", name: "Held", parent: ROOT, note: HUMAN },
+      ],
+    });
+
+    expect(fake.noteReads).toEqual([THERE]);
+    expect(fake.noteWrites).toEqual([]);
+    expect(outcome.notesKept).toEqual([
+      { tempId: "x", thoughtId: THERE, same: false },
+      { tempId: "y", thoughtId: THERE, same: true },
+    ]);
+  });
+
+  it("a type or a tag the plan landed on keeps its note like any other thought", async () => {
+    const fake = brain(HUMAN);
+    fake.types.add(THERE);
+    const outcome = await ingest(fake.api, BRAIN, plan("the plan's"));
+
+    expect(outcome.reused).toEqual([{ tempId: "held", thoughtId: THERE, name: "Held", kind: 2 }]);
+    expect(fake.thoughts.get(THERE)?.note).toBe(HUMAN);
+    expect(outcome.notesKept).toEqual([{ tempId: "held", thoughtId: THERE, same: false }]);
+  });
+});
+
 describe("a second run of a plan, by relation", () => {
   const RELATIONS = ["child", "parent", "jump"] as const;
   /** One thought of each relation next to ROOT, and one of each next to a thought of the plan. */
@@ -864,7 +1134,7 @@ describe("a thought of the same name under another relation", () => {
         });
         const where = `there as ${have}, asked for as ${asked}`;
 
-        expect(outcome.failures, where).toEqual([
+        expect(said(outcome), where).toEqual([
           { what: 'thought " Same " (x)', reason: refusal("x", asked, have) },
         ]);
         expect(outcome.skipped, where).toEqual([
@@ -907,7 +1177,7 @@ describe("a thought of the same name under another relation", () => {
     const made = first.created[0]!.thoughtId;
     expect(first.created.map((c) => c.tempId)).toEqual(["x"]);
     expect(first.reused).toEqual([{ tempId: "z", thoughtId: made, name: "Same" }]);
-    expect(first.failures).toEqual([
+    expect(said(first)).toEqual([
       { what: 'thought "Same" (y)', reason: refusal("y", "child", "jump", made) },
     ]);
     expect(fake.lists.get(ROOT)).toEqual({ children: [], parents: [], jumps: [made] });
@@ -929,6 +1199,269 @@ describe("a thought of the same name under another relation", () => {
     expect(outcome.failures).toEqual([]);
     expect(fake.lists.get(ROOT)!.children).toEqual([outcome.created[0]!.thoughtId]);
     expect(fake.lists.get(ROOT)!.jumps).toEqual([THERE]);
+  });
+});
+
+describe("two thoughts of one name in one list", () => {
+  const ONE = "dddddddd-0000-4000-8000-000000000004";
+  const TWO = "dddddddd-0000-4000-8000-000000000044";
+  const RELATIONS = ["child", "parent", "jump"] as const;
+  /** A brain where ROOT has two thoughts named "Same" as its `have`. */
+  const brain = (have: (typeof RELATIONS)[number]) =>
+    fakeBrain(
+      [ONE, TWO].map((id) => ({
+        id,
+        name: "Same",
+        ...(have === "child" && { parent: ROOT }),
+        ...(have === "parent" && { parentOf: ROOT }),
+        ...(have === "jump" && { jumpOf: ROOT }),
+      })).concat([{ id: ROOT, name: "root" }]),
+    );
+  const plan = (relation: (typeof RELATIONS)[number]): IngestPlan => ({
+    thoughts: [
+      { tempId: "x", name: "Same", parent: ROOT, relation, note: "mine", aliases: ["S"] },
+      { tempId: "leaf", name: "Leaf", parent: "x" },
+      { tempId: "side", name: "Side", parent: ROOT },
+    ],
+  });
+
+  it("under the plan's relation neither is taken and no third is made: the thought fails with both identifiers", async () => {
+    // The last the graph listed used to be taken, with the plan's children,
+    // aliases and note, and the result said nothing of the other.
+    for (const relation of RELATIONS) {
+      const fake = brain(relation);
+      for (const run of ["first", "second"]) {
+        const outcome = await ingest(fake.api, BRAIN, plan(relation));
+        const where = `${relation}, ${run} run`;
+
+        expect(said(outcome), where).toEqual([
+          {
+            what: 'thought "Same" (x)',
+            reason:
+              `${ROOT} has 2 thoughts of this name as its ${relation}: ${ONE} and ${TWO}. ` +
+              "Which of them the plan means was not decided: none was taken, and no further " +
+              "one was made. To use one of them, name its identifier where the plan has " +
+              '"x"; to make another of that name, send this thought in a plan with ' +
+              "deduplicate set to false",
+          },
+        ]);
+        expect(outcome.skipped, where).toEqual([
+          { what: 'thought "Leaf" (leaf)', reason: 'depends on "x", which was not created' },
+        ]);
+        // "Side" hangs on neither: made by the first run, found by the second.
+        expect(
+          [outcome.created.map((c) => c.tempId), outcome.reused.map((r) => r.tempId)],
+          where,
+        ).toEqual(run === "first" ? [["side"], []] : [[], ["side"]]);
+      }
+      // Neither was given the plan's note or alias, and "Leaf" was made under neither.
+      for (const id of [ONE, TWO]) {
+        expect([fake.thoughts.get(id)?.note, fake.thoughts.get(id)?.aliases], relation).toEqual([
+          "",
+          [],
+        ]);
+      }
+      expect([...fake.thoughts.values()].map((t) => t.name).sort(), relation).toEqual([
+        "Same",
+        "Same",
+        "Side",
+        "root",
+      ]);
+    }
+  });
+
+  it("the way out it names works: named by its identifier, one of them takes what the plan hangs on it", async () => {
+    const fake = brain("child");
+    const outcome = await ingest(fake.api, BRAIN, {
+      thoughts: [{ tempId: "leaf", name: "Leaf", parent: TWO }],
+    });
+
+    expect(outcome.failures).toEqual([]);
+    expect(fake.lists.get(TWO)?.children).toEqual([outcome.created[0]!.thoughtId]);
+  });
+
+  it("with deduplication off a third is made, as asked", async () => {
+    const fake = brain("child");
+    const outcome = await ingest(fake.api, BRAIN, {
+      thoughts: [{ tempId: "x", name: "Same", parent: ROOT }],
+      deduplicate: false,
+    });
+
+    expect(outcome.failures).toEqual([]);
+    expect(fake.lists.get(ROOT)!.children).toEqual([ONE, TWO, outcome.created[0]!.thoughtId]);
+  });
+
+  it("two of the name under another relation are both named, and neither is taken", async () => {
+    const fake = brain("jump");
+    const outcome = await ingest(fake.api, BRAIN, plan("child"));
+
+    expect(said(outcome)).toEqual([
+      {
+        what: 'thought "Same" (x)',
+        reason:
+          `${ROOT} already has 2 thoughts of this name as its jump, ${ONE} and ${TWO}, and ` +
+          "the plan asks for a child. None was taken for the same thought, and no further " +
+          'one was made. To use one of them, name its identifier where the plan has "x"; ' +
+          "to make another of that name, send this thought in a plan with deduplicate set " +
+          "to false",
+      },
+    ]);
+    expect(outcome.reused).toEqual([]);
+    expect(fake.lists.get(ROOT)!.children.map((id) => fake.thoughts.get(id)?.name)).toEqual([
+      "Side",
+    ]);
+  });
+
+  it("one of the name under the plan's relation is the plan's thought, whatever else is named so elsewhere", async () => {
+    // As it was: the plan's own relation is looked in first.
+    const fake = fakeBrain([
+      { id: ROOT, name: "root" },
+      { id: ONE, name: "Same", parent: ROOT },
+      { id: TWO, name: "Same", jumpOf: ROOT },
+    ]);
+    const outcome = await ingest(fake.api, BRAIN, {
+      thoughts: [{ tempId: "x", name: "Same", parent: ROOT }],
+    });
+
+    expect(outcome.reused.map((r) => r.thoughtId)).toEqual([ONE]);
+    expect(outcome.failures).toEqual([]);
+  });
+});
+
+describe("a plan sent straight after another write of this process", () => {
+  /**
+   * A brain where the graph of ROOT has been read, and a thought named "New"
+   * was made under it a moment ago by another tool: the copy that graph is
+   * answered from lacks it for 200 ms, as the API's does for up to 205.
+   */
+  const brain = async () => {
+    const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+    Object.assign(fake.lag, { reads: 0, ms: 200 });
+    await fake.api.thoughts.getGraph(BRAIN, ROOT);
+    const made = await fake.api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: ROOT });
+    fake.graphReads.length = 0;
+    return { fake, made };
+  };
+  const plan: IngestPlan = { thoughts: [{ tempId: "n", name: "New", parent: ROOT }] };
+  const run = async (fake: ReturnType<typeof fakeBrain>, of: IngestPlan = plan) => {
+    const pending = ingest(fake.api, BRAIN, of);
+    await vi.advanceTimersByTimeAsync(5000);
+    return pending;
+  };
+
+  it("waits out the time a graph's copy can be behind before it looks, and finds the thought", async () => {
+    // brain_create_thought, brain_link and a rename return at once, and a
+    // plan sent straight after one read the copy from before it: the thought
+    // was made a second time, on a live TheBrain 25 times in 300.
+    vi.useFakeTimers();
+    try {
+      const { fake, made } = await brain();
+      fake.idle.ms = 0;
+      const pending = ingest(fake.api, BRAIN, plan);
+      // Not before the 300 ms are over,
+      await vi.advanceTimersByTimeAsync(299);
+      expect(fake.graphReads).toEqual([]);
+      // and then at once.
+      await vi.advanceTimersByTimeAsync(1);
+      const outcome = await pending;
+
+      expect(outcome.reused.map((r) => r.thoughtId)).toEqual([made]);
+      expect(outcome.created).toEqual([]);
+      expect(fake.thoughts.size).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits only for what is left of that time", async () => {
+    vi.useFakeTimers();
+    try {
+      const { fake } = await brain();
+      fake.idle.ms = 220;
+      const pending = ingest(fake.api, BRAIN, plan);
+      await vi.advanceTimersByTimeAsync(79);
+      expect(fake.graphReads).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fake.graphReads.length).toBeGreaterThan(0);
+      await vi.advanceTimersByTimeAsync(5000);
+      await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a write that came back long enough ago costs no wait", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const ms of [300, 5000, Number.POSITIVE_INFINITY]) {
+        const { fake } = await brain();
+        fake.idle.ms = ms;
+        // The copy has had its time by then too.
+        await vi.advanceTimersByTimeAsync(200);
+        const waiting = vi.getTimerCount();
+        const outcome = await ingest(fake.api, BRAIN, plan);
+
+        expect(vi.getTimerCount(), String(ms)).toBe(waiting);
+        expect(outcome.created, String(ms)).toEqual([]);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a plan that looks next to no existing thought does not wait, nor one with deduplication off", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const of of [
+        // Nothing is looked for: a thought with no parent, and what hangs on it.
+        { thoughts: [{ tempId: "top", name: "Top" }, { tempId: "n", name: "New", parent: "top" }] },
+        { ...plan, deduplicate: false },
+      ] satisfies IngestPlan[]) {
+        const { fake } = await brain();
+        fake.idle.ms = 0;
+        const started = Date.now();
+        const sentAt: number[] = [];
+        const create = fake.api.thoughts.create.bind(fake.api.thoughts);
+        vi.spyOn(fake.api.thoughts, "create").mockImplementation((...args) => {
+          sentAt.push(Date.now() - started);
+          return create(...args);
+        });
+        const outcome = await run(fake, of);
+
+        expect(outcome.failures).toEqual([]);
+        // No 300 ms ahead of the first write: it went out at once.
+        expect(sentAt[0]).toBe(0);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a create that got no answer is found by the run that follows at once", async () => {
+    // A batch waits for the graphs to list what it knows it made, and of
+    // this thought it has no identifier: the same plan sent again read the
+    // copy from before it, and made the thought a second time, 6 times of 6.
+    vi.useFakeTimers();
+    try {
+      const fake = fakeBrain([{ id: ROOT, name: "root" }]);
+      Object.assign(fake.lag, { reads: 0, ms: 200 });
+      fake.lostOn.add("New");
+      // It has nothing to wait for, and returns with no time gone by.
+      const first = await ingest(fake.api, BRAIN, plan);
+      expect(said(first)).toEqual([
+        { what: 'thought "New" (n)', reason: "request exceeded 30000 ms", unanswered: true },
+      ]);
+
+      fake.lostOn.clear();
+      // What the client says straight after that request came back.
+      fake.idle.ms = 0;
+      const second = await run(fake);
+      expect(second.created).toEqual([]);
+      expect(second.reused).toHaveLength(1);
+      expect(fake.thoughts.size).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -960,7 +1493,7 @@ describe("a read that fails while a thought is looked for", () => {
     fake.failGraph.set(ROOT, [new TheBrainError("server", "boom", { status: 500 })]);
     const first = await ingest(fake.api, BRAIN, plan);
 
-    expect(first.failures).toEqual([{ what: 'thought "Top" (top)', reason: unread("boom") }]);
+    expect(said(first)).toEqual([{ what: 'thought "Top" (top)', reason: unread("boom") }]);
     expect(first.skipped).toEqual([
       { what: 'thought "Leaf" (leaf)', reason: 'depends on "top", which was not created' },
       { what: "link leaf -> side", reason: 'depends on "top", which was not created' },
@@ -985,7 +1518,7 @@ describe("a read that fails while a thought is looked for", () => {
     fake.failGraph.set(ROOT, [new TheBrainError("forbidden", GENERIC_403, { status: 403 })]);
     const outcome = await ingest(fake.api, BRAIN, plan);
 
-    expect(outcome.failures).toEqual([
+    expect(said(outcome)).toEqual([
       { what: 'thought "Top" (top)', reason: unread(GENERIC_403) },
     ]);
     expect(fake.lists.get(ROOT)!.children).toEqual([THERE]);
@@ -1109,6 +1642,119 @@ describe("a read that fails while the batch waits for the graphs", () => {
     expect(outcome.unlisted).toBe(0);
     expect(outcome.listingUnread).toEqual([]);
   });
+
+  /** When each read of ROOT's graph was sent, in ms from the start of the batch. */
+  const readsOfRoot = (fake: ReturnType<typeof brain>): number[] => {
+    const started = Date.now();
+    const at: number[] = [];
+    const getGraph = fake.api.thoughts.getGraph.bind(fake.api.thoughts);
+    vi.spyOn(fake.api.thoughts, "getGraph").mockImplementation((b, id) => {
+      if (id === ROOT) at.push(Date.now() - started);
+      return getGraph(b, id);
+    });
+    return at;
+  };
+
+  it("a graph that fails is asked again after twice the pause each time, to the end of the wait", async () => {
+    // Asked again a step later every time, it was read 74 to 78 times in the
+    // two seconds: 76 times of 76 on a live TheBrain with a 500 put in.
+    vi.useFakeTimers();
+    try {
+      const fake = brain();
+      fake.failGraph.set(ROOT, failingAfter(1, boom));
+      const at = readsOfRoot(fake);
+      const pending = ingest(fake.api, BRAIN, plan);
+      await vi.advanceTimersByTimeAsync(5000);
+      const outcome = await pending;
+
+      // The first read looks next to ROOT; the others wait for its graph.
+      expect(at).toEqual([0, 0, 50, 150, 350, 750, 1150, 1550, 1950, 2000]);
+      expect(outcome.listingUnread).toEqual([{ thoughtId: ROOT, made: 2, error: boom }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a graph that answers and does not list yet is asked again a step later, as it was", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = brain();
+      fake.lag.reads = 3;
+      const at = readsOfRoot(fake);
+      const pending = ingest(fake.api, BRAIN, plan);
+      await vi.advanceTimersByTimeAsync(5000);
+      const outcome = await pending;
+
+      expect(at).toEqual([0, 0, 25, 50, 75]);
+      expect([outcome.unlisted, outcome.listingUnread]).toEqual([0, []]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /** A batch whose graphs stop answering once the last of its `creates` thoughts is sent. */
+  const hungAfterTheWrites = (
+    fake: ReturnType<typeof fakeBrain>,
+    anchors: string[],
+    creates: number,
+  ): void => {
+    let sent = 0;
+    const create = fake.api.thoughts.create.bind(fake.api.thoughts);
+    vi.spyOn(fake.api.thoughts, "create").mockImplementation((...args) => {
+      if ((sent += 1) === creates) for (const id of anchors) fake.hungGraph.add(id);
+      return create(...args);
+    });
+  };
+  const NO_ANSWER =
+    "the graph had not answered when the 2000 ms a batch waits for the graphs to list " +
+    "what it made ran out";
+
+  it("a graph that does not answer is given up on when the wait is over, and the batch returns", async () => {
+    // The read used to be waited for to its own end. With the answer held
+    // back 10 s on the way from a live TheBrain, a batch whose writes were
+    // done took 10 s to say so, and the request's own limit is 30 s.
+    vi.useFakeTimers();
+    try {
+      const fake = brain();
+      hungAfterTheWrites(fake, [ROOT], 3);
+      let outcome: IngestOutcome | undefined;
+      void ingest(fake.api, BRAIN, plan).then((o) => (outcome = o));
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(outcome?.listingUnread).toEqual([
+        { thoughtId: ROOT, made: 2, error: expect.objectContaining({ message: NO_ANSWER }) },
+      ]);
+      expect(outcome?.listingUnread[0]!.error).toBeInstanceOf(TheBrainError);
+      // "C" is listed next to OTHER, whose graph answered, and no write failed.
+      expect([outcome?.unlisted, outcome?.failures]).toEqual([0, []]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the wait is over for every graph at once, however many there are", async () => {
+    // Six are asked at a time, and each used to have two seconds of its own.
+    vi.useFakeTimers();
+    try {
+      const anchors = Array.from({ length: 8 }, (_, i) => `cccccccc-0000-4000-8000-0000000000a${i}`);
+      const fake = fakeBrain(anchors.map((id) => ({ id, name: `anchor ${id}` })));
+      hungAfterTheWrites(fake, anchors, 8);
+      let outcome: IngestOutcome | undefined;
+      void ingest(fake.api, BRAIN, {
+        thoughts: anchors.map((parent, i) => ({ tempId: `t${i}`, name: `T${i}`, parent })),
+      }).then((o) => (outcome = o));
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(2);
+
+      expect(outcome?.listingUnread.map((u) => u.thoughtId).sort()).toEqual(anchors);
+      expect(outcome?.created).toHaveLength(8);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("a thought that fails in the middle of a batch", () => {
@@ -1145,7 +1791,7 @@ describe("a thought that fails in the middle of a batch", () => {
     expect(roots(fake)).toEqual(["root"]);
     expect(names(fake)).toEqual(["Side", "Side leaf", "root"]);
     expect(outcome.created.map((c) => c.tempId)).toEqual(["side", "sideleaf"]);
-    expect(outcome.failures).toEqual([{ what: 'thought "Top" (top)', reason: "server refused" }]);
+    expect(said(outcome)).toEqual([{ what: 'thought "Top" (top)', reason: "server refused" }]);
     expect(outcome.skipped).toEqual([
       { what: 'thought "Mid" (mid)', reason: needs("top") },
       { what: 'thought "Leaf" (leaf)', reason: needs("top") },
@@ -1167,7 +1813,7 @@ describe("a thought that fails in the middle of a batch", () => {
 
     expect(roots(fake)).toEqual(["root"]);
     expect(outcome.created.map((c) => c.tempId)).toEqual(["top", "side", "sideleaf"]);
-    expect(outcome.failures).toEqual([{ what: 'thought "Mid" (mid)', reason: "server refused" }]);
+    expect(said(outcome)).toEqual([{ what: 'thought "Mid" (mid)', reason: "server refused" }]);
     expect(outcome.skipped).toEqual([
       { what: 'thought "Leaf" (leaf)', reason: needs("mid") },
       { what: "link mid -> side", reason: needs("mid") },
@@ -1183,7 +1829,7 @@ describe("a thought that fails in the middle of a batch", () => {
     const outcome = await ingest(fake.api, BRAIN, plan(NOBODY));
 
     expect(roots(fake)).toEqual(["root"]);
-    expect(outcome.failures).toEqual([
+    expect(said(outcome)).toEqual([
       { what: 'thought "Top" (top)', reason: `Source Thought ${NOBODY} could not be located` },
     ]);
     expect(outcome.skipped.map((s) => s.what)).toEqual([
@@ -1238,7 +1884,7 @@ describe("a thought that fails in the middle of a batch", () => {
 
     expect(names(fake)).toEqual(["root"]);
     expect(createsOf(fake)).toEqual(["Same"]);
-    expect(outcome.failures).toEqual([{ what: 'thought "Same" (x)', reason: "server refused" }]);
+    expect(said(outcome)).toEqual([{ what: 'thought "Same" (x)', reason: "server refused" }]);
     expect(outcome.skipped).toEqual([
       { what: 'thought "Same" (y)', reason: 'is the same thought as "x", which was not created' },
       // What hangs on either names the one that was tried.
@@ -1256,7 +1902,7 @@ describe("a thought that fails in the middle of a batch", () => {
     // The one create went through, with no identifier to report.
     expect(names(fake)).toEqual(["Same", "root"]);
     expect(createsOf(fake)).toEqual(["Same"]);
-    expect(outcome.failures).toEqual([
+    expect(said(outcome)).toEqual([
       { what: 'thought "Same" (x)', reason: "request exceeded 30000 ms", unanswered: true },
     ]);
     expect(outcome.skipped.map((s) => s.what)).toEqual(['thought "Same" (y)', 'thought "Leaf" (under)']);
@@ -1361,7 +2007,7 @@ describe("a thought that fails in the middle of a batch", () => {
     const outcome = await ingest(fake.api, BRAIN, plan());
 
     expect(roots(fake)).toEqual(["root"]);
-    expect(outcome.failures).toEqual([
+    expect(said(outcome)).toEqual([
       { what: 'thought "Mid" (mid)', reason: "request exceeded 30000 ms", unanswered: true },
     ]);
     expect(outcome.skipped.map((s) => s.what)).toContain('thought "Leaf" (leaf)');
@@ -1390,7 +2036,7 @@ describe("a thought that fails in the middle of a batch", () => {
     const outcome = await ingest(fake.api, BRAIN, plan());
 
     expect(names(fake)).toEqual(["root"]);
-    expect(outcome.failures).toEqual([
+    expect(said(outcome)).toEqual([
       { what: 'thought "Top" (top)', reason: "could not reach http://localhost:11522" },
       { what: 'thought "Side" (side)', reason: "boom" },
     ]);
@@ -1420,7 +2066,7 @@ describe("what a failed note, tag or alias is listed as", () => {
     const outcome = await ingest(fake.api, BRAIN, plan);
 
     const two = outcome.created.find((c) => c.tempId === "two")!.thoughtId;
-    expect(outcome.failures).toEqual([
+    expect(said(outcome)).toEqual([
       { what: `note for "Same" (${two})`, reason: "server refused" },
     ]);
     expect(fake.thoughts.get(two)?.note).toBe("");
@@ -1435,7 +2081,7 @@ describe("what a failed note, tag or alias is listed as", () => {
 
     const failed = vi.mocked(fake.api.links.attachTag).mock.calls[0]![1];
     expect(outcome.created.map((c) => c.thoughtId)).toContain(failed);
-    expect(outcome.failures).toEqual([
+    expect(said(outcome)).toEqual([
       { what: `tag ${TAG} on "Same" (${failed})`, reason: "server refused" },
     ]);
     expect(outcome.tagsAttached).toBe(1);
@@ -1457,6 +2103,62 @@ describe("what a failed note, tag or alias is listed as", () => {
 
     expect(outcome.notesWrittenFor).toEqual(["two"]);
     expect(outcome.notesWritten).toBe(1);
+  });
+
+  it("each failure says what the write was to make, and carries what was thrown", async () => {
+    // For a caller that explains a failure in its own words: the lines of a
+    // batch's report used to have the API's alone.
+    const NOBODY = "99999999-0000-4000-8000-000000000009";
+    const refused = new TheBrainError("server", "boom", { status: 500 });
+    const fake = brain();
+    fake.failWith.set("note: first", refused);
+    fake.failWith.set(`tag on new-2`, refused);
+    vi.spyOn(fake.api.links, "create").mockRejectedValueOnce(refused);
+    const outcome = await ingest(fake.api, BRAIN, {
+      thoughts: [...plan.thoughts, { tempId: "gone", name: "Gone", parent: NOBODY }],
+      links: [{ from: "one", to: "two" }],
+    });
+
+    const byWhat = new Map(outcome.failures.map((f) => [f.of, f]));
+    expect([...byWhat.keys()].sort()).toEqual(["link", "note", "tag", "thought"]);
+    for (const of of ["link", "note", "tag"] as const) {
+      expect([byWhat.get(of)!.error, byWhat.get(of)!.reason], of).toEqual([refused, "boom"]);
+    }
+    expect(byWhat.get("thought")!.error).toMatchObject({
+      kind: "not_found",
+      message: `Source Thought ${NOBODY} could not be located`,
+    });
+    // An answer, whatever it says, is no write that may have landed.
+    expect(outcome.failures.map((f) => f.unanswered)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it("a note, a tag and a link that got no answer are marked as a create is: each may have been carried out", async () => {
+    // Only a create was marked, and a note write with no answer stood among
+    // the failures as one that had been refused.
+    const lost = (): TheBrainError =>
+      new TheBrainError("network", "request exceeded 30000 ms", { method: "POST" });
+    const fake = brain();
+    fake.lostOn.add("note: first");
+    fake.failWith.set("tag on new-2", lost());
+    vi.spyOn(fake.api.links, "create").mockRejectedValueOnce(lost());
+    const outcome = await ingest(fake.api, BRAIN, { ...plan, links: [{ from: "one", to: "two" }] });
+
+    expect(
+      outcome.failures.map((f) => [f.of, f.unanswered, f.reason]).sort(),
+    ).toEqual([
+      ["link", true, "request exceeded 30000 ms"],
+      ["note", true, "request exceeded 30000 ms"],
+      ["tag", true, "request exceeded 30000 ms"],
+    ]);
+    // The note is there all the same, and is not among the ones known written.
+    const one = outcome.created.find((c) => c.tempId === "one")!.thoughtId;
+    expect(fake.thoughts.get(one)?.note).toBe("first");
+    expect(outcome.notesWrittenFor).toEqual(["two"]);
   });
 });
 
@@ -1621,7 +2323,7 @@ describe("aliases in a batch", () => {
 
     expect(outcome.created).toHaveLength(1);
     expect(outcome.aliasesWritten).toBe(0);
-    expect(outcome.failures).toEqual([
+    expect(said(outcome)).toEqual([
       { what: `aliases for "RAG" (${RAG})`, reason: "server refused" },
     ]);
   });
@@ -1988,7 +2690,7 @@ describe("a link the brain does not make", () => {
 
     expect(outcome.reused.map((r) => r.thoughtId)).toEqual([OTHER]);
     expect(outcome.linksCreated).toBe(0);
-    expect(outcome.failures).toEqual([
+    expect(said(outcome)).toEqual([
       { what: `link x -> ${OTHER}`, reason: "a thought cannot be linked to itself" },
     ]);
     expect(links).toEqual([]);
@@ -2009,7 +2711,7 @@ describe("a link the brain does not make", () => {
     });
 
     expect(outcome.linksCreated).toBe(0);
-    expect(outcome.failures).toEqual([
+    expect(said(outcome)).toEqual([
       { what: "link a -> b", reason: "no link was made between a and b" },
     ]);
   });

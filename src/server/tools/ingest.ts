@@ -7,7 +7,12 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { MAX_ALIASES, warnIfFencedCode } from "../../api/index.js";
-import { IngestValidationError, ingest, type IngestOutcome } from "../../operations/ingest.js";
+import {
+  IngestReadError,
+  IngestValidationError,
+  ingest,
+  type IngestOutcome,
+} from "../../operations/ingest.js";
 import type { ServerContext } from "../context.js";
 import {
   bullet,
@@ -53,7 +58,14 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
                 .string()
                 .describe('Label for references within this batch, e.g. "rag" or "t1".'),
               name: z.string().min(1).describe("Thought title."),
-              note: z.string().optional().describe("Note in Markdown."),
+              note: z
+                .string()
+                .optional()
+                .describe(
+                  "Note in Markdown. Written to a new thought, and to one that existed " +
+                    "only if it has no note: a note that is there is kept, and the " +
+                    "result says so.",
+                ),
               parent: z
                 .string()
                 .optional()
@@ -108,7 +120,8 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
             "Skip creating a thought when its parent already has one of that name under " +
               "the same relation. On by default, which makes re-running a batch safe. A " +
               "thought of that name under another relation is neither reused nor made " +
-              "again: it fails, with its identifier.",
+              "again: it fails, with its identifier. So do two of that name under the " +
+              "same relation.",
           ),
       },
     },
@@ -143,6 +156,22 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
       // read as done. Its table names each thought by tempId too: the plan
       // that follows refers to what exists by identifier.
       const partial = outcome.failures.length > 0 || outcome.skipped.length > 0;
+      // A thought that existed keeps the note it has, so where the plan has
+      // a note for one, the table says of every note what became of it. A
+      // plan that found no thought in place, or has no note for those it
+      // found, has no such column and reads as it did.
+      const planned = new Set(
+        thoughts.filter((t) => t.note !== undefined && t.note.trim() !== "").map((t) => t.tempId),
+      );
+      const kept = new Map(outcome.notesKept.map((k) => [k.tempId, k.same]));
+      const noteColumn = outcome.reused.some((r) => planned.has(r.tempId));
+      const noteOf = (tempId: string): string => {
+        if (!planned.has(tempId)) return "-";
+        if (noted.has(tempId)) return "written";
+        const same = kept.get(tempId);
+        // Neither written nor kept: its line is under Failed.
+        return same === undefined ? "not written" : same ? "kept: same text" : KEPT_ANOTHER;
+      };
       // A thought the plan found in place may be a type or a tag, and is
       // marked as a read result marks one: what the plan made is ordinary.
       const row = (
@@ -152,6 +181,7 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
         how,
         t.name,
         t.thoughtId + (t.kind === undefined ? "" : kindMark(t.kind)),
+        ...(noteColumn ? [noteOf(t.tempId)] : []),
         ...(partial ? [t.tempId] : []),
       ];
       const rows = [
@@ -163,19 +193,32 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
         join([
           section(
             "Thoughts",
-            table(["Outcome", "Title", "Identifier", ...(partial ? ["tempId"] : [])], rows),
+            table(
+              [
+                "Outcome",
+                "Title",
+                "Identifier",
+                ...(noteColumn ? ["Note"] : []),
+                ...(partial ? ["tempId"] : []),
+              ],
+              rows,
+            ),
           ),
           section(
             "Also",
             bullet([
               `links created: ${outcome.linksCreated}`,
               `notes written: ${outcome.notesWritten}`,
+              ...(outcome.notesKept.length > 0
+                ? [`notes kept: ${outcome.notesKept.length}`]
+                : []),
               `tags attached: ${outcome.tagsAttached}`,
               ...(thoughts.some((t) => t.aliases !== undefined)
                 ? [`thoughts given aliases: ${outcome.aliasesWritten}`]
                 : []),
             ]),
           ),
+          section("Notes kept", notesKept(outcome.notesKept)),
           outcome.linksReused.length === 0
             ? null
             : section(
@@ -186,14 +229,7 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
             "Links not added",
             bullet(outcome.linksNotAdded.map((l) => `${l.from} -> ${l.to}: ${l.note}`)),
           ),
-          section(
-            "Failed",
-            bullet(
-              outcome.failures.map(
-                (f) => `${f.what}: ${f.reason}${f.unanswered ? UNANSWERED : ""}`,
-              ),
-            ),
-          ),
+          section("Failed", bullet(outcome.failures.map((f) => `${f.what}: ${whyFailed(f)}`))),
           section("Skipped", bullet(outcome.skipped.map((s) => `${s.what}: ${s.reason}`))),
           fenceWarnings.length === 0
             ? null
@@ -217,7 +253,11 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
             partial
               ? afterAFailure(
                   rows.length > 0,
-                  outcome.failures.some((f) => f.unanswered),
+                  // With no thought in the table only a thought's own line
+                  // can say that one may have been written.
+                  outcome.failures.some(
+                    (f) => f.unanswered && (rows.length > 0 || f.of === "thought"),
+                  ),
                 )
               : "The identifiers above work immediately. To show the result to the user, " +
                   "open the root thought with brain_activate. Refresh the semantic index " +
@@ -281,7 +321,72 @@ function listingNotRead(unread: IngestOutcome["listingUnread"]): string | null {
   );
 }
 
-/** Added to a create that got no answer, which is not a create that failed. */
-const UNANSWERED =
-  " — no answer came, so TheBrain may have created it all the same: before creating " +
-  "it again, look for it next to its parent with brain_get_thought";
+/** What the table says of a plan's note that a thought's own, different note kept out. */
+const KEPT_ANOTHER = "kept: another text";
+
+/**
+ * What follows a plan's note that was not written because the thought it
+ * was for has another. Null when no note was kept, and when each one kept
+ * is the plan's own text, as a second run of a plan finds it: the table
+ * says so, and there is nothing to do.
+ *
+ * It is no failure of the batch. The note is where it was, and what to do
+ * with the plan's text is for the caller to say: this names the two tools,
+ * and that one of them loses what the note held.
+ */
+function notesKept(kept: IngestOutcome["notesKept"]): string | null {
+  const other = kept.filter((k) => !k.same).length;
+  if (other === 0) return null;
+  return (
+    "A thought that existed keeps the note it has: a plan's note is written only where " +
+    `there is none, never over one. ${other} of the notes kept ${other === 1 ? "is" : "are"} ` +
+    `not the plan's text, marked "${KEPT_ANOTHER}" in the table, and the plan's text for ` +
+    `${other === 1 ? "that thought" : "those thoughts"} was written nowhere. To add it, ` +
+    "read the thought with brain_get_thought and call brain_append_note. brain_set_note " +
+    "replaces a note, and what it held is lost."
+  );
+}
+
+/**
+ * Why a write of the batch failed, as `describeError()` explains a call's
+ * own failure: the lines used to carry the API's bare words, so that its
+ * catch-all 403 read as a missing key and `Could not create thought.` as
+ * nothing at all. Without "Nothing was written", which is true of the write
+ * that was refused and would be read of the batch.
+ *
+ * A write that got no answer is not a write that failed, and its line says
+ * what to look at before it is sent again. So does the line of a note that
+ * was not written because the thought's own could not be read: the section
+ * under it names `brain_set_note` for a note that failed, and that would
+ * replace the note the batch left alone.
+ */
+function whyFailed(failure: IngestOutcome["failures"][number]): string {
+  const { error } = failure;
+  if (error instanceof IngestReadError) {
+    const why = `${error.context}: ${describeError(error.cause, false)}`;
+    return failure.of === "note" ? `${sentence(why)} ${NOTE_UNREAD}` : why;
+  }
+  const why = describeError(error, false);
+  return failure.unanswered ? `${sentence(why)} ${UNANSWERED[failure.of]}` : why;
+}
+
+const NOTE_UNREAD =
+  "Read the thought with brain_get_thought before writing this note: where it has one, " +
+  "add to it with brain_append_note.";
+
+const CARRIED_OUT =
+  "No answer came, so TheBrain may have carried it out all the same: read the thought " +
+  "with brain_get_thought before sending it again.";
+
+/** Added to a write that got no answer, by what it was to make. */
+const UNANSWERED: Record<IngestOutcome["failures"][number]["of"], string> = {
+  thought:
+    "No answer came, so TheBrain may have created it all the same: before creating it " +
+    "again, look for it next to its parent with brain_get_thought.",
+  note:
+    "No answer came, so TheBrain may have written it all the same: read the thought with " +
+    "brain_get_thought before writing its note again.",
+  tag: CARRIED_OUT,
+  aliases: CARRIED_OUT,
+  link: CARRIED_OUT,
+};

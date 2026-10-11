@@ -148,6 +148,16 @@ const generic403 = (): Response =>
     headers: { "content-type": "application/json" },
   });
 
+/** What `describeError()` adds to an identifier nobody has, */
+const NOBODY_HAS_IT =
+  " It may have been deleted, or be another brain's. Take identifiers from brain_search " +
+  "or brain_get_thought.";
+/** and its sentence for a 500 with the body "boom", by the request that met it. */
+const boomAt = (request: string): string =>
+  `TheBrain failed with a 500 (${request}): boom. The fault is inside the app, not in the ` +
+  "arguments of this call. A read is safe to repeat; before repeating a write, check what " +
+  "it left.";
+
 describe("brain_get_thought", () => {
   const view = async (activeThought: unknown): Promise<string> => {
     const { call } = await connect([
@@ -950,7 +960,7 @@ describe("brain_ingest when a thought fails in the middle of a batch", () => {
         "- tags attached: 0",
         "",
         "## Failed",
-        `- thought "Top" (top): Source Thought ${NOBODY} could not be located`,
+        `- thought "Top" (top): Source Thought ${NOBODY} could not be located.${NOBODY_HAS_IT}`,
         "",
         "## Skipped",
         '- thought "Mid" (mid): depends on "top", which was not created',
@@ -1005,9 +1015,10 @@ describe("brain_ingest when a thought fails in the middle of a batch", () => {
 
     expect(result.isError).toBe(true);
     expect(result.text).toContain(
-      '- thought "Mid" (mid): request exceeded 30000 ms — no answer came, so TheBrain may ' +
-        "have created it all the same: before creating it again, look for it next to its " +
-        "parent with brain_get_thought",
+      '- thought "Mid" (mid): request exceeded 30000 ms. Check that the TheBrain desktop ' +
+        "app is running and its local API is enabled. No answer came, so TheBrain may have " +
+        "created it all the same: before creating it again, look for it next to its parent " +
+        "with brain_get_thought.\n",
     );
     expect(result.text).toContain('- thought "Leaf" (leaf): depends on "mid", which was not created');
     expect(result.text).toContain(
@@ -1027,7 +1038,10 @@ describe("brain_ingest when a thought fails in the middle of a batch", () => {
 
     expect(result.isError).toBe(true);
     expect(result.text).toContain(`created  Top    ${TOP}  top`);
-    expect(result.text).toContain(`## Failed\n- note for "Top" (${TOP}): boom`);
+    expect(result.text).toContain(
+      `## Failed\n- note for "Top" (${TOP}): ` +
+        `${boomAt(`POST /api/notes/${BRAIN}/${TOP}/update`)}\n`,
+    );
     expect(result.text).not.toContain("## Skipped");
     expect(result.text).toContain("nothing is rolled back");
   });
@@ -1118,7 +1132,8 @@ describe("brain_ingest and a thought that may be there already", () => {
     expect(result.isError).toBe(true);
     expect(result.text).toContain(
       `## Failed\n- thought "RAG" (rag): ${PARENT} could not be read to look for a thought of ` +
-        "this name next to it, so nothing was created: boom",
+        "this name next to it, so nothing was created: " +
+        `${boomAt(`GET /api/thoughts/${BRAIN}/${PARENT}/graph`)}\n`,
     );
     expect(result.text).toContain('- thought "Chunking" (leaf): depends on "rag"');
     expect(sent("POST")).toEqual([]);
@@ -1194,6 +1209,383 @@ describe("brain_ingest and a thought that may be there already", () => {
     expect(description).toMatch(
       /under another relation is neither reused nor made again: it fails/,
     );
+  });
+});
+
+describe("brain_ingest and the note of a thought that was there", () => {
+  const HELD = "eeeeeeee-0000-4000-8000-000000000005";
+  const BARE = "eeeeeeee-0000-4000-8000-000000000055";
+  const QUIET = "eeeeeeee-0000-4000-8000-000000000555";
+  const HUMAN = "A person wrote this.";
+  const NEXT =
+    "## Next\nThe identifiers above work immediately. To show the result to the user, open " +
+    "the root thought with brain_activate. Refresh the semantic index with brain_index " +
+    "using action=sync.";
+  /**
+   * A brain where PARENT has three children: "Held", whose note is `held`,
+   * and "Bare" and "Quiet", which have none. As on the live API, the note of
+   * a thought with none is a 200 with the sentinel. `first` goes ahead.
+   */
+  const routes = (held: string = HUMAN, first: Route[] = []): Route[] => [
+    ...first,
+    ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
+    [
+      "GET /graph",
+      () => ({
+        ...graph(thought("parent", { id: PARENT })),
+        children: [
+          { id: HELD, name: "Held", kind: 1 },
+          { id: BARE, name: "Bare", kind: 1 },
+          { id: QUIET, name: "Quiet", kind: 1 },
+        ],
+      }),
+    ],
+    [
+      "GET /api/notes/",
+      (url) =>
+        url.pathname.endsWith(HELD)
+          ? { modificationDateTime: "2026-10-11T06:00:00.000001", markdown: held }
+          : noNote,
+    ],
+    ["GET /api/thoughts/", () => thought("parent", { id: PARENT, aliases: [] })],
+    ["POST /api/thoughts/", () => ({ id: THOUGHT })],
+    ["POST /api/notes/", () => 200],
+  ];
+  const plan = {
+    brainId: BRAIN,
+    thoughts: [
+      { tempId: "new", name: "New", parent: PARENT, note: "new text" },
+      { tempId: "held", name: "Held", parent: PARENT, note: "the plan's" },
+      { tempId: "bare", name: "Bare", parent: PARENT, note: "bare text" },
+      { tempId: "quiet", name: "Quiet", parent: PARENT },
+    ],
+  };
+  /** The notes written, by the thought each was sent to. */
+  const noteWrites = (calls: Array<{ method: string; path: string; body: unknown }>) =>
+    calls
+      .filter((c) => c.method === "POST" && c.path.includes("/api/notes/"))
+      .map((c) => [c.path.split("/").at(-2), (c.body as { markdown: string }).markdown])
+      .sort();
+
+  it("a note that is there is kept, one that is not is written, and the table says which of each", async () => {
+    // The plan's note used to be written over the one a thought had, on a
+    // first run that landed on it as on a second, with "notes written: 3"
+    // and no word that a note had been there.
+    const { call, calls } = await connect(routes());
+    const result = await call("brain_ingest", plan);
+
+    expect(result.isError).toBe(false);
+    expect(result.text).toBe(
+      [
+        "## Thoughts",
+        "Outcome  Title  Identifier                            Note",
+        "───────  ─────  ────────────────────────────────────  ──────────────────",
+        `created  New    ${THOUGHT}  written`,
+        `existed  Held   ${HELD}  kept: another text`,
+        `existed  Bare   ${BARE}  written`,
+        `existed  Quiet  ${QUIET}  -`,
+        "",
+        "## Also",
+        "- links created: 0",
+        "- notes written: 2",
+        "- notes kept: 1",
+        "- tags attached: 0",
+        "",
+        "## Notes kept",
+        "A thought that existed keeps the note it has: a plan's note is written only where " +
+          "there is none, never over one. 1 of the notes kept is not the plan's text, marked " +
+          '"kept: another text" in the table, and the plan\'s text for that thought was ' +
+          "written nowhere. To add it, read the thought with brain_get_thought and call " +
+          "brain_append_note. brain_set_note replaces a note, and what it held is lost.",
+        "",
+        NEXT,
+      ].join("\n"),
+    );
+    // Nothing was sent to the note that was there.
+    expect(noteWrites(calls)).toEqual([
+      [THOUGHT, "new text"],
+      [BARE, "bare text"],
+    ].sort());
+  });
+
+  it("a second run of a plan finds its own text there: kept, and nothing more to say or to do", async () => {
+    const { call, calls } = await connect(routes("the plan's\n"));
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [plan.thoughts[1]!, plan.thoughts[3]!],
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.text).toBe(
+      [
+        "## Thoughts",
+        "Outcome  Title  Identifier                            Note",
+        "───────  ─────  ────────────────────────────────────  ───────────────",
+        `existed  Held   ${HELD}  kept: same text`,
+        `existed  Quiet  ${QUIET}  -`,
+        "",
+        "## Also",
+        "- links created: 0",
+        "- notes written: 0",
+        "- notes kept: 1",
+        "- tags attached: 0",
+        "",
+        NEXT,
+      ].join("\n"),
+    );
+    expect(noteWrites(calls)).toEqual([]);
+  });
+
+  it("several notes kept that are not the plan's are counted, in the plural", async () => {
+    const { call } = await connect(
+      routes(HUMAN, [
+        ["GET /api/notes/", () => ({ modificationDateTime: "2026-10-11T06:00:00", markdown: HUMAN })],
+      ]),
+    );
+    const result = await call("brain_ingest", plan);
+
+    expect(result.text).toContain("- notes written: 1\n- notes kept: 2\n");
+    expect(result.text).toContain(
+      "2 of the notes kept are not the plan's text, marked \"kept: another text\" in the " +
+        "table, and the plan's text for those thoughts was written nowhere.",
+    );
+  });
+
+  it("with no note in the plan for a thought it found, the result has no such column and reads as it did", async () => {
+    const { call, calls } = await connect(routes());
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [plan.thoughts[0]!, { tempId: "held", name: "Held", parent: PARENT }],
+    });
+
+    expect(result.text).toBe(
+      [
+        "## Thoughts",
+        "Outcome  Title  Identifier",
+        "───────  ─────  ────────────────────────────────────",
+        `created  New    ${THOUGHT}`,
+        `existed  Held   ${HELD}`,
+        "",
+        "## Also",
+        "- links created: 0",
+        "- notes written: 1",
+        "- tags attached: 0",
+        "",
+        NEXT,
+      ].join("\n"),
+    );
+    // And no note is read for it.
+    expect(calls.filter((c) => c.method === "GET" && c.path.includes("/api/notes/"))).toEqual([]);
+  });
+
+  it("a note that cannot be read is not written over: the batch is an error, and its line says why", async () => {
+    // BRMCP-46's rule for brain_set_note: a failed read is not "no note".
+    const cases: Array<[() => Response, string]> = [
+      [
+        () => new Response(JSON.stringify("boom"), { status: 500 }),
+        boomAt(`GET /api/notes/${BRAIN}/${HELD}`),
+      ],
+      [
+        // What the read of a note answers for a moment after the note is deleted.
+        generic403,
+        `TheBrain answered 403 and named no cause (GET /api/notes/${BRAIN}/${HELD}). The ` +
+          "read of a note gets that answer for a moment after the note is deleted, and it " +
+          "says nothing of the thought or of its identifier.",
+      ],
+    ];
+    for (const [answer, why] of cases) {
+      const { call, calls } = await connect(
+        routes(HUMAN, [[`GET /api/notes/${BRAIN}/${HELD}`, answer]]),
+      );
+      const result = await call("brain_ingest", plan);
+
+      expect(result.isError, why).toBe(true);
+      expect(result.text, why).toContain(`existed  Held   ${HELD}  not written  held\n`);
+      expect(result.text, why).toContain(
+        `## Failed\n- note for "Held" (${HELD}): not written, because the note this thought ` +
+          `has could not be read and a note is not written over one that was not: ${why} ` +
+          "Read the thought with brain_get_thought before writing this note: where it has " +
+          "one, add to it with brain_append_note.\n",
+      );
+      expect(noteWrites(calls).map(([id]) => id), why).not.toContain(HELD);
+    }
+  });
+
+  it("a note write that got no answer says it may have been written, as a create does", async () => {
+    // It stood under Failed as a write that had been refused: only a create
+    // was told from one that got no answer.
+    const { call } = await connect(
+      routes(HUMAN, [
+        [
+          "POST /api/notes/",
+          () => {
+            throw new DOMException("timed out", "TimeoutError");
+          },
+        ],
+      ]),
+    );
+    const result = await call("brain_ingest", { brainId: BRAIN, thoughts: [plan.thoughts[0]!] });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(
+      `## Failed\n- note for "New" (${THOUGHT}): request exceeded 30000 ms. Check that the ` +
+        "TheBrain desktop app is running and its local API is enabled. No answer came, so " +
+        "TheBrain may have written it all the same: read the thought with brain_get_thought " +
+        "before writing its note again.\n",
+    );
+    expect(result.text).toContain(
+      "a listed thought's note, tags and aliases included, unless its line says it may have been. ",
+    );
+  });
+
+  it("the note argument says that a note that is there is kept", async () => {
+    const { client } = await connect([]);
+    const { tools } = await client.listTools();
+    const thoughts = tools.find((t) => t.name === "brain_ingest")!.inputSchema.properties![
+      "thoughts"
+    ] as { items: { properties: Record<string, { description?: string }> } };
+    expect(thoughts.items.properties["note"]!.description).toBe(
+      "Note in Markdown. Written to a new thought, and to one that existed only if it has " +
+        "no note: a note that is there is kept, and the result says so.",
+    );
+  });
+});
+
+describe("brain_ingest and two thoughts of one name next to a parent", () => {
+  const ONE = "eeeeeeee-0000-4000-8000-000000000005";
+  const TWO = "eeeeeeee-0000-4000-8000-000000000055";
+  const routes: Route[] = [
+    ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
+    [
+      "GET /graph",
+      () => ({
+        ...graph(thought("parent", { id: PARENT })),
+        children: [
+          { id: ONE, name: "RAG", kind: 1 },
+          { id: TWO, name: "RAG", kind: 1 },
+        ],
+      }),
+    ],
+    ["GET /api/thoughts/", () => thought("parent", { id: PARENT, aliases: [] })],
+    ["POST /api/thoughts/", () => ({ id: THOUGHT })],
+  ];
+  const plan = {
+    brainId: BRAIN,
+    thoughts: [
+      { tempId: "rag", name: "RAG", parent: PARENT },
+      { tempId: "leaf", name: "Chunking", parent: "rag" },
+    ],
+  };
+
+  it("neither is taken for the plan's thought: an error that names both, and nothing is created", async () => {
+    // The one the graph listed last used to be listed as "existed", with the
+    // plan's leaf under it, and the result said nothing of the other.
+    const { call, sent } = await connect(routes);
+    const result = await call("brain_ingest", plan);
+
+    expect(result.isError).toBe(true);
+    expect(result.text).not.toContain("## Thoughts");
+    expect(result.text).toContain(
+      [
+        "## Failed",
+        `- thought "RAG" (rag): ${PARENT} has 2 thoughts of this name as its child: ${ONE} ` +
+          `and ${TWO}. Which of them the plan means was not decided: none was taken, and no ` +
+          "further one was made. To use one of them, name its identifier where the plan has " +
+          '"rag"; to make another of that name, send this thought in a plan with deduplicate ' +
+          "set to false",
+        "",
+        "## Skipped",
+        '- thought "Chunking" (leaf): depends on "rag", which was not created',
+      ].join("\n"),
+    );
+    expect(sent("POST")).toEqual([]);
+  });
+
+  it("the argument says so", async () => {
+    const { client } = await connect([]);
+    const { tools } = await client.listTools();
+    const properties = tools.find((t) => t.name === "brain_ingest")!.inputSchema
+      .properties as Record<string, { description?: string }>;
+    expect(properties["deduplicate"]!.description).toMatch(
+      /it fails, with its identifier\. So do two of that name under the same relation\.$/,
+    );
+  });
+});
+
+describe("brain_ingest straight after another tool has written", () => {
+  /**
+   * A brain where the graph of PARENT is answered from a copy that lists a
+   * new thought 200 ms after it is made, as the API's does within 205. The
+   * graph is a `Response`, so nothing is added to it here.
+   */
+  const routes = (): Route[] => {
+    let madeAt = Number.POSITIVE_INFINITY;
+    const born = (): unknown[] =>
+      Date.now() - madeAt >= 200 ? [{ id: THOUGHT, name: "RAG", kind: 1 }] : [];
+    return [
+      ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
+      [
+        "GET /graph",
+        () =>
+          new Response(
+            JSON.stringify({ ...graph(thought("parent", { id: PARENT })), children: born() }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      ],
+      ["GET /api/thoughts/", () => thought("parent", { id: PARENT, aliases: [] })],
+      [
+        "POST /api/thoughts/",
+        () => {
+          madeAt = Math.min(madeAt, Date.now());
+          return { id: THOUGHT };
+        },
+      ],
+      ["PATCH /api/thoughts/", () => 200],
+    ];
+  };
+  const plan = { brainId: BRAIN, thoughts: [{ tempId: "rag", name: "RAG", parent: PARENT }] };
+  const creates = (calls: Array<{ method: string; path: string }>): number =>
+    calls.filter((c) => c.method === "POST" && c.path === `/api/thoughts/${BRAIN}`).length;
+
+  it("a plan sent at once after brain_create_thought finds the thought it made, and makes no second", async () => {
+    // brain_create_thought returns as soon as the thought is made, and the
+    // graph the plan looks in was the copy from before it: on a live TheBrain
+    // the thought was made again 8 times in 100 sent within 150 ms.
+    vi.useFakeTimers();
+    try {
+      const { call, calls } = await connect(routes());
+      const made = call("brain_create_thought", { brainId: BRAIN, name: "RAG", parentId: PARENT });
+      await vi.advanceTimersByTimeAsync(0);
+      expect((await made).isError).toBe(false);
+
+      const pending = call("brain_ingest", plan);
+      await vi.advanceTimersByTimeAsync(5000);
+      const result = await pending;
+
+      expect(result.isError).toBe(false);
+      expect(result.text).toContain(`existed  RAG    ${THOUGHT}`);
+      expect(creates(calls)).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a plan sent long after it waits for nothing", async () => {
+    vi.useFakeTimers();
+    try {
+      const { call, calls } = await connect(routes());
+      const made = call("brain_create_thought", { brainId: BRAIN, name: "RAG", parentId: PARENT });
+      await vi.advanceTimersByTimeAsync(300);
+      await made;
+
+      const before = Date.now();
+      const result = await call("brain_ingest", plan);
+      expect(Date.now()).toBe(before);
+      expect(result.text).toContain(`existed  RAG    ${THOUGHT}`);
+      expect(creates(calls)).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -4403,8 +4795,9 @@ describe("what brain_ingest says of a batch written in part", () => {
     expect(result.text).toContain(
       [
         "## Failed",
-        `- thought "Gone" (gone): Source Thought ${NOBODY} could not be located`,
-        `- note for "Lost" (${ID["Lost"]}): boom`,
+        `- thought "Gone" (gone): Source Thought ${NOBODY} could not be located.${NOBODY_HAS_IT}`,
+        `- note for "Lost" (${ID["Lost"]}): ` +
+          boomAt(`POST /api/notes/${BRAIN}/${ID["Lost"]}/update`),
       ].join("\n"),
     );
   });
@@ -4458,11 +4851,101 @@ describe("what brain_ingest says of a batch written in part", () => {
     expect(result.text).toContain(
       [
         "## Failed",
-        `- note for "Same" (${ID["Same"]}): boom`,
-        `- tag ${TAG} on "Same" (${ID["Same"]}): boom`,
-        `- aliases for "Held" (${HELD}): boom`,
+        `- note for "Same" (${ID["Same"]}): ` +
+          boomAt(`POST /api/notes/${BRAIN}/${ID["Same"]}/update`),
+        `- tag ${TAG} on "Same" (${ID["Same"]}): ${boomAt("POST /api/links/" + BRAIN)}`,
+        `- aliases for "Held" (${HELD}): ${boomAt(`PATCH /api/thoughts/${BRAIN}/${HELD}`)}`,
       ].join("\n"),
     );
+  });
+
+  it("a line under Failed explains the API's answer as a call's own failure is explained", async () => {
+    // The lines had the API's bare words: its catch-all 403 read as a key
+    // that was missing, and "Could not create thought." as nothing at all.
+    const answer = (body: string, status: number): Response =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+    const { call } = await connect(
+      routes([
+        [
+          "POST /api/thoughts/",
+          (_url, body) => {
+            const { name } = body as Create;
+            if (name === "Refused") return answer(GENERIC_403, 403);
+            if (name === "Bare") return answer("Could not create thought.", 400);
+            return { id: ID[name] ?? THOUGHT };
+          },
+        ],
+      ]),
+    );
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [
+        { tempId: "kept", name: "Kept", parent: PARENT },
+        { tempId: "refused", name: "Refused", parent: PARENT },
+        { tempId: "bare", name: "Bare", parent: PARENT },
+      ],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain(
+      [
+        "## Failed",
+        '- thought "Refused" (refused): TheBrain answered 403 and named no cause ' +
+          `(POST /api/thoughts/${BRAIN}). That is its answer when an identifier in the call ` +
+          `names nothing in this brain.${NOBODY_HAS_IT}`,
+        '- thought "Bare" (bare): Could not create thought. TheBrain named no cause ' +
+          `(POST /api/thoughts/${BRAIN}). It answers so when the parent named for the new ` +
+          "thought was deleted a moment ago, or the type named for it is no thought of this " +
+          "brain. Nothing was created. Read the parent and the type with brain_get_thought " +
+          "before sending the call again.",
+        "",
+        "## Next",
+      ].join("\n"),
+    );
+    // The API's own words for a key are not passed on for what is no key's failure.
+    expect(result.text).not.toContain("An API key is required");
+  });
+
+  it("a refusal ahead of a write is explained without its \"Nothing was written\", which the batch would be read by", async () => {
+    // A plan thought that lands on a type its parent holds as a child: what
+    // the plan puts under it is refused before the request, and the rest of
+    // the batch is written.
+    const TYPE = "eeeeeeee-0000-4000-8000-00000000000e";
+    const { call } = await connect(
+      routes(
+        [
+          [
+            `GET /api/thoughts/${BRAIN}/${TYPE}`,
+            (url) => {
+              const type = { ...thought("Pattern"), id: TYPE, kind: 2 };
+              return url.pathname.endsWith("/graph") ? graph(type) : type;
+            },
+          ],
+        ],
+        [{ id: TYPE, name: "Pattern", kind: 2 }],
+      ),
+    );
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [
+        { tempId: "p", name: "Pattern", parent: PARENT },
+        { tempId: "under", name: "Under", parent: "p" },
+        { tempId: "kept", name: "Kept", parent: PARENT },
+      ],
+    });
+
+    expect(result.isError).toBe(true);
+    const line = /^- thought "Under" \(under\): (.*)$/m.exec(result.text)?.[1];
+    expect(line).toBe(
+      `sourceThoughtId ${TYPE} cannot be a parent: it is the type "Pattern". A thought ` +
+        "linked under a type is given that type in place of the one it had. To set a type " +
+        "pass it as typeId to brain_update_thought or brain_create_thought; for a parent " +
+        "name an ordinary thought.",
+    );
+    expect(result.text).toContain(`created  Kept     ${ID["Kept"]}`);
   });
 
   it("two plan items for one thought that fails are one line under Failed, and the other is skipped", async () => {
@@ -4482,7 +4965,7 @@ describe("what brain_ingest says of a batch written in part", () => {
     expect(result.text).toContain(
       [
         "## Failed",
-        `- thought "Same" (x): Source Thought ${NOBODY} could not be located`,
+        `- thought "Same" (x): Source Thought ${NOBODY} could not be located.${NOBODY_HAS_IT}`,
         "",
         "## Skipped",
         '- thought "Same" (y): is the same thought as "x", which was not created',

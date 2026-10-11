@@ -270,6 +270,8 @@ Five properties, each of which took a bug to get right:
   below. An **in-flight promise registry** makes it hold *within* one batch:
   two identical names in the same level resolve to one thought rather than
   racing each other into two. (This was a real bug, caught by a unit test.)
+  A thought that is reused keeps the note it has, on every run: see *The note
+  of a thought that was there*.
 - **Honest about what it did not do.** If a requested jump is between a thought
   and its own parent, the API would turn the hierarchy link into that jump, so
   the link is left as it is. The report carries a "Links that already existed"
@@ -286,8 +288,9 @@ Five properties, each of which took a bug to get right:
 
 Deduplication is what makes a plan safe to send twice, and it rests on one
 read: the graph of the thought a plan item hangs on. That read went wrong in
-four ways, and there is one thought it cannot find. Each was measured on a
-live TheBrain 15.0.640 through the real handler.
+six ways, there is one thought it cannot find, and one case it does not
+guard. Each was measured on a live TheBrain 15.0.640 through the real
+handler.
 
 **It looked among `children` alone.** A graph lists a thought created as a
 child under `children`, one created as a parent under `parents`, and a jump
@@ -305,8 +308,8 @@ the other way round. Before, a namesake among the children was taken for the
 plan's parent or jump and listed as existing, with no word that the link was
 another kind (4 of 4); a namesake among the parents or jumps was not seen, and
 a second thought of the name was made (8 of 8). Neither is the server's call.
-Reused, the thought gets the plan's note in place of its own, and the plan's
-children. Made again, it is a duplicate that only a human can remove (§6). So
+Reused, the thought gets the plan's children, tags, aliases and links. Made
+again, it is a duplicate that only a human can remove (§6). So
 the thought fails, with what hangs on it skipped, and its line gives the
 namesake's identifier and both ways on: name that identifier in place of the
 `tempId`, or send the thought with `deduplicate: false`. Two plan items of one
@@ -347,8 +350,59 @@ what is still `unlisted`, and the result says to wait before sending the plan
 again. The wait is 60–150 ms on a batch of one thought and nothing measurable
 on one with notes and links: a plan of 20 thoughts and 10 links took 325–456
 ms where it had taken 432–482, in 80 requests where it had been 86, since a
-thought the batch created is no longer read. Two runs at the same moment are
-not guarded: neither sees what the other is about to make.
+thought the batch created is no longer read.
+
+**The other tools do not wait, so a plan that follows one does.**
+`brain_create_thought`, `brain_link` and `brain_update_thought` return as
+soon as their write is answered, and the graph a plan then looks in can be
+the copy from before it. Through the real handlers, with the parent's graph
+read beforehand, 20 times at each of 0, 25, 50, 100 and 150 ms after the
+write: a plan naming the thought `brain_create_thought` had just made created
+it again 8 times in 100, one naming a thought `brain_link` had just put under
+the parent 14 times, and one naming a thought by the name it had just been
+given 3 times. From 200 ms on, never (0 of 60). A create that got no answer
+is the same case from inside a batch: there is no identifier to wait for, and
+the plan sent again at once made the thought a second time, 6 times of 6.
+
+Each of those tools could wait as a batch does. That puts a batch's 60–150 ms
+and its three to six reads on every one of their calls, where
+`brain_create_thought` takes 30 ms at the median in three requests and
+`brain_link` 29 ms in four, and a rename would have to read the thought's
+parents to learn which graphs to wait for. So the wait is where the read is.
+Before `ingest()` first looks next to an existing thought, it waits until 300
+ms have passed since this process last had a write come back, answered or
+not: `TheBrainClient.sinceLastWrite()` keeps that one moment. It is a wait by
+the clock, because nothing in a graph tells a copy that is behind from one
+that is not, and 300 ms is half as long again as the longest lag measured. It
+costs no request, and no time unless a write came back less than 300 ms
+before, which a model's own turn never is: only calls sent in one turn meet
+it. After it, 0 of 360 were made twice, and the plan after an unanswered
+create found the thought 6 times of 6, in 310–315 ms. It knows this process's
+writes alone. A thought made in that moment in the app, or by another server,
+is still missed.
+
+**Two runs at the same moment are not guarded.** Two `brain_ingest` calls
+sent at once with a thought in common each made it, 6 times of 6: neither
+sees what the other is about to make. One process could queue its batches,
+which would cover the calls one client sends at once to one server. It would
+not cover two clients, which are two processes, nor a batch beside one of the
+other write tools, and nothing measured says that a client sends two plans at
+once. So there is no lock, and the skill says to send one plan at a time.
+
+**Two thoughts of one name in one list are neither of them the plan's.** A
+thought can have two children of one name, or two parents, or two jumps. The
+one the graph listed last was taken for the plan's, with the plan's children,
+tags and aliases, and the result said nothing of the other: 8 times of 8.
+Which is last is not the order they were made in (the first made was taken 5
+times, the second 3), and not the same from one read to the next: over ten
+reads of one graph the two changed places for 6 pairs of 14. A second run
+could land on the other one. So the thought fails as a namesake under another
+relation does, and for its reason: which of two thoughts a plan means is not
+the server's to say, and what a plan hangs on the wrong one stays there,
+since no tool moves a link. Its line gives both identifiers and the same two
+ways on. Listing both and taking one was the other way: the batch goes
+through, and the model reads of the second thought after the plan's branch
+hangs on the first.
 
 **A relation with no parent is refused**, by `planLevels()` before a plan's
 first write, by `brain_create_thought` before any request, and by
@@ -357,6 +411,103 @@ was created with no link and reported as created. The caller asked for a
 link and named nothing to link to; a thought with no parent is also the one
 a second run cannot find. All three relations are refused alike, `child`
 included.
+
+#### The note of a thought that was there
+
+A plan's note was written to every thought of the plan with the request that
+replaces a note. For a thought the batch creates that is all there is to it.
+A thought the plan found in place lost the note it had. Through the real
+handler on 15.0.640, six times each, and the same six of six on the second
+run of each plan:
+
+| The thought had | The plan had | The thought has after | The result said |
+|---|---|---|---|
+| a note | another text | the plan's text | "notes written: 1" |
+| a note | the same text | that text, written again | "notes written: 1" |
+| a note | no note | its note | "notes written: 0" |
+| no note | a note | the plan's text | "notes written: 1" |
+
+The first row is the same for a thought found as a parent or as a jump, six
+of six each. And a note written by a first run, then changed by hand, was the
+plan's text again after the second run, the change gone, six of six. No
+result said that a note had been there. The plan need not be a second run for
+it: one that names a thought which happens to exist under that parent lands
+on it the first time.
+
+**A note that is there is kept. A plan's note is written to a thought with
+no note, and never over one.** `ingest()` reads the note of each thought it
+found in place and has a note for, and writes only where that read answers
+that there is none. A thought with a note now has it after the run in every
+case above, the note changed by hand included, six of six; a thought with
+none is given the plan's; and the result says what became of each note.
+
+Two other ways were weighed.
+
+- *Replace when the plan asks for it*, by a flag on the thought or on the
+  plan. It keeps the old behaviour one argument away, in the tool that writes
+  fifteen notes a call, and a model that sets it to be sure erases what it
+  has not read. A replacement that is wanted has a tool that reads the note
+  first and reports what it erased, `brain_set_note`, and the result names
+  the thoughts to use it on. The cost is a second call for the caller who
+  does want to replace.
+- *Append the plan's text to the note.* Nothing is lost at once, but every
+  further run of the plan appends again. Checking first whether the note
+  holds the text stops working as soon as a person edits that part, and then
+  the plan's text is in their note twice. A repeat run must leave a note a
+  person changed alone, and this does not.
+
+So a plan's `note` means the note of a thought the plan makes, and the first
+note of one it finds. What it does not do is change a note, which is what
+the argument and the skill now say.
+
+**The result says, for each note, which it was.** When the plan has a note
+for a thought it found in place, the table of thoughts gains a `Note` column:
+`written`, `kept: same text`, `kept: another text`, `not written` for one
+whose line is under "Failed", and `-` where the plan has none. "Also" counts
+the notes kept. When one of them is another text, a "Notes kept" section says
+that the plan's text for that thought was written nowhere, and names
+`brain_append_note` for adding it and `brain_set_note` as the tool that
+replaces, with what that loses. It is no error: nothing failed, the note is
+where it was, and what to do with the plan's text is the caller's to decide
+(§3). A second run of a plan reads `kept: same text` down the column and has
+no such section. A plan that found nothing in place, or has no note for what
+it found, reads as it did, to the character.
+
+"The same text" sets aside line ends and the blanks around the text. A note
+reads back as it was written, 19 samples of Markdown out of 19, and a
+twentieth sent with `\r\n` came back with `\n` (contract test).
+
+**A note that could not be read is not written over.** A failed read is not
+the answer that there is no note, which is a 200 (*A read that fails inside a
+tool*, below). The note stands under "Failed" with the thought's identifier
+and why, the batch is an error, and the run that follows reads again. Its
+line says to read the thought before writing the note and to add to one it
+has: the report's last section names `brain_set_note` for a note that failed,
+which would replace the note the batch left alone.
+
+**Two plan items that are one thought write one note.** Their notes used to
+be sent at once. Now the first item's is written, and the second finds it
+there: `kept: same text` when the plan gave both the same, `kept: another
+text` when it did not.
+
+**What it costs.** One read for each thought found in place that the plan has
+a note for, and no write where the note is kept. A second run of a plan with
+twenty notes sends twenty reads where it sent twenty writes: no note is
+logged as changed, and the index has none to read again. A thought the batch
+made is not read, so a plan that lands on nothing sends what it sent.
+
+**The read is not taken too soon.** A first note reads back as no note for a
+moment after it is written, where the note had been read before (contract
+test). Polled, the read straight after the write was stale 33 times in 52 and
+had the text within 102 ms; read once after a pause, it was still stale 2
+times in 20 at 150 ms and never from 200 ms on (0 of 60). A note that
+replaced another read back at once. `ingest()` reads a note only after the
+wait that stands ahead of its first look, 300 ms from this process's last
+write, so a note this process has just written is seen.
+
+**Not guarded.** A note written between this read and this write, a few
+milliseconds apart, is written over. And a note is read once a batch: what
+another call writes while the batch runs is not seen.
 
 #### When a thought of the plan is not created
 
@@ -411,6 +562,27 @@ of it. The result says on that line that
 the thought may exist and where to look before creating it again. A thought
 with a parent is found by the next run, whatever its relation to it; one with
 no parent is not.
+
+**Nor is a note, a tag, an alias or a link that got no answer.** Only a
+create was marked. A note whose write had its answer dropped stood under
+"Failed" as `request exceeded 30000 ms`, like a write that was refused, with
+the text in the note. Every write of a batch is now told from a refusal in
+the same way, and its line says that it may have been carried out and to
+read the thought before sending it again. The plan sent again finds such a
+note there, and keeps it.
+
+**A line under "Failed" is explained as a call's own failure is.**
+`describeError()` (§5) is what a call that fails whole is answered with, and
+a batch's lines did not go through it. A create answered with the catch-all
+403 read "An API key is required via the Authorization header", `Could not
+create thought.` stood alone, and a 500 was its body and no more. `ingest()`
+now returns what was thrown beside its own words for it, and each line is
+what `describeError()` makes of that: the API's sentence where it names an
+identifier, "Source Thought … could not be located", then what it means and
+where to take identifiers from. Without "Nothing was written", which is true
+of the write refused and would be read of the batch. A read that failed ahead
+of a write keeps this module's sentence, with its cause explained the same
+way.
 
 **The report says each thing once, of the thought it is about.** Four places
 where it did not, each seen through the real handler on 15.0.640, three times
@@ -668,6 +840,14 @@ read it with `brain_get_thought` before sending the plan again. "Not listed
 yet" is a statement about TheBrain, and stays for a graph that answered. The
 batch is no error for it: what the plan asked for is written.
 
+A graph that failed is asked again after twice the pause each time, up to
+0.4 s, and one that answered a step later as before: 10 reads of a failing
+graph in the two seconds, where there were 76. And the two seconds are the
+whole of the wait, for every graph at once. A read still unanswered when they
+are over is given up on and its thought listed as not read. The batch used
+to wait for the read itself: with the answer held back 10 s it took 10 s to
+return a result whose writes were done, and a request's own limit is 30 s.
+
 **A failure that is about the call is explained as it was**: an identifier
 that is malformed, a `brainId` that is no brain, a key TheBrain rejects. The
 write after the read would be refused in the same words.
@@ -885,8 +1065,8 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     was missing from the read that followed 112 times in 120, and listed
     10–205 ms later; next to one whose graph nothing had read it was there at
     once, 60 of 60. The copy outlives a minute. `ingest()` looks for a thought
-    in its parent's graph, so it waits for the graphs to list what it made
-    (§4).
+    in its parent's graph, so it waits for the graphs to list what it made,
+    and before it looks, for this process's last write to be 0.3 s old (§4).
 21. **A tag is no parent either, an identifier of zeros is no link, and two
     thoughts share one link.** Three ways the tools reported a link that was
     not there, or not the one asked for, each measured through the real
@@ -1536,7 +1716,9 @@ Two testing habits worth stating, because both caught real bugs:
   once more: it returned a link in its own shape, with the `relation` it was
   written with, where the API stores a parent's link as a child's from the
   other end. The report compared that number with the one asked for, and no
-  test saw that it called every parent link a mismatch.
+  test saw that it called every parent link a mismatch. And it had no note to
+  read: a thought was set up without one, so no test saw that a plan's note
+  was written over the note of every thought the plan found.
 - **Measure before documenting.** Two corrections in this document — the
   `nameExact` latency and the q8 ranking claim — came from tests written against
   a claim that had been asserted rather than checked.

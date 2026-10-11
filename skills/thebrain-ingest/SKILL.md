@@ -69,6 +69,24 @@ Give the top thought of the plan a `parent`. Sent a second time, a plan finds
 each thought next to its parent and creates nothing twice; a thought with no
 parent it cannot find, and creates again with everything under it.
 
+Send one plan at a time, and wait for its result before the next. Two
+`brain_ingest` calls sent at once do not see each other's thoughts, and a
+thought both of them name is created twice.
+
+**A plan's note never replaces a note.** It is written to a thought the plan
+creates, and to an existing thought that has no note. When a plan thought
+lands on a thought that has one, that note stays, and the result's table
+gains a `Note` column:
+
+- `written`: your text is the thought's note.
+- `kept: same text`: the note already was your text, as on a repeat run.
+  Nothing to do.
+- `kept: another text`: the thought has a note of its own, and your text was
+  written nowhere. Read the thought with `brain_get_thought`, then add what
+  is new with `brain_append_note`. Replace a note with `brain_set_note` only
+  when the person asks for it.
+- `not written`: the write failed, and its line is under "Failed".
+
 **If the call comes back as an error**, read which kind before doing anything.
 
 An error that says nothing was written means the plan had a mistake that
@@ -88,17 +106,28 @@ the plan is in the brain, with its identifiers in the table.
   it was.
 - A note or a tag that failed on a thought from the table: write it with
   `brain_set_note` or `brain_tag`. Its line gives the thought's identifier.
+- A note line saying that the note the thought has could not be read: nothing
+  was written over it. Read the thought with `brain_get_thought`. If it has a
+  note, add to it with `brain_append_note`; if it has none, write yours with
+  `brain_set_note`.
 - A line under "Skipped" saying a thought is the same thought as another: the
   plan named one thought twice, and it was sent once. What stopped it is on
   the other item's line under "Failed".
 - A line saying that no answer came: the thought may exist all the same. Look
-  at its parent with `brain_get_thought` before creating it again.
+  at its parent with `brain_get_thought` before creating it again. A note, a
+  tag or a link with that line may have been written too: read the thought
+  before writing it again.
 - A line saying that the parent already has a thought of this name under
   another relation, with its identifier: the tool did not decide whether that
   is your thought. Read it with `brain_get_thought`. If it is the same concept,
   use its identifier in place of the tempId. If it is another concept, send
   your thought and what hangs on it in a plan with `deduplicate: false`, or
   give it a name that tells the two apart.
+- A line saying that the parent has two thoughts of this name, with both
+  identifiers: the tool did not pick one. Read both with `brain_get_thought`
+  and use the identifier of the one you mean in place of the tempId. If the
+  two are duplicates of each other, tell the person: which one stays is
+  theirs to decide.
 - Nothing is rolled back, and tidying up by deletion is not yours to decide.
   Tell the person what is in the brain and what is not.
 
