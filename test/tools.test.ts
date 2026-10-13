@@ -201,6 +201,30 @@ describe("brain_get_thought", () => {
     expect(await view(thought("RAG", { aliases: null }))).not.toContain("Aliases");
     expect(await view(thought("RAG"))).not.toContain("Aliases");
   });
+
+  it("the note is in its own section, and not among the attachments as well", async () => {
+    // The API lists a thought's note as one of its attachments, and it stood
+    // under Attachments as "(unnamed) — Notes.md", beside the Note section.
+    const notesFile = { id: LINK, name: null, location: "Notes.md", isNotes: true };
+    const page = { id: PARENT, name: "Spec", location: "https://example.com/spec", isNotes: false };
+    const read = async (attachments: unknown[]): Promise<string> => {
+      const { call } = await connect([
+        ["GET /graph", () => ({ ...graph(thought("RAG")), attachments })],
+        ["GET /api/notes", () => ({ modificationDateTime: "2026-10-10T12:00:00", markdown: "Body." })],
+      ]);
+      const result = await call("brain_get_thought", { brainId: BRAIN, thoughtId: THOUGHT });
+      expect(result.isError).toBe(false);
+      return result.text;
+    };
+    expect(await read([notesFile])).toBe(`# RAG\n${THOUGHT}\n\n## Note\nBody.`);
+    expect(await read([notesFile, page])).toBe(
+      `# RAG\n${THOUGHT}\n\n## Attachments\n- Spec — https://example.com/spec\n\n## Note\nBody.`,
+    );
+    // Without a note among them the list is what it was.
+    expect(await read([page, { id: BRAIN, name: null, location: null }])).toBe(
+      `# RAG\n${THOUGHT}\n\n## Attachments\n- Spec — https://example.com/spec\n- (unnamed)\n\n## Note\nBody.`,
+    );
+  });
 });
 
 describe("a thought's kind in what the read tools print", () => {
@@ -461,6 +485,66 @@ describe("a thought's kind in what the read tools print", () => {
           "─────  ──────────  ────────────────────────────────────  ───────\n" +
           `0.800  Embeddings  ${OTHER}`,
       );
+    });
+
+    it("with an index of types and tags alone, a default search says why it lists nothing", async () => {
+      // It answered with no text at all: not an error, and not a sentence.
+      const store = indexed();
+      store.remove([OTHER]);
+      const { call, calls } = await connect([reads()], searching(store));
+      const result = await call("brain_search", { brainId: BRAIN, query: "RAG" });
+      expect(result).toEqual({
+        isError: false,
+        text:
+          "## Found by meaning\n" +
+          "Nothing: the semantic index holds only types and tags, and a search leaves those " +
+          "out unless includeAuxiliary is true. A thought added since the index was last " +
+          "synced is not in it: call brain_index with action=sync.",
+      });
+      // Nothing was ranked, so there was no thought to read.
+      expect(calls).toEqual([]);
+
+      // Asked for, they are what it lists.
+      const asked = await call("brain_search", {
+        brainId: BRAIN,
+        query: "RAG",
+        includeAuxiliary: true,
+      });
+      expect(cells(asked.text)).toEqual([
+        ["Score", "Thought", "Identifier", "Kind", "Matched"],
+        ["1.000", "Pattern", TYPE, "type"],
+        ["0.600", "gotcha", TAG, "tag"],
+      ]);
+    });
+
+    it("no result of a search by vectors is an empty text, whatever was asked for", async () => {
+      // With types and tags asked for, an index of any rows ranks one: this
+      // takes an index emptied between the look at it and the scan.
+      const ranked = {
+        matches: [],
+        gone: [],
+        unverified: [],
+        mode: "vector",
+        degradedReason: null,
+        embedderFailure: null,
+        phrasings: 1,
+        notSearched: [],
+      };
+      const { call } = await connect([], () => ({
+        search: () => ({ find: async () => ranked }),
+      }));
+      const result = await call("brain_search", {
+        brainId: BRAIN,
+        query: "RAG",
+        includeAuxiliary: true,
+      });
+      expect(result).toEqual({
+        isError: false,
+        text:
+          "## Found by meaning\n" +
+          "Nothing: the semantic index had no row to rank. Call brain_index with " +
+          "action=status to see what it holds.",
+      });
     });
   });
 
@@ -2895,8 +2979,9 @@ describe("brain_search when TheBrain's search does not answer", () => {
       [
         "a connection that drops",
         droppedConnection,
-        `${NOTHING_SEARCHED}: could not reach http://localhost:11522 — is TheBrain running?` +
-          `${RUNNING} Each of the 2 phrasings failed this way.`,
+        // Not "could not reach … — is TheBrain running?": the request went out.
+        `${NOTHING_SEARCHED}: the connection to http://localhost:11522 failed before an ` +
+          `answer came (other side closed).${RUNNING} Each of the 2 phrasings failed this way.`,
       ],
       [
         "no answer in time",
@@ -3162,6 +3247,42 @@ describe("brain_search when TheBrain's search does not answer", () => {
           "package is not installed.",
       );
       expect(result.text).not.toContain("## Not searched");
+      // The reason is a sentence of its own, and ended "…without it.. Fell
+      // back". And the last sentence was "Build the index with the
+      // brain_index tool", of an index that is there to rank by.
+      expect(result.text.slice(result.text.indexOf("## Warning"))).toBe(
+        "## Warning\n" +
+          "Semantic search unavailable: semantic search is off: the @huggingface/transformers " +
+          "package is not installed. It weighs about 380 MB and downloads a further 113 MB " +
+          "model on first use, which is why it is not part of the base install. Substring " +
+          "name search is available without it. Fell back to substring name search, so " +
+          "recall is lower. The index is there and needs no rebuild: install the package " +
+          "with npm install -g @huggingface/transformers.",
+      );
+    });
+
+    it("with a package that is there and does not load, it says that and what the import failed by", async () => {
+      // Every failure of the import read "is not installed".
+      const broken: Embedder = {
+        ...embedder,
+        embedQuery: async () => {
+          throw new EmbedderUnavailableError(new Error("Cannot find module 'onnxruntime-node'."));
+        },
+      };
+      const { call } = await connect(
+        [["GET /api/search", answers], READS],
+        searching(indexed(), broken),
+      );
+      const result = await call("brain_search", { brainId: BRAIN, query: "RAG" });
+      expect(result.isError).toBe(false);
+      expect(result.text.slice(result.text.indexOf("## Warning"))).toBe(
+        "## Warning\n" +
+          "Semantic search unavailable: semantic search is off: the @huggingface/transformers " +
+          "package failed to load: Cannot find module 'onnxruntime-node'. Substring name " +
+          "search is available without it. Fell back to substring name search, so recall " +
+          "is lower. The index is there and needs no rebuild: install the package with " +
+          "npm install -g @huggingface/transformers.",
+      );
     });
 
     it("without the package, TheBrain not answering is the error and not the package", async () => {
@@ -3726,6 +3847,144 @@ describe("brain_index and a brain it has not been shown", () => {
       expect(said).toContain("- built: yes\n- usable: no\n- thoughts indexed: 1\n");
       expect(said).toContain(REBUILD);
     });
+
+    describe("without an embedder to rank by it", () => {
+      // "usable: yes" was said from the index alone, of an index every
+      // search fell back from: brain_search ranks by vectors only when the
+      // embedder can embed the query.
+      const INSTALL = "npm install -g @huggingface/transformers";
+      const FALLS_BACK =
+        " Until then brain_search answers from TheBrain's own search, and does not rank by " +
+        "this index.";
+      /** As the local embedder is without the package, or with one that does not load. */
+      const without = (why: () => EmbedderUnavailableError): Embedder => {
+        const fails = async (): Promise<never> => {
+          throw why();
+        };
+        return {
+          id: fake.id,
+          dimensions: fake.dimensions,
+          embedDocuments: fails,
+          embedQuery: fails,
+          isAvailable: async () => false,
+          whyUnavailable: async () => why(),
+        };
+      };
+      const absent = without(() => new EmbedderUnavailableError());
+      const built = (): VectorStore => {
+        const store = new VectorStore(":memory:");
+        store.setMeta({ ...meta, syncedThrough: "2026-10-10T20:00:00.000Z" });
+        store.upsert([vector]);
+        return store;
+      };
+      const BUILT = [
+        "thoughts indexed: 1",
+        "model: fake@v1#doc3",
+        "synced through: 2026-10-10T20:00:00.000Z",
+      ];
+
+      it("an index that is built is not called usable, and what to do is the package", async () => {
+        const { call, calls } = await connect(brain, indexing(built(), absent).context);
+        const result = await call("brain_index", { brainId: BRAIN, action: "status" });
+        expect(result).toEqual({
+          isError: false,
+          text:
+            `${status(["built: yes", "usable: no — the embeddings package is not installed", ...BUILT])}` +
+            `\n\n## What to do\nInstall the embeddings package: ${INSTALL}.${FALLS_BACK}`,
+        });
+        expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([BRAINS]);
+      });
+
+      it("status and brain_search say the same of that index", async () => {
+        const store = built();
+        const hit = {
+          sourceThought: thought("RAG"),
+          sourceLink: null,
+          searchResultType: 1,
+          isFromOtherBrain: false,
+          name: "RAG",
+          brainName: null,
+        };
+        const { call } = await connect(
+          [...brain, ["GET /api/search", () => [hit]], ["GET /api/thoughts/", () => thought("RAG")]],
+          (api) => ({
+            indexer: () => new SemanticIndexer(api, store, absent),
+            search: () => new SemanticSearch(api, store, absent),
+          }),
+        );
+        const said = await call("brain_index", { brainId: BRAIN, action: "status" });
+        expect(said.text).toContain("- usable: no — the embeddings package is not installed\n");
+        const found = await call("brain_search", { brainId: BRAIN, query: "RAG" });
+        expect(found.isError).toBe(false);
+        expect(found.text).toContain("## Found by substring\n");
+        // The one way on, in both: the package, and no rebuild.
+        for (const text of [said.text, found.text]) {
+          expect(text).toContain(INSTALL);
+          expect(text).not.toMatch(/action=rebuild|Build the index/);
+        }
+
+        // With an embedder that embeds, the same index is usable and ranked by.
+        const able = await connect(
+          [...brain, ["GET /api/thoughts/", () => thought("RAG")]],
+          (api) => ({
+            indexer: () => new SemanticIndexer(api, store, fake),
+            search: () => new SemanticSearch(api, store, fake),
+          }),
+        );
+        expect(
+          (await able.call("brain_index", { brainId: BRAIN, action: "status" })).text,
+        ).toBe(status(["built: yes", "usable: yes", ...BUILT]));
+        expect((await able.call("brain_search", { brainId: BRAIN, query: "RAG" })).text).toContain(
+          "## Found by meaning\n",
+        );
+      });
+
+      it("a package that is there and does not load is not told as one that is not installed", async () => {
+        // Any failure of the import read "is not installed", and its cause
+        // was printed nowhere.
+        const broken = without(
+          () => new EmbedderUnavailableError(new Error("Cannot find module 'onnxruntime-node'.")),
+        );
+        const store = built();
+        const { call } = await connect(brain, indexing(store, broken).context);
+        const said = await call("brain_index", { brainId: BRAIN, action: "status" });
+        expect(said).toEqual({
+          isError: false,
+          text:
+            `${status(["built: yes", "usable: no — the embeddings package does not load", ...BUILT])}` +
+            "\n\n## What to do\nThe embeddings package failed to load: Cannot find module " +
+            `'onnxruntime-node'. Install it again: ${INSTALL}.${FALLS_BACK}`,
+        });
+
+        // A run is refused by the same reason, in the embedder's own words.
+        const run = await call("brain_index", { brainId: BRAIN, action: "sync" });
+        expect(run).toEqual({
+          isError: true,
+          text:
+            "semantic search is off: the @huggingface/transformers package failed to load: " +
+            "Cannot find module 'onnxruntime-node'. Substring name search is available " +
+            "without it.",
+        });
+      });
+
+      it("with no index either, the package comes before the rebuild", async () => {
+        const { call } = await connect(
+          brain,
+          indexing(new VectorStore(":memory:"), absent).context,
+        );
+        const result = await call("brain_index", { brainId: BRAIN, action: "status" });
+        expect(result.text).toBe(
+          `${status([
+            "built: no",
+            "usable: no — the embeddings package is not installed",
+            "thoughts indexed: 0",
+            "model: —",
+            "synced through: —",
+          ])}\n\n## What to do\nInstall the embeddings package: ${INSTALL}. Then call this ` +
+            "tool with action=rebuild.",
+        );
+      });
+    });
   });
 
   describe("a rebuild", () => {
@@ -3737,6 +3996,32 @@ describe("brain_index and a brain it has not been shown", () => {
       expect(result.text).toContain("## Index built\n- thoughts encoded: 1\n");
       expect(`${calls[0]!.method} ${calls[0]!.path}`).toBe(BRAINS);
       expect(store.size()).toBe(1);
+    });
+
+    it("a sync with no finished index to refresh is titled for what it ran as: a build", async () => {
+      // The title went by the action asked for: "## Index refreshed", of a
+      // sync that had read the whole brain and built its index.
+      const fake = new FakeEmbedder();
+      const unfinished = new VectorStore(":memory:");
+      unfinished.setMeta({
+        brainId: BRAIN,
+        model: indexModelId(fake.id),
+        dimensions: fake.dimensions,
+        syncedThrough: null,
+      });
+      for (const store of [unfinished, new VectorStore(":memory:")]) {
+        const { call } = await connect(brain, indexing(store).context);
+        const result = await call("brain_index", { brainId: BRAIN, action: "sync" });
+        expect(result.isError).toBe(false);
+        expect(result.text).toMatch(
+          /^## Index built\n- thoughts encoded: 1\n- skipped unchanged: 0\n- removed from index: 0\n- took: /,
+        );
+        expect(store.getMeta()!.syncedThrough).not.toBeNull();
+
+        // And the next one, with an index to refresh, is a sync.
+        const again = await call("brain_index", { brainId: BRAIN, action: "sync" });
+        expect(again.text).toMatch(/^## Index refreshed\n- thoughts encoded: 0\n/);
+      }
     });
 
     it("says so when it gave a row its kind and encoded nothing, and only then", async () => {
@@ -4133,8 +4418,9 @@ describe("brain_index and a brain it has not been shown", () => {
           const result = await run(store, action, three(when(graphOf(B), dropped)));
           expect(result.isError).toBe(true);
           expect(result.text).toBe(
-            "could not reach http://localhost:11522 — is TheBrain running? Check that the " +
-              `TheBrain desktop app is running and its local API is enabled.${STOPPED(action)}`,
+            "the connection to http://localhost:11522 failed before an answer came (other " +
+              "side closed). Check that the TheBrain desktop app is running and its local " +
+              `API is enabled.${STOPPED(action)}`,
           );
           expect(store.getMeta()!.syncedThrough).toBe(THROUGH);
           expect(store.size()).toBe(3);
@@ -4187,15 +4473,19 @@ describe("brain_index and a brain it has not been shown", () => {
           expect(result.text).toMatch(/@huggingface\/transformers package is not installed/);
           expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([BRAINS]);
 
+          // Status knows what the run was refused for, and says that first:
+          // "Call this tool with action=rebuild" alone sent the model back
+          // to the call that had just failed.
           const after = await call("brain_index", { brainId: BRAIN, action: "status" });
           expect(after.text).toBe(
             `${status([
               "built: no",
-              "usable: no",
+              "usable: no — the embeddings package is not installed",
               "thoughts indexed: 0",
               "model: —",
               "synced through: —",
-            ])}\n\n${REBUILD}`,
+            ])}\n\n## What to do\nInstall the embeddings package: npm install -g ` +
+              "@huggingface/transformers. Then call this tool with action=rebuild.",
           );
         },
       );
@@ -6886,6 +7176,78 @@ describe("a call that fails after it has written", () => {
         expect(result.text, mark).toBe(`## Deleted\n"gotcha" ${mark} is gone from the brain`);
       }
     });
+
+    describe("the question a person is put", () => {
+      // It is what they agree to, so each line has to be what it says.
+      const ASK =
+        "This client cannot display a confirmation form. Ask the user yourself and, once " +
+        "they agree, repeat the call with confirm=true. Never do this without explicit " +
+        "human consent.";
+      /** The note as the API lists it among a thought's attachments, and one that is no note. */
+      const NOTES_FILE = {
+        id: "a77ac4ed-0000-4000-8000-00000000000a",
+        name: null,
+        location: "Notes.md",
+        isNotes: true,
+      };
+      const PAGE = {
+        id: "a77ac4ed-0000-4000-8000-00000000000b",
+        name: "Spec",
+        location: "https://example.com/spec",
+        isNotes: false,
+      };
+      const held = { modificationDateTime: "2026-10-10T12:00:00", markdown: "The original note." };
+      const under = [thought("Chunking", { id: PARENT }), thought("Ranking", { id: TAG_B })];
+      const link = (to: string) => ({ id: LINK, thoughtIdA: THOUGHT, thoughtIdB: to, relation: 1 });
+      const ask = async (kind: number, attachments: unknown[], note: unknown = held) => {
+        const shown = {
+          ...graph(thought("Retrieval", { kind })),
+          children: under,
+          links: under.map((t) => link(t.id)),
+          attachments,
+        };
+        const { call, calls } = await connect(
+          [["GET /graph", () => shown], ["GET /api/notes/", () => note], ...routes()],
+          deleting(() => undefined),
+        );
+        const asked = await call("brain_delete_thought", { brainId: BRAIN, thoughtId: THOUGHT });
+        expect(asked.isError).toBe(true);
+        expect(writes(calls)).toEqual([]);
+        return asked.text;
+      };
+      const question = (mark: string, lines: string[]): string =>
+        `Delete the thought "Retrieval"${mark}?\n\n${lines.map((l) => `- ${l}`).join("\n")}\n\n` +
+        `This cannot be undone.\n\n${ASK}`;
+
+      it.each([
+        [1, "", "children: 2"],
+        [2, " [type]", "thoughts of this type: 2"],
+        [4, " [tag]", "thoughts with this tag: 2"],
+      ] as const)(
+        "names what stands under a thought of kind %i as the read tools do",
+        async (kind, mark, underIt) => {
+          // "children: 2" of the thoughts of a type and of the thoughts a tag
+          // is on: a person agreed to the loss of children there were none of.
+          expect(await ask(kind, [NOTES_FILE, PAGE])).toBe(
+            question(mark, ["links: 2", underIt, "note: 18 characters", "attachments: 1"]),
+          );
+        },
+      );
+
+      it("counts the note once: on its own line, and not among the attachments", async () => {
+        // The API lists the note as an attachment, and it was counted there too.
+        expect(await ask(1, [NOTES_FILE])).toBe(
+          question("", ["links: 2", "children: 2", "note: 18 characters"]),
+        );
+        expect(await ask(1, [NOTES_FILE, PAGE, { ...PAGE, name: "Other" }])).toBe(
+          question("", ["links: 2", "children: 2", "note: 18 characters", "attachments: 2"]),
+        );
+        // With no note, the attachments are what they were.
+        expect(await ask(1, [PAGE], noNote)).toBe(
+          question("", ["links: 2", "children: 2", "attachments: 1"]),
+        );
+      });
+    });
   });
 });
 
@@ -7292,20 +7654,23 @@ describe("a read that fails inside a tool is not an answer that nothing is there
     "arguments of this call. A read is safe to repeat; before repeating a write, check what it left.";
   const APP = " Check that the TheBrain desktop app is running and its local API is enabled.";
   const NO_ANSWER = `request exceeded 30000 ms.${APP}`;
-  const UNREACHED = `could not reach http://localhost:11522 — is TheBrain running?${APP}`;
+  const DROPPED =
+    `the connection to http://localhost:11522 failed before an answer came (read ECONNRESET).${APP}`;
   const catchAll = (request: string): string =>
     `TheBrain answered 403 and named no cause (${request}). ` +
     (request.includes("/api/notes/")
       ? "The read of a note gets that answer for a moment after the note is deleted, and it " +
         "says nothing of the thought or of its identifier."
-      : "That is its answer when an identifier in the call names nothing in this brain. It " +
-        "may have been deleted, or be another brain's. Take identifiers from brain_search " +
-        "or brain_get_thought.");
+      : !request.includes(BRAIN)
+        ? "The request carries no identifier, so none is at fault."
+        : "That is its answer when an identifier in the call names nothing in this brain. It " +
+          "may have been deleted, or be another brain's. Take identifiers from brain_search " +
+          "or brain_get_thought.");
   /** Each way a read is failed here: its name, the answer, and what that reads as. */
   const FAILURES: Array<[string, () => unknown, (request: string) => string]> = [
     ["a 500", boom, failed500],
     ["no answer", noAnswer, () => NO_ANSWER],
-    ["a dropped connection", dropped, () => UNREACHED],
+    ["a dropped connection", dropped, () => DROPPED],
     ["the catch-all 403", generic403, catchAll],
   ];
 
@@ -8087,6 +8452,181 @@ describe("a thought's name: none, white space alone, too long, and one that does
         ["created", "Top", THOUGHT],
         ["created", "line break", THOUGHT],
       ]);
+    });
+  });
+
+  describe("where else a result quotes a name that does not show", () => {
+    // These printed the name as it is: `thought "" (t1)`, `it is the type ""`.
+    const MARK = "(no visible character: U+FEFF)";
+    /** The read of a thought: each of these is there, of the kind and under the name given. */
+    const reads = (named: Record<string, { name: string; kind: number }>): Route => [
+      "GET /api/thoughts/",
+      (url) => {
+        const id = url.pathname.split("/").pop()!;
+        return thought("RAG", { id, aliases: [], ...named[id] });
+      },
+    ];
+    const boom = (): Response =>
+      new Response(JSON.stringify("boom"), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      });
+
+    it("brain_list: the active thought", async () => {
+      const { call } = await connect(
+        [
+          [
+            "GET /api/app/state",
+            () => ({ currentBrainId: BRAIN, activeThoughtId: THOUGHT, activeThoughtName: "\u200b" }),
+          ],
+          ["GET /api/brains", () => [{ id: BRAIN, name: "Work" }]],
+        ],
+        () => ({ indexer: () => ({ status: () => ({ compatible: false, size: 0 }) }) }),
+      );
+      const result = await call("brain_list", {});
+      expect(result.isError).toBe(false);
+      expect(result.text.slice(result.text.indexOf("## Active"))).toBe(
+        `## Active thought\n${UNSEEN} (${THOUGHT})`,
+      );
+    });
+
+    it("a typeId that is no type, and a tag that is no tag: the refusal names what it is", async () => {
+      const routes: Route[] = [
+        reads({ [TYPE]: { name: "\u200b", kind: 1 }, [TAG]: { name: "\ufeff", kind: 2 } }),
+      ];
+      const typed = await connect(routes);
+      expect(
+        await typed.call("brain_update_thought", { brainId: BRAIN, thoughtId: THOUGHT, typeId: TYPE }),
+      ).toEqual({
+        isError: true,
+        text:
+          `typeId ${TYPE} is not a type: it is the thought "${UNSEEN}". Nothing was written. ` +
+          "Take type identifiers from brain_list_types_and_tags.",
+      });
+      const tagged = await connect(routes);
+      expect(
+        await tagged.call("brain_tag", { brainId: BRAIN, thoughtId: THOUGHT, add: [TAG] }),
+      ).toEqual({
+        isError: true,
+        text:
+          `tagId ${TAG} is not a tag: it is the type "${MARK}". Nothing was written. ` +
+          "Take tag identifiers from brain_list_types_and_tags.",
+      });
+      expect([...typed.calls, ...tagged.calls].filter((c) => c.method !== "GET")).toEqual([]);
+    });
+
+    it("a type and a tag named as a parent: the refusal names which", async () => {
+      const { call, calls } = await connect([
+        reads({ [TYPE]: { name: "\u200b", kind: 2 }, [TAG]: { name: "\ufeff", kind: 4 } }),
+      ]);
+      const under = (id: string) =>
+        call("brain_link", { brainId: BRAIN, fromId: id, toId: THOUGHT, relation: "child" });
+      expect((await under(TYPE)).text).toMatch(
+        new RegExp(`^fromId ${TYPE} cannot be a parent: it is the type "\\(no visible character: U\\+200B\\)"\\. Nothing was written\\. `),
+      );
+      expect((await under(TAG)).text).toMatch(
+        new RegExp(`^fromId ${TAG} cannot be a parent: it is the tag "\\(no visible character: U\\+FEFF\\)"\\. Nothing was written\\. `),
+      );
+      expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+    });
+
+    it("brain_ingest: a thought's line under Failed and under Skipped", async () => {
+      const { call } = await connect([
+        ["POST /api/thoughts/", boom],
+        ...brainRoutes({ aliases: true }),
+      ]);
+      const result = await call("brain_ingest", {
+        brainId: BRAIN,
+        thoughts: [
+          { tempId: "top", name: "\u200b", parent: PARENT },
+          { tempId: "t1", name: "\ufeff", parent: "top" },
+          { tempId: "t2", name: "Seen", parent: "top" },
+        ],
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain(`## Failed\n- thought "${UNSEEN}" (top): TheBrain failed with a 500 `);
+      expect(result.text).toContain(
+        `## Skipped\n- thought "${MARK}" (t1): depends on "top", which was not created\n` +
+          '- thought "Seen" (t2): depends on "top", which was not created\n',
+      );
+    });
+
+    const plan = (extra: Record<string, unknown>) => ({
+      brainId: BRAIN,
+      thoughts: [{ tempId: "top", name: "\u200b", parent: PARENT, ...extra }],
+    });
+
+    it("brain_ingest: the lines for its note, its tag and its aliases", async () => {
+      const failing = await connect([
+        ["POST /api/notes/", boom],
+        ["POST /api/links/", boom],
+        ["PATCH /api/thoughts/", boom],
+        ["GET /api/notes/", () => noNote],
+        // Found in place: a plan adds aliases to a thought that was there.
+        ["GET /graph", () => ({ ...graph(thought("parent")), children: [thought("\u200b")] })],
+        reads({ [TAG]: { name: "gotcha", kind: 4 } }),
+        ...brainRoutes({ aliases: true }),
+      ]);
+      const failed = await failing.call(
+        "brain_ingest",
+        plan({ note: "Body.", tagIds: [TAG], aliases: ["Alias"] }),
+      );
+      expect(failed.isError).toBe(true);
+      const lines = failed.text.split("\n").filter((l) => l.startsWith("- ") && l.includes(": TheBrain failed"));
+      expect(lines.map((l) => l.slice(0, l.indexOf(": TheBrain failed")))).toEqual([
+        `- note for "${UNSEEN}" (${THOUGHT})`,
+        `- tag ${TAG} on "${UNSEEN}" (${THOUGHT})`,
+        `- aliases for "${UNSEEN}" (${THOUGHT})`,
+      ]);
+    });
+
+    it("brain_ingest: the warning about a note with a fenced block", async () => {
+      const written = await connect([
+        ["POST /api/notes/", () => 200],
+        ["GET /api/notes/", () => noNote],
+        ...brainRoutes({ aliases: true }),
+      ]);
+      const warned = await written.call("brain_ingest", plan({ note: "```\ncode\n```\n" }));
+      expect(warned.isError).toBe(false);
+      expect(warned.text).toContain(
+        "## Warning\nTheBrain drops the closing ``` on save, so notes with fenced code blocks " +
+          `will be corrupted: ${UNSEEN}. Prefer indenting code by four spaces.`,
+      );
+    });
+
+    it("brain_index: a thought it could not read", async () => {
+      const embedder: Embedder = {
+        id: "fake@v1",
+        dimensions: 2,
+        embedDocuments: async (texts) => texts.map(() => new Float32Array([1, 0])),
+        embedQuery: async () => new Float32Array([1, 0]),
+      };
+      const store = new VectorStore(":memory:");
+      const { call } = await connect(
+        [
+          ["GET /modifications", () => []],
+          ["GET /api/brains/", () => ({ id: BRAIN, name: "Test brain", homeThoughtId: THOUGHT })],
+          [
+            "GET /graph",
+            () => ({ ...graph(thought("\u200b")), attachments: [{ id: LINK, isNotes: true, type: 1 }] }),
+          ],
+          ["GET /api/notes/", boom],
+        ],
+        (api) => ({ indexer: () => new SemanticIndexer(api, store, embedder) }),
+      );
+      const result = await call("brain_index", { brainId: BRAIN, action: "rebuild" });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain(`\n- ${UNSEEN} — ${THOUGHT}\n`);
+    });
+
+    it("a name that shows is quoted as it was, to the character", async () => {
+      const { call } = await connect([reads({ [TYPE]: { name: "Pattern", kind: 1 } })]);
+      expect(
+        (await call("brain_update_thought", { brainId: BRAIN, thoughtId: THOUGHT, typeId: TYPE })).text,
+      ).toBe(
+        `typeId ${TYPE} is not a type: it is the thought "Pattern". Nothing was written. ` +
+          "Take type identifiers from brain_list_types_and_tags.",
+      );
     });
   });
 

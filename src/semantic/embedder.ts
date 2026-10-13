@@ -25,21 +25,43 @@ export interface Embedder {
    * brain to find out. An embedder without the method is taken to be able to.
    */
   isAvailable?(): Promise<boolean>;
+  /**
+   * Why it cannot, asked once `isAvailable` has answered that it cannot. An
+   * embedder without the method is taken to lack the package.
+   */
+  whyUnavailable?(): Promise<EmbedderUnavailableError | null>;
 }
 
-/** The optional dependency is missing. Tools turn this into guidance. */
+/**
+ * The optional dependency cannot be used: it is missing, or its import failed
+ * some other way. Tools turn this into guidance.
+ *
+ * The two are told apart by `cause`, the import's own failure. Every failure
+ * used to read "is not installed", with the cause printed nowhere: a broken
+ * install read as an absent one.
+ */
 export class EmbedderUnavailableError extends Error {
   readonly installCommand = "npm install -g @huggingface/transformers";
+  /**
+   * What the import failed with, when that is anything but the package not
+   * being there. Null when it is not installed, and when no cause was given.
+   */
+  readonly loadFailure: string | null;
 
   constructor(cause?: unknown) {
+    const loadFailure = cause === undefined || isAbsent(cause) ? null : inItsWords(cause);
     super(
-      "semantic search is off: the @huggingface/transformers package is not " +
-        "installed. It weighs about 380 MB and downloads a further 113 MB model " +
-        "on first use, which is why it is not part of the base install. " +
-        "Substring name search is available without it.",
+      loadFailure === null
+        ? "semantic search is off: the @huggingface/transformers package is not " +
+            "installed. It weighs about 380 MB and downloads a further 113 MB model " +
+            "on first use, which is why it is not part of the base install. " +
+            "Substring name search is available without it."
+        : "semantic search is off: the @huggingface/transformers package failed to " +
+            `load: ${loadFailure}. Substring name search is available without it.`,
       cause !== undefined ? { cause } : undefined,
     );
     this.name = "EmbedderUnavailableError";
+    this.loadFailure = loadFailure;
   }
 }
 
@@ -88,6 +110,30 @@ async function loadTransformers(): Promise<TransformersModule> {
   return (await import(TRANSFORMERS)) as TransformersModule;
 }
 
+/**
+ * What an import says when the package itself is not there. Node: `Cannot
+ * find package '@huggingface/transformers' imported from …`, and `Cannot find
+ * module` to a `require`. Vite, which the tests run under and a bundle may be
+ * made by: `Could not resolve "@huggingface/transformers" imported by …`.
+ *
+ * By the name at the start, not by `ERR_MODULE_NOT_FOUND`: Node has the same
+ * code for a package of its own that the package does not find, which names
+ * that one and is a broken install, and Vite's failure has no code.
+ */
+const NOT_THERE = new RegExp(
+  `^(Cannot find (package|module)|Could not resolve) ['"]${TRANSFORMERS}['"]`,
+);
+
+function isAbsent(cause: unknown): boolean {
+  return cause instanceof Error && NOT_THERE.test(cause.message);
+}
+
+/** A failure in its own words, without the period some of them end with. */
+function inItsWords(cause: unknown): string {
+  const said = cause instanceof Error ? cause.message : String(cause);
+  return said.trim().replace(/\.+$/, "") || "no reason given";
+}
+
 export class LocalEmbedder implements Embedder {
   readonly id: string;
   readonly dimensions: number;
@@ -132,7 +178,12 @@ export class LocalEmbedder implements Embedder {
    * model, which may still be to download: that shows on first use.
    */
   async isAvailable(): Promise<boolean> {
-    return this.#pipeline !== null || (await isLocalEmbedderAvailable());
+    return (await this.whyUnavailable()) === null;
+  }
+
+  /** Null when the package loads, and otherwise whether it is missing or did not load. */
+  async whyUnavailable(): Promise<EmbedderUnavailableError | null> {
+    return this.#pipeline !== null ? null : localEmbedderFailure();
   }
 
   /** Warms the model up so the first search does not wait for the download. */
@@ -184,10 +235,15 @@ async function run(extract: FeatureExtractor, text: string): Promise<Float32Arra
  * yet, which surfaces on first use.
  */
 export async function isLocalEmbedderAvailable(): Promise<boolean> {
+  return (await localEmbedderFailure()) === null;
+}
+
+/** The same check, with what the import failed by: null when the package loads. */
+async function localEmbedderFailure(): Promise<EmbedderUnavailableError | null> {
   try {
     await loadTransformers();
-    return true;
-  } catch {
-    return false;
+    return null;
+  } catch (cause) {
+    return new EmbedderUnavailableError(cause);
   }
 }

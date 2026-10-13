@@ -2247,6 +2247,29 @@ describe("a read that fails while the index is built or refreshed", () => {
       store.close();
     });
 
+    it("the embedder's own reason is what a run is refused with, where it gives one", async () => {
+      // A package that is there and does not load was refused as one that
+      // is not installed: the run asked whether, and not why.
+      const broken = new EmbedderUnavailableError(new Error("Cannot find module 'onnxruntime-node'"));
+      class BrokenPackage extends AbsentPackage {
+        async whyUnavailable(): Promise<EmbedderUnavailableError | null> {
+          return broken;
+        }
+      }
+      for (const action of ["rebuild", "sync"] as const) {
+        const { calls, store, indexer } = three(new BrokenPackage());
+        await expect(indexer[action](BRAIN)).rejects.toBe(broken);
+        expect(await indexer.cannotEmbed()).toBe(broken);
+        expect(calls).toMatchObject({ modifications: 0, graph: 0, notes: 0 });
+        store.close();
+      }
+      // One that says only that it cannot is taken to lack the package.
+      const { store, indexer } = three(new AbsentPackage());
+      expect(await indexer.cannotEmbed()).toMatchObject({ loadFailure: null });
+      expect(await three().indexer.cannotEmbed()).toBeNull();
+      store.close();
+    });
+
     it("one that says it can, or says nothing, is taken at its word", async () => {
       class Present extends FakeEmbedder {
         async isAvailable(): Promise<boolean> {

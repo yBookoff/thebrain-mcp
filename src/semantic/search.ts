@@ -100,6 +100,12 @@ export interface SearchOutcome {
   mode: "vector" | "keyword";
   /** Why it degraded — surfaced to the user. */
   degradedReason: string | null;
+  /**
+   * The embedder's failure, when that is why: the index was one to rank by,
+   * so the way on is the package and not a rebuild. Null when the search did
+   * not degrade, and when it did for want of an index.
+   */
+  embedderFailure: EmbedderUnavailableError | null;
   /** How many phrasings there were: the concept and its variants, less duplicates and blanks. */
   phrasings: number;
   /**
@@ -217,12 +223,13 @@ export class SemanticSearch {
           matches: await this.#vector(concept, phrasings, limit, excludeKinds),
           mode: "vector",
           degradedReason: null,
+          embedderFailure: null,
           phrasings: phrasings.length,
           notSearched: [],
         };
       } catch (error) {
         if (!(error instanceof EmbedderUnavailableError)) throw error;
-        return this.#keyword(brainId, phrasings, options, limit, error.message);
+        return this.#keyword(brainId, phrasings, options, limit, error.message, error);
       }
     }
 
@@ -230,7 +237,7 @@ export class SemanticSearch {
       this.store.size() === 0
         ? "the semantic index has not been built yet — run a rebuild"
         : "the index was built with a different model or document format and is unusable — rebuild it";
-    return this.#keyword(brainId, phrasings, options, limit, reason);
+    return this.#keyword(brainId, phrasings, options, limit, reason, null);
   }
 
   /**
@@ -285,6 +292,7 @@ export class SemanticSearch {
     options: SearchOptions,
     limit: number,
     reason: string,
+    embedderFailure: EmbedderUnavailableError | null,
   ): Promise<Ranked> {
     type Answered = { variant: string; hits: SearchHit[] };
     const asked = await mapWithConcurrency<string, Answered | PhrasingFailure>(
@@ -346,6 +354,7 @@ export class SemanticSearch {
       matches,
       mode: "keyword",
       degradedReason: reason,
+      embedderFailure,
       phrasings: phrasings.length,
       notSearched,
     };

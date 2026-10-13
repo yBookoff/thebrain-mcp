@@ -6,7 +6,7 @@
  * call; the latter is a protocol failure it never gets to read.
  */
 
-import { TheBrainError, codePoints } from "../api/index.js";
+import { TheBrainError, shownName } from "../api/index.js";
 import { ThoughtKind } from "../api/types.js";
 import { EmbedderUnavailableError } from "../semantic/embedder.js";
 
@@ -107,6 +107,15 @@ export function describeError(error: unknown, alone = true): string {
             "nothing of the thought or of its identifier."
           );
         }
+        // Nor of an identifier, when the request carries none: the app's
+        // state and the list of brains were told that one of the call's
+        // names nothing in this brain.
+        if (error.path !== undefined && !CARRIES_ID.test(error.path)) {
+          return (
+            `TheBrain answered 403 and named no cause${requestOf(error)}. The request ` +
+            "carries no identifier, so none is at fault."
+          );
+        }
         // The API's catch-all. It says nothing of access, and neither does this.
         return (
           `TheBrain answered 403 and named no cause${requestOf(error)}. That is its answer ` +
@@ -149,6 +158,9 @@ export const TAKE_IDENTIFIERS = "Take identifiers from brain_search or brain_get
 
 /** The path of a thought or a link addressed by its own identifier: brain, then it. */
 const ADDRESSED = /^\/api\/(thought|link)s\/[^/]+\/([0-9a-f-]{36})$/i;
+
+/** A path with an identifier in it, of a brain if of nothing else. */
+const CARRIES_ID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
 /** The path a note is read from: brain, then the thought it is the note of. */
 const NOTE_PATH = /^\/api\/notes\/[^/]+\/[0-9a-f-]{36}$/i;
@@ -230,28 +242,12 @@ export function join(parts: ReadonlyArray<string | null>): string {
   return parts.filter((p): p is string => p !== null).join("\n\n");
 }
 
-/** A text with nothing in it that shows: white space, what is ignored in drawing text, controls. */
-const UNSEEN = /^[\p{White_Space}\p{Default_Ignorable_Code_Point}\p{Cc}]*$/u;
-
 /**
- * A thought's name as a result prints it. `(unnamed)` for none, and for a
- * name with no character that shows its code points, `(no visible character:
- * U+200B)`: the API stores such a name as it stores any other, and printed
- * as it is it read as no name at all, with nothing to say why.
- *
- * "Shows" is not judged here. A name is spelled out when every code point of
- * it has one of three Unicode properties: `White_Space`,
- * `Default_Ignorable_Code_Point`, or the general category `Cc`. That takes
- * in a zero width space, a byte order mark, a soft hyphen, a Hangul filler
- * and a variation selector on its own. It leaves out what is blank to the
- * eye and a symbol by its properties, the braille pattern blank (U+2800)
- * for one: that prints as it is, as it did. Spelled out, a name of up to
- * eight code points loses nothing: the code points are the name.
+ * A thought's name as a result prints it: `(unnamed)` for none, and the code
+ * points of one with no character that shows. It is the API layer's, where a
+ * refusal that quotes a name is worded, and is passed on here for the tools.
  */
-export function shownName(name: string | null | undefined): string {
-  if (name === null || name === undefined || name === "") return "(unnamed)";
-  return UNSEEN.test(name) ? `(no visible character: ${codePoints(name)})` : name;
-}
+export { shownName };
 
 /**
  * What a thought is when it is not an ordinary one: `type`, `tag`, or the
@@ -276,4 +272,18 @@ export function kindLabel(kind: number): string | null {
 export function kindMark(kind: number): string {
   const label = kindLabel(kind);
   return label === null ? "" : ` [${label}]`;
+}
+
+/**
+ * The title for what a graph lists as `children`. Under a type those are the
+ * thoughts of that type, and under a tag the thoughts the tag is on: a link
+ * with a type or a tag above is the type's or the tag's, never a parent's
+ * (docs/api-map.md, L23 and L24). "Children" there sends a model to add one,
+ * which the write tools refuse (`not_a_parent`, `tag_as_parent`). Any other
+ * thought keeps the title it had.
+ */
+export function childrenTitle(kind: number): string {
+  if (kind === ThoughtKind.Type) return "Thoughts of this type";
+  if (kind === ThoughtKind.Tag) return "Thoughts with this tag";
+  return "Children";
 }

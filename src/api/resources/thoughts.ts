@@ -137,6 +137,33 @@ export function codePoints(text: string): string {
   return more > 0 ? `${shown} and ${more} more` : shown;
 }
 
+/** A text with nothing in it that shows: white space, what is ignored in drawing text, controls. */
+const UNSEEN = /^[\p{White_Space}\p{Default_Ignorable_Code_Point}\p{Cc}]*$/u;
+
+/**
+ * A thought's name as a result prints it. `(unnamed)` for none, and for a
+ * name with no character that shows its code points, `(no visible character:
+ * U+200B)`: the API stores such a name as it stores any other, and printed
+ * as it is it read as no name at all, with nothing to say why.
+ *
+ * "Shows" is not judged here. A name is spelled out when every code point of
+ * it has one of three Unicode properties: `White_Space`,
+ * `Default_Ignorable_Code_Point`, or the general category `Cc`. That takes
+ * in a zero width space, a byte order mark, a soft hyphen, a Hangul filler
+ * and a variation selector on its own. It leaves out what is blank to the
+ * eye and a symbol by its properties, the braille pattern blank (U+2800)
+ * for one: that prints as it is, as it did. Spelled out, a name of up to
+ * eight code points loses nothing: the code points are the name.
+ *
+ * It is on this side of the tools, which print most names, because a
+ * refusal that quotes a name is worded here (`requireKind`), and a batch's
+ * line for a thought one layer up.
+ */
+export function shownName(name: string | null | undefined): string {
+  if (name === null || name === undefined || name === "") return "(unnamed)";
+  return UNSEEN.test(name) ? `(no visible character: ${codePoints(name)})` : name;
+}
+
 /** What a new thought can be to its source: the API's own list has one more. */
 const RELATIONS: readonly number[] = Object.values(Relation);
 
@@ -374,7 +401,8 @@ export class ThoughtsResource {
     const id = createdId(
       created,
       path,
-      `TheBrain answered 200 with an identifier of zeros for the thought "${input.name}", so ` +
+      `TheBrain answered 200 with an identifier of zeros for the thought ` +
+        `"${shownName(input.name)}", so ` +
         "there is nothing to address it by. For a link that answer means none was made; for a " +
         "thought it has not been seen, so look for the thought before creating it again",
     );

@@ -1584,6 +1584,13 @@ describe("a link the API does not make", () => {
       kind: "zero_id",
       message: expect.stringMatching(/identifier of zeros for the thought "RAG"/),
     });
+    // A name with no character that shows is spelled out, not quoted as `""`.
+    await expect(api.thoughts.create(BRAIN, { name: "\u200b" })).rejects.toMatchObject({
+      kind: "zero_id",
+      message: expect.stringMatching(
+        /identifier of zeros for the thought "\(no visible character: U\+200B\)"/,
+      ),
+    });
   });
 
   it("any other identifier is returned as it came", async () => {

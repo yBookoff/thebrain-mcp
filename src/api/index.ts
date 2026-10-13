@@ -63,6 +63,7 @@ export {
   nameRefusal,
   normalizeAliases,
   replayThoughtIds,
+  shownName,
   thoughtNameAsStored,
   type AliasChanges,
   type AliasOutcome,

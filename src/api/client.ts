@@ -312,14 +312,34 @@ export class TheBrainClient {
     }
 
     const timedOut = failure instanceof Error && failure.name === "TimeoutError";
+    // Three facts, worded apart, on the line `mayHaveLanded` draws. Refused,
+    // nothing listened at any address and nothing was sent. The other two
+    // went out to the last address tried and got no answer: "could not reach
+    // … — is TheBrain running?" used to be said of a connection that was
+    // there and dropped, after which a write may have been carried out.
     throw new TheBrainError(
       "network",
       timedOut
         ? `request exceeded ${this.#timeoutMs} ms`
-        : `could not reach ${tried.join(" or ")} — is TheBrain running?`,
+        : isConnectionRefused(failure)
+          ? `could not reach ${tried.join(" or ")} — is TheBrain running?`
+          : `the connection to ${tried.at(-1)} failed before an answer came` +
+            inFetchWords(failure),
       { method, path, cause: failure },
     );
   }
+}
+
+/**
+ * What `fetch` said of a failure, in brackets, or nothing when it said
+ * nothing: its cause's message, where the fault is named (`read ECONNRESET`,
+ * `other side closed`), or its own (`fetch failed`).
+ */
+function inFetchWords(failure: unknown): string {
+  const cause =
+    failure instanceof Error && failure.cause instanceof Error ? failure.cause : failure;
+  const said = cause instanceof Error ? cause.message.trim() : "";
+  return said === "" ? "" : ` (${said})`;
 }
 
 /**

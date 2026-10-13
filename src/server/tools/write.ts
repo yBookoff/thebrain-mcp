@@ -29,6 +29,7 @@ import { confirmDestructive, confirmationInstructions } from "../confirm.js";
 import type { ServerContext } from "../context.js";
 import {
   bullet,
+  childrenTitle,
   describeError,
   fail,
   guard,
@@ -700,14 +701,21 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       // Marked when it is a type or a tag, as a read result marks one: that
       // is not one thought's own, and the person asked should see which it is.
       const named = `"${shownName(graph.thought.name)}"${kindMark(graph.thought.kind)}`;
+      // What a person agrees to, so each line is what it says. Under a type
+      // or a tag the graph's `children` are the thoughts of that type or with
+      // that tag, as the read tools title them, and were counted as children.
+      // And the note is an attachment to the API (`isNotes`): it was counted
+      // on its own line and again among the attachments.
+      const under = childrenTitle(graph.thought.kind).toLowerCase();
+      const attached = graph.attachments.filter((a) => !a.isNotes).length;
       const summary = join([
         `Delete the thought ${named}?`,
         bullet(
           [
             `links: ${graph.links.length}`,
-            `children: ${graph.children.length}`,
+            `${under}: ${graph.children.length}`,
             note.trim() === "" ? null : `note: ${note.length} characters`,
-            graph.attachments.length > 0 ? `attachments: ${graph.attachments.length}` : null,
+            attached > 0 ? `attachments: ${attached}` : null,
           ].filter((s): s is string => s !== null),
         ),
         "This cannot be undone.",

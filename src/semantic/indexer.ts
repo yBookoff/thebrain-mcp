@@ -491,7 +491,20 @@ export class SemanticIndexer {
    * brain of one thought, minutes on a real one.
    */
   async #requireEmbedder(): Promise<void> {
-    if ((await this.#embedder.isAvailable?.()) === false) throw new EmbedderUnavailableError();
+    const why = await this.cannotEmbed();
+    if (why !== null) throw why;
+  }
+
+  /**
+   * Why no run could encode anything, or null when one could. It is what a
+   * run is refused by, and what `brain_search` falls back for: an index is
+   * of use to a search only while this is null. The embedder's own reason
+   * where it gives one, since a package that is there and does not load is
+   * not one that is missing.
+   */
+  async cannotEmbed(): Promise<EmbedderUnavailableError | null> {
+    if ((await this.#embedder.isAvailable?.()) !== false) return null;
+    return (await this.#embedder.whyUnavailable?.()) ?? new EmbedderUnavailableError();
   }
 
   /**

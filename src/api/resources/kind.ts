@@ -1,6 +1,7 @@
 import { assertUuid, type TheBrainClient } from "../client.js";
 import { TheBrainError } from "../errors.js";
 import { type ThoughtDto, ThoughtKind } from "../types.js";
+import { shownName } from "./thoughts.js";
 
 /** The kinds a write can ask for, and the words a refusal is put in. */
 const REQUIRED = {
@@ -35,7 +36,7 @@ export async function requireKind(
   throw new TheBrainError(
     refusal,
     `${field} ${id} is not a ${noun}: it is the ` +
-      `${kindName(named.kind)} "${named.name ?? "(unnamed)"}"`,
+      `${kindName(named.kind)} "${shownName(named.name)}"`,
   );
 }
 
@@ -70,13 +71,13 @@ export async function requireParent(
   if (named?.kind === ThoughtKind.Type) {
     throw new TheBrainError(
       "not_a_parent",
-      `${field} ${id} cannot be a parent: it is the type "${named.name ?? "(unnamed)"}"`,
+      `${field} ${id} cannot be a parent: it is the type "${shownName(named.name)}"`,
     );
   }
   if (named?.kind === ThoughtKind.Tag) {
     throw new TheBrainError(
       "tag_as_parent",
-      `${field} ${id} cannot be a parent: it is the tag "${named.name ?? "(unnamed)"}"`,
+      `${field} ${id} cannot be a parent: it is the tag "${shownName(named.name)}"`,
     );
   }
   return named;

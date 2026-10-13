@@ -214,6 +214,30 @@ describe("error explanations point at the next step", () => {
     }
   });
 
+  it("the 403 of a request that carries no identifier is not explained by one", () => {
+    // The app's state and the list of brains name no brain and no thought,
+    // and were told that "an identifier in the call names nothing in this
+    // brain", may have been deleted, and where to take identifiers from.
+    for (const path of ["/api/app/state", "/api/brains"]) {
+      const text = answered("forbidden", ROUTER_403, "GET", path);
+      expect(text).toBe(
+        `TheBrain answered 403 and named no cause (GET ${path}). The request carries no ` +
+          "identifier, so none is at fault.",
+      );
+      expect(text).not.toMatch(/names nothing|deleted, or be another|Take identifiers/);
+    }
+    // A brain in the path is one: what else the request named is in its body.
+    expect(answered("forbidden", ROUTER_403, "POST", `/api/links/${BRAIN}`)).toMatch(
+      /That is its answer when an identifier in the call names nothing in this brain/,
+    );
+    // And with no request to go by, nothing is known of what it carried.
+    expect(describeError(new TheBrainError("forbidden", ROUTER_403))).toBe(
+      "TheBrain answered 403 and named no cause. That is its answer when an identifier in " +
+        "the call names nothing in this brain. It may have been deleted, or be another " +
+        "brain's. Take identifiers from brain_search or brain_get_thought.",
+    );
+  });
+
   it("an identifier nobody has is never explained as a wrong brainId or a wrong key", () => {
     for (const text of [
       answered("not_found", "Not Found", "GET", `/api/thoughts/${BRAIN}/${NOBODY}`),

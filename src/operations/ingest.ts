@@ -74,6 +74,7 @@ import {
   nameRefusal,
   normalizeAliases,
   noteAsStored,
+  shownName,
   thoughtNameAsStored,
   type CleanGraph,
   type TheBrainApi,
@@ -724,7 +725,7 @@ export async function ingest(
       if (t.parent !== undefined && blocked.has(t.parent)) {
         blocked.set(t.tempId, blocked.get(t.parent)!);
         outcome.skipped.push({
-          what: `thought "${t.name}" (${t.tempId})`,
+          what: `thought "${shownName(t.name)}" (${t.tempId})`,
           reason: needs([t.parent]),
         });
         return;
@@ -778,7 +779,7 @@ export async function ingest(
               // waits on the same create, to be told whether it is one.
               blocked.set(t.tempId, pending.tempId);
               outcome.skipped.push({
-                what: `thought "${t.name}" (${t.tempId})`,
+                what: `thought "${shownName(t.name)}" (${t.tempId})`,
                 reason:
                   `${pending.relation === relation ? "is the same thought as" : "is a namesake of"} ` +
                   `"${pending.tempId}", which was not created`,
@@ -827,7 +828,7 @@ export async function ingest(
         }
       } catch (error) {
         blocked.set(t.tempId, t.tempId);
-        failed("thought", `thought "${t.name}" (${t.tempId})`, error);
+        failed("thought", `thought "${shownName(t.name)}" (${t.tempId})`, error);
       }
     });
   }
@@ -879,7 +880,7 @@ export async function ingest(
       } catch (error) {
         // By identifier: two plan thoughts can share a title, and the note
         // is written afterwards with a tool that takes the identifier.
-        failed("note", `note for "${t.name}" (${id})`, error);
+        failed("note", `note for "${shownName(t.name)}" (${id})`, error);
       }
     }
   });
@@ -919,7 +920,7 @@ export async function ingest(
       await api.links.attachTag(brainId, id, tagId);
       outcome.tagsAttached += 1;
     } catch (error) {
-      failed("tag", `tag ${tagId} on "${t.name}" (${id})`, error);
+      failed("tag", `tag ${tagId} on "${shownName(t.name)}" (${id})`, error);
     }
   });
 
@@ -946,7 +947,7 @@ export async function ingest(
       const { added } = await api.thoughts.changeAliases(brainId, id, { add: job.add });
       if (added.length > 0) aliased.add(id);
     } catch (error) {
-      failed("aliases", `aliases for "${job.name}" (${id})`, error);
+      failed("aliases", `aliases for "${shownName(job.name)}" (${id})`, error);
     }
   });
   outcome.aliasesWritten = aliased.size;

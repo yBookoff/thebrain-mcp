@@ -26,6 +26,7 @@ import {
   ok,
   section,
   sentence,
+  shownName,
   table,
 } from "../respond.js";
 import { AFTER_A_LINE_LOST, ALIAS_COST, FENCE_RULE, linesNotKept } from "./write.js";
@@ -159,7 +160,7 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
       );
       const notKept = thoughts.flatMap((t) => {
         const lines = noted.has(t.tempId) && t.note !== undefined ? linesNotKept(t.note) : null;
-        return lines === null ? [] : [`"${t.name}" (${idOf.get(t.tempId)}): ${lines}`];
+        return lines === null ? [] : [`"${shownName(t.name)}" (${idOf.get(t.tempId)}): ${lines}`];
       });
 
       // A batch that left something unwritten is an error, so that it is not

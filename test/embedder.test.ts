@@ -42,6 +42,88 @@ describe("optional dependency", () => {
     expect(new EmbedderUnavailableError().message).toMatch(/[Ss]ubstring name search/);
   });
 
+  describe("a package that is there and does not load", () => {
+    // Every failure of the import was "is not installed", and its cause was
+    // printed nowhere: a broken install read as an absent one.
+    const ABSENT = new EmbedderUnavailableError().message;
+    /** What Node's import throws for a package it does not find, as `imported from` has it. */
+    const notFound = (name: string, from: string): Error =>
+      Object.assign(new Error(`Cannot find package '${name}' imported from ${from}`), {
+        code: "ERR_MODULE_NOT_FOUND",
+      });
+
+    it("is told as a package that failed to load, with what the import failed by", () => {
+      const broken = new EmbedderUnavailableError(
+        new Error("dlopen(onnxruntime_binding.node, 0x0001): Library not loaded."),
+      );
+      expect(broken.loadFailure).toBe(
+        "dlopen(onnxruntime_binding.node, 0x0001): Library not loaded",
+      );
+      expect(broken.message).toBe(
+        "semantic search is off: the @huggingface/transformers package failed to load: " +
+          "dlopen(onnxruntime_binding.node, 0x0001): Library not loaded. Substring name " +
+          "search is available without it.",
+      );
+      expect(broken.message).not.toMatch(/not installed|380 MB/);
+    });
+
+    it("so is a package of its own that it does not find", () => {
+      // The same code as for the package itself, and another name in it.
+      const broken = new EmbedderUnavailableError(
+        notFound(
+          "onnxruntime-node",
+          "/usr/lib/node_modules/@huggingface/transformers/dist/transformers.node.mjs",
+        ),
+      );
+      expect(broken.loadFailure).toMatch(/^Cannot find package 'onnxruntime-node' imported from /);
+      expect(broken.message).toMatch(/package failed to load: Cannot find package 'onnxruntime-node'/);
+    });
+
+    it("the package itself not found is not installed, as with no cause given", () => {
+      for (const cause of [
+        // Node 22.15, measured: with no quotes around the importer, and under Vitest with.
+        notFound("@huggingface/transformers", "/srv/dist/semantic/embedder.js"),
+        notFound("@huggingface/transformers", "'/srv/src/semantic/embedder.ts'"),
+        // A `require`, and the module Vite puts in place of an optional peer dependency.
+        new Error("Cannot find module '@huggingface/transformers'\nRequire stack:\n- /srv/x.cjs"),
+        new Error(
+          'Could not resolve "@huggingface/transformers" imported by "thebrain-mcp-server". Is it installed?',
+        ),
+      ]) {
+        const absent = new EmbedderUnavailableError(cause);
+        expect(absent.loadFailure, cause.message).toBeNull();
+        expect(absent.message).toBe(ABSENT);
+      }
+      expect(new EmbedderUnavailableError().loadFailure).toBeNull();
+      expect(ABSENT).toMatch(/package is not installed\. It weighs about 380 MB/);
+    });
+
+    it("what is thrown is kept as the cause either way", () => {
+      const cause = new Error("boom");
+      expect(new EmbedderUnavailableError(cause).cause).toBe(cause);
+      expect(new EmbedderUnavailableError("a string, not an error").loadFailure).toBe(
+        "a string, not an error",
+      );
+    });
+
+    it.skipIf(packageInstalled)(
+      "without the package, the import's own failure is read as not installed",
+      async () => {
+        // What Node says of a package that is not there is what tells the two apart.
+        const why = await new LocalEmbedder().whyUnavailable();
+        expect(why).toBeInstanceOf(EmbedderUnavailableError);
+        expect(why!.loadFailure).toBeNull();
+        expect(why!.message).toBe(ABSENT);
+        const thrown = await new LocalEmbedder().embedQuery("probe").catch((e: unknown) => e);
+        expect((thrown as EmbedderUnavailableError).loadFailure).toBeNull();
+      },
+    );
+
+    it.skipIf(!packageInstalled)("with the package there is nothing to say why", async () => {
+      await expect(new LocalEmbedder().whyUnavailable()).resolves.toBeNull();
+    });
+  });
+
   it.skipIf(packageInstalled)(
     "embedding without the package rejects with the typed error",
     async () => {

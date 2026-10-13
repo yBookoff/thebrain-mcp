@@ -27,6 +27,7 @@ import {
   type IndexStatus,
   type UnreadThought,
 } from "../../semantic/indexer.js";
+import type { EmbedderUnavailableError } from "../../semantic/embedder.js";
 import {
   SearchFailedError,
   type PhrasingFailure,
@@ -36,6 +37,7 @@ import { IndexBusyError, IndexRunningError } from "../../semantic/store.js";
 import type { ServerContext } from "../context.js";
 import {
   bullet,
+  childrenTitle,
   describeError,
   fail,
   guard,
@@ -102,20 +104,6 @@ function nobodyHasIt(error: unknown): boolean {
     error instanceof TheBrainError &&
     (error.kind === "not_found" || error.kind === "invalid_uuid")
   );
-}
-
-/**
- * The title for what a graph lists as `children`. Under a type those are the
- * thoughts of that type, and under a tag the thoughts the tag is on: a link
- * with a type or a tag above is the type's or the tag's, never a parent's
- * (docs/api-map.md, L23 and L24). "Children" there sends a model to add one,
- * which the write tools refuse (`not_a_parent`, `tag_as_parent`). Any other
- * thought keeps the title it had.
- */
-function childrenTitle(kind: number): string {
-  if (kind === ThoughtKind.Type) return "Thoughts of this type";
-  if (kind === ThoughtKind.Tag) return "Thoughts with this tag";
-  return "Children";
 }
 
 /**
@@ -188,8 +176,14 @@ function notSearchedSection(outcome: SearchOutcome): string | null {
  *
  * When every hit was a thought that is gone, that is said in either mode, and
  * not that nothing matched.
+ *
+ * Ranking by vectors has a best row for any query, so there it lists nothing
+ * only when the index has no row a search ranks: by default the ordinary
+ * thoughts, and an index can hold types and tags alone. That used to be a
+ * result with no text in it at all. `auxiliary` is whether types and tags
+ * were asked for.
  */
-function foundBody(outcome: SearchOutcome, hits: string): string {
+function foundBody(outcome: SearchOutcome, hits: string, auxiliary: boolean): string {
   if (outcome.matches.length > 0) return hits;
   const gone = outcome.gone.length;
   if (gone > 0) {
@@ -197,7 +191,14 @@ function foundBody(outcome: SearchOutcome, hits: string): string {
       ? "Nothing that is still there: the one hit was a thought that is gone."
       : `Nothing that is still there: each of the ${gone} hits was a thought that is gone.`;
   }
-  if (outcome.mode === "vector") return hits;
+  if (outcome.mode === "vector") {
+    return auxiliary
+      ? "Nothing: the semantic index had no row to rank. Call brain_index with action=status " +
+          "to see what it holds."
+      : "Nothing: the semantic index holds only types and tags, and a search leaves those out " +
+          "unless includeAuxiliary is true. A thought added since the index was last synced " +
+          "is not in it: call brain_index with action=sync.";
+  }
   const answered = outcome.phrasings - outcome.notSearched.length;
   if (outcome.phrasings === 1) return "Nothing: TheBrain's search matched no thought.";
   const which = answered === outcome.phrasings ? "" : " it answered";
@@ -356,6 +357,28 @@ function indexUsable(s: IndexStatus): boolean {
 }
 
 /**
+ * What status says to do, or null when there is nothing to. `ready` is an
+ * index that is built and that a search can rank by; `why` is the embedder's
+ * reason for encoding nothing, or null.
+ *
+ * The package comes first, whatever the index: without it a rebuild is
+ * refused and `brain_search` does not rank by vectors, so "rebuild" alone
+ * sent the model to a call that fails.
+ */
+function afterStatus(ready: boolean, why: EmbedderUnavailableError | null): string | null {
+  if (why === null) return ready ? null : "Call this tool with action=rebuild.";
+  const install =
+    why.loadFailure === null
+      ? `Install the embeddings package: ${why.installCommand}.`
+      : `The embeddings package failed to load: ${sentence(why.loadFailure)} ` +
+        `Install it again: ${why.installCommand}.`;
+  return ready
+    ? `${install} Until then brain_search answers from TheBrain's own search, and does not ` +
+        "rank by this index."
+    : `${install} Then call this tool with action=rebuild.`;
+}
+
+/**
  * The index of a brain in a row of `brain_list`. It printed `index: 0` for a
  * build that never finished, which reads as an index of a brain with nothing
  * in it.
@@ -444,7 +467,7 @@ function leftUnread(r: IndexResult, after: IndexStatus): string {
     : `${left} of the ${r.asked} thoughts the ${run} asked TheBrain for could not be read. ` +
       `What the index holds for ${one ? "it" : "them"} is what it held before this run, ` +
       "which for a thought not yet indexed is nothing.";
-  const named = (u: UnreadThought): string => (u.name ? `${u.name} — ${u.id}` : u.id);
+  const named = (u: UnreadThought): string => (u.name ? `${shownName(u.name)} — ${u.id}` : u.id);
   const reasons = new Set(r.unread.map(whyUnread));
   const listed = r.unread.slice(0, MAX_UNREAD_LISTED);
   const more = left > listed.length ? [`and ${left - listed.length} more, not listed`] : [];
@@ -547,7 +570,7 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
           state?.activeThoughtName
             ? section(
                 "Active thought",
-                `${state.activeThoughtName} (${state.activeThoughtId})`,
+                `${shownName(state.activeThoughtName)} (${state.activeThoughtId})`,
               )
             : null,
           // The list is whole without it, so this is no error: nothing is
@@ -609,16 +632,16 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
           section(childrenTitle(graph.thought.kind), bullet(names(graph.children))),
           section("Jumps", bullet(names(graph.jumps))),
           includeSiblings ? section("Siblings", bullet(names(graph.siblings))) : null,
-          graph.attachments.length > 0
-            ? section(
-                "Attachments",
-                bullet(
-                  graph.attachments.map(
-                    (a) => `${a.name ?? "(unnamed)"}${a.location ? ` — ${a.location}` : ""}`,
-                  ),
-                ),
-              )
-            : null,
+          // Less the note, which the API lists among them (`isNotes`): it
+          // stood here as "(unnamed) — Notes.md", beside its own section.
+          section(
+            "Attachments",
+            bullet(
+              graph.attachments
+                .filter((a) => !a.isNotes)
+                .map((a) => `${a.name ?? "(unnamed)"}${a.location ? ` — ${a.location}` : ""}`),
+            ),
+          ),
           "error" in note
             ? noteNotRead(note.error)
             : note.value.trim() === ""
@@ -705,6 +728,7 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
                 ],
                 rows,
               ),
+              includeAuxiliary === true,
             ),
           ),
           notVerifiedSection(outcome),
@@ -714,9 +738,16 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
             ? null
             : section(
                 "Warning",
-                `Semantic search unavailable: ${outcome.degradedReason}. ` +
+                // The reason may be a sentence already: the embedder's own
+                // ended "…without it.. Fell back".
+                `Semantic search unavailable: ${sentence(outcome.degradedReason)} ` +
                   "Fell back to substring name search, so recall is lower. " +
-                  "Build the index with the brain_index tool.",
+                  // For want of the package the index is one to rank by, and
+                  // "Build the index" sent the model to a rebuild.
+                  (outcome.embedderFailure === null
+                    ? "Build the index with the brain_index tool."
+                    : "The index is there and needs no rebuild: install the package with " +
+                      `${outcome.embedderFailure.installCommand}.`),
               ),
         ]),
       );
@@ -998,7 +1029,19 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       if (action === "status") {
         const s = indexer.status(bid);
         const built = indexBuilt(s);
-        const usable = indexUsable(s);
+        // Usable is what a model takes it for: brain_search ranks by this
+        // index. That takes the embedder as well as the index, and status
+        // went by the index alone: without the package it said "usable: yes"
+        // of an index every search fell back from.
+        const rankable = indexUsable(s);
+        const why = await indexer.cannotEmbed();
+        const usable = rankable && why === null;
+        const noPackage =
+          why === null
+            ? ""
+            : why.loadFailure === null
+              ? " — the embeddings package is not installed"
+              : " — the embeddings package does not load";
         const unfinished = s.exists ? "no — a build was started and did not finish" : "no";
         return ok(
           join([
@@ -1007,15 +1050,13 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
               bullet([
                 `brain: ${brain.name ?? "(unnamed)"}`,
                 `built: ${built ? "yes" : unfinished}`,
-                `usable: ${usable ? "yes" : "no"}`,
+                `usable: ${usable ? "yes" : `no${noPackage}`}`,
                 `thoughts indexed: ${s.size}`,
                 `model: ${s.model ?? "—"}`,
                 `synced through: ${s.syncedThrough ?? "—"}`,
               ]),
             ),
-            built && usable
-              ? null
-              : section("What to do", "Call this tool with action=rebuild."),
+            section("What to do", afterStatus(built && rankable, why)),
           ]),
         );
       }
@@ -1044,7 +1085,9 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       return ok(
         join([
           section(
-            action === "rebuild" ? "Index built" : "Index refreshed",
+            // By what ran, not by what was asked for: a sync with no finished
+            // index to refresh is a rebuild, and answered "Index refreshed".
+            result.ran === "rebuild" ? "Index built" : "Index refreshed",
             bullet([
               `thoughts encoded: ${result.indexed}`,
               // A thought that changed kind and kept its document: the row

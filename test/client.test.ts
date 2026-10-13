@@ -218,7 +218,8 @@ describe("request construction", () => {
   it("an unreachable server gives a readable message, not ECONNREFUSED", async () => {
     const fetchImpl = vi.fn(
       async (_input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]): Promise<Response> => {
-        throw new TypeError("fetch failed");
+        // As fetch reports nothing listening: the refusal is in the cause.
+        throw new TypeError("fetch failed", { cause: REFUSALS.localhost() });
       },
     );
     const client = new TheBrainClient({
@@ -352,6 +353,72 @@ describe("finding TheBrain", () => {
     const read = await client.get(`/api/thoughts/${BRAIN}/${BRAIN}`).catch((e: unknown) => e);
     expect(read).toMatchObject({ kind: "network" });
     expect(mayHaveLanded(read)).toBe(false);
+  });
+
+  // "could not reach … — is TheBrain running?" was said of both. After a
+  // refusal nothing was sent; after a connection that was there and went
+  // away, a write may have been carried out (`mayHaveLanded`).
+  it.each([
+    ["reset", "read ECONNRESET", "ECONNRESET"],
+    ["closed by the other side", "other side closed", "UND_ERR_SOCKET"],
+  ])("a connection %s is not worded as a server that could not be reached", async (_name, said, code) => {
+    const fetchImpl = vi.fn(
+      async (_input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]): Promise<Response> => {
+        throw new TypeError("fetch failed", { cause: Object.assign(new Error(said), { code }) });
+      },
+    );
+    const client = new TheBrainClient({
+      apiKey: KEY,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const failure = await client
+      .post(`/api/thoughts/${BRAIN}`, { json: { name: "A" } })
+      .catch((e: unknown) => e as TheBrainError);
+    expect(failure).toMatchObject({
+      kind: "network",
+      message: `the connection to http://localhost:11522 failed before an answer came (${said})`,
+    });
+    expect((failure as TheBrainError).message).not.toMatch(/could not reach|is TheBrain running/);
+    expect(mayHaveLanded(failure)).toBe(true);
+  });
+
+  it("names the address whose connection failed, not the one that refused before it", async () => {
+    const fetchImpl = vi.fn(
+      async (input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]): Promise<Response> => {
+        throw new TypeError("fetch failed", {
+          cause:
+            (input as URL).port === "11522"
+              ? REFUSALS.localhost()
+              : Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+        });
+      },
+    );
+    const client = new TheBrainClient({
+      apiKey: KEY,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await expect(client.get("/api/brains")).rejects.toMatchObject({
+      kind: "network",
+      message: "the connection to http://localhost:8001 failed before an answer came (read ECONNRESET)",
+    });
+  });
+
+  it("a failure fetch gives no cause for is told in fetch's own words, and not as a refusal", async () => {
+    const fetchImpl = vi.fn(
+      async (_input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]): Promise<Response> => {
+        throw new TypeError("fetch failed");
+      },
+    );
+    const client = new TheBrainClient({
+      apiKey: KEY,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await expect(client.get("/api/brains")).rejects.toMatchObject({
+      kind: "network",
+      message: "the connection to http://localhost:11522 failed before an answer came (fetch failed)",
+    });
+    // One address was tried: only a refusal moves on to the next.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("a request that went nowhere, or was answered, is not one that may have landed", async () => {
