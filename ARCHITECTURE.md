@@ -2280,9 +2280,13 @@ at the first document, with the build's metadata written.
 `node:sqlite` (Node 22+), vectors as BLOBs, brute-force cosine scan. No vector
 index, no native dependency, no extension to compile.
 
-Measured: **20,000 vectors × 384 dimensions scans in under 200 ms** — a test
-enforces it. Real brains are far smaller than that. An ANN index would add build
-complexity and a dependency to save time nobody is spending.
+Measured: **20,000 vectors × 384 dimensions scans in under 200 ms**: in 7 ms
+on a performance core of an Apple M4 and in 20–66 ms on an efficiency core,
+with nothing else running. A test holds the store's scan under three times a
+bare scan of the same rows, which is what a test can hold on any machine (the
+correction under the next heading). Real brains are far smaller than that. An
+ANN index would add build complexity and a dependency to save time nobody is
+spending.
 
 ### One index file, several server processes
 
@@ -2354,6 +2358,36 @@ where the other way round it would never be read. What it costs is the
 search after another process's write, which reads the rows again: 41 ms more
 for 20,000. During another session's rebuild that is every search, a batch
 of rows having been committed since the last one.
+
+> **Correction.** Those are the figures of a performance core of an Apple
+> M4 with nothing else to do. On an efficiency core, which is where a
+> process at background priority runs, the scan took 20–66 ms and the search
+> that reads the rows again 130–330 ms. For a quarter of an hour of the
+> measuring a process at ordinary priority got the same, on battery and with
+> another application busy; what set it off was not found. With two more
+> runs of the test suite going then, the best of five scans took up to 233
+> ms and the best of five such searches 831 ms. The two tests of these
+> figures each timed one search, once, and held it under 200 ms. That bound
+> failed for the machine's reasons, and where the cores are fast it did not
+> tell a store that had gone wrong: one that read the rows again for every
+> search scanned in 38 ms, and one with a query to the database for every
+> row in 49–82 ms. No figure on a clock does both.
+>
+> The tests now hold a search against a bare scan of the same rows, written
+> out in the test and timed straight after it, so as fast or as slow as the
+> machine is at that moment. Each does it five times and asserts the least
+> of the five ratios. The store's scan is held under 3 bare scans: it was
+> 1.05 at the most on a performance core left alone and 1.2 under any load
+> tried, background priority with two more runs of the suite included. The
+> search that reads the rows again is held under 40: it was 5–7, and 11 at
+> the most under any load tried. What the bounds tell: the rows read again
+> for every search, 5.0–6.9 bare scans; a dot product by way of plain
+> arrays, 17–24; a query to the database for every row of the scan, 3.9–11
+> in a file and 3.0–7.6 in a store in memory, where one run of seven came
+> out at 2.98; the rows read again a hundred at a time by `OFFSET`, 55–72.
+> What they do not tell from a busy moment: the rows read again one
+> statement a row, 9–17 bare scans where it is 5–7, and in a store in memory
+> a query for every row from a statement prepared once, 2.4–2.5.
 
 **A write is all in the file or not there.** Each write of the store is one
 `BEGIN IMMEDIATE` transaction, and an index of another model is replaced in

@@ -14,6 +14,8 @@ import {
   VectorStore,
   dot,
   normalize,
+  type SimilarityHit,
+  type StoredVector,
 } from "../src/semantic/store.js";
 
 const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
@@ -24,6 +26,90 @@ function vec(...values: number[]): Float32Array {
 
 function store(): VectorStore {
   return new VectorStore(":memory:");
+}
+
+/**
+ * How the two tests that time a search take their figures.
+ *
+ * Each timed one search, once, and held it under 200 ms. A figure on a clock
+ * is the machine's as much as the store's. A scan of 20,000 vectors takes
+ * 7 ms on a performance core of an Apple M4 and 20–66 ms on an efficiency
+ * core, which is where a process at background priority runs, and where one
+ * at ordinary priority ran for a quarter of an hour of these measurements.
+ * The search that reads the rows again takes 41–62 ms on the one and 130–330
+ * ms on the other, on both sides of the 200 ms it was held under. With two
+ * more runs of the suite going, the best of five scans took up to 233 ms and
+ * the best of five such searches 831 ms. And no bound that is over all of
+ * that tells a store that has gone wrong where the cores are fast: one that
+ * read the rows again for every search scanned in 38 ms.
+ *
+ * So a search is held against `bareScan()` and not against the clock: the
+ * same scan of the same rows, timed straight after it, as fast or as slow
+ * as the machine is at that moment. That is done `ROUNDS` times and the
+ * least of the ratios is held: it takes a busy moment on the search in
+ * every round, and none on the scan beside it, to fail a store that is as
+ * it should be. The search was three bare scans or more in none of 990
+ * rounds with no other run of the suite going, in 2 of 200 with two more,
+ * and in 32 of 400 with those two and the test at background priority,
+ * three of a test's five at the most.
+ */
+const ROUNDS = 5;
+/**
+ * For a test that builds an index of this size and times it. One took 6.8 s
+ * at background priority with two more runs of the suite going: Vitest's
+ * own 5 s would be a figure sitting on top of a measurement again.
+ */
+const TIMED = { timeout: 30_000 };
+
+/** Milliseconds for one call. */
+function ms(run: () => void): number {
+  const t0 = performance.now();
+  run();
+  return performance.now() - t0;
+}
+
+/** The least of a figure over the rounds. */
+function least<R>(rounds: readonly R[], of: (round: R) => number): number {
+  return Math.min(...rounds.map(of));
+}
+
+/**
+ * An index of the size a scan is promised for: 20,000 thoughts at the 384
+ * dimensions of the model. The query is the first row's own vector, so
+ * that row is among the hits whatever the others score.
+ */
+function realistic(): { rows: StoredVector[]; query: Float32Array } {
+  const dim = 384;
+  const rows = Array.from({ length: 20_000 }, (_, i) => {
+    const v = new Float32Array(dim);
+    for (let d = 0; d < dim; d += 1) v[d] = Math.sin(i * 0.01 + d);
+    return {
+      thoughtId: `t${i}`,
+      name: `thought ${i}`,
+      kind: 1,
+      contentHash: `h${i}`,
+      vector: normalize(v),
+    };
+  });
+  const query = normalize(new Float32Array(Array.from({ length: dim }, (_, d) => Math.sin(d))));
+  return { rows, query };
+}
+
+/**
+ * A scan and nothing else: the query against every row, and the best of
+ * them, over rows that are in memory already. Written out here and not
+ * through `dot()`: a yardstick made of the store's own code is slower
+ * whenever the store is.
+ */
+function bareScan(rows: readonly StoredVector[], query: Float32Array, limit: number): SimilarityHit[] {
+  const hits: SimilarityHit[] = [];
+  for (const { thoughtId, name, kind, vector } of rows) {
+    let score = 0;
+    for (let i = 0; i < query.length; i += 1) score += query[i]! * vector[i]!;
+    hits.push({ thoughtId, name, kind, score });
+  }
+  hits.sort((a, b) => b.score - a.score);
+  return hits.slice(0, limit);
 }
 
 describe("vector arithmetic", () => {
@@ -259,33 +345,33 @@ describe("index compatibility", () => {
 });
 
 describe("scale", () => {
-  it("scanning 20,000 vectors at 384 dimensions stays under 200 ms", () => {
+  it("scanning 20,000 vectors at 384 dimensions costs under three times a bare scan of them", TIMED, () => {
     const s = store();
-    const dim = 384;
-    const batch = Array.from({ length: 20_000 }, (_, i) => {
-      const v = new Float32Array(dim);
-      for (let d = 0; d < dim; d += 1) v[d] = Math.sin(i * 0.01 + d);
-      return {
-        thoughtId: `t${i}`,
-        name: `thought ${i}`,
-        kind: 1,
-        contentHash: `h${i}`,
-        vector: normalize(v),
-      };
-    });
-    s.upsert(batch);
-
-    const query = normalize(
-      new Float32Array(Array.from({ length: dim }, (_, d) => Math.sin(d))),
-    );
+    const { rows, query } = realistic();
+    s.upsert(rows);
     s.search(query, { limit: 10 }); // warm the cache
+    bareScan(rows, query, 10); // and the yardstick
 
-    const t0 = performance.now();
-    const hits = s.search(query, { limit: 10 });
-    const elapsed = performance.now() - t0;
+    let hits: SimilarityHit[] = [];
+    let bare: SimilarityHit[] = [];
+    const rounds = Array.from({ length: ROUNDS }, () => {
+      const scan = ms(() => {
+        hits = s.search(query, { limit: 10 });
+      });
+      const yard = ms(() => {
+        bare = bareScan(rows, query, 10);
+      });
+      return { scan, yard };
+    });
 
+    // The yardstick is the same scan: it comes to the same ten.
     expect(hits).toHaveLength(10);
-    expect(elapsed).toBeLessThan(200);
+    expect(hits.map((h) => h.thoughtId)).toEqual(bare.map((h) => h.thoughtId));
+    // 1.05 at the most on a performance core left alone, and 1.2 under any
+    // load tried. Reading the rows again for every search made it 5.0–5.2
+    // and a dot product by way of plain arrays 17–24. A query to the
+    // database for every row made it 3.0–7.6: 2.98 in one run of seven.
+    expect(least(rounds, (r) => r.scan / r.yard)).toBeLessThan(3);
     s.close();
   });
 });
@@ -863,37 +949,44 @@ describe("one index file under several stores", () => {
     });
   });
 
-  it("scanning 20,000 vectors in a file another store writes to stays under 200 ms, and so does reading them again", () => {
+  it("scanning 20,000 vectors in a file another store writes to costs under three times a bare scan, and reading them again under forty", TIMED, () => {
     // What a search now does besides the scan: it asks the file's version
     // every time, and reads the rows again after another store's write.
-    const dim = 384;
-    const batch = Array.from({ length: 20_000 }, (_, i) => {
-      const v = new Float32Array(dim);
-      for (let d = 0; d < dim; d += 1) v[d] = Math.sin(i * 0.01 + d);
-      return {
-        thoughtId: `t${i}`,
-        name: `thought ${i}`,
-        kind: 1,
-        contentHash: `h${i}`,
-        vector: normalize(v),
-      };
-    });
+    const { rows, query } = realistic();
     const writer = server();
-    writer.upsert(batch);
+    writer.upsert(rows);
     const reader = server();
-    const query = normalize(
-      new Float32Array(Array.from({ length: dim }, (_, d) => Math.sin(d))),
-    );
     reader.search(query, { limit: 10 }); // warm the cache
-    const timed = (): number => {
-      const t0 = performance.now();
-      expect(reader.search(query, { limit: 10 })).toHaveLength(10);
-      return performance.now() - t0;
-    };
+    bareScan(rows, query, 10); // and the yardstick
 
-    expect(timed()).toBeLessThan(200);
-    writer.upsert([{ ...batch[0]!, contentHash: "again" }]);
-    expect(timed()).toBeLessThan(200);
-    expect(timed()).toBeLessThan(200);
+    let hits: SimilarityHit[] = [];
+    const rounds = Array.from({ length: ROUNDS }, (_, round) => {
+      writer.upsert([{ ...rows[0]!, name: `written ${round}` }]);
+      const again = ms(() => {
+        hits = reader.search(query, { limit: 10 });
+      });
+      // The rows were read again, or this is the time of something else.
+      expect(hits.map((h) => h.name)).toContain(`written ${round}`);
+      // The search after it finds nothing new in the file, in every round.
+      const scan = ms(() => {
+        hits = reader.search(query, { limit: 10 });
+      });
+      expect(hits).toHaveLength(10);
+      const yard = ms(() => {
+        bareScan(rows, query, 10);
+      });
+      return { again, scan, yard };
+    });
+
+    // The scan, as in a store that has its index to itself: 1.0 at the most
+    // on a performance core left alone, 1.2 under any load tried. Reading
+    // the rows again for every search made it 5.4–6.9, a query for every
+    // row 3.9–11.
+    expect(least(rounds, (r) => r.scan / r.yard)).toBeLessThan(3);
+    // Reading the rows again: 5–7 bare scans on a performance core left
+    // alone, 11 at the most under any load tried. Read a hundred rows at a
+    // time by OFFSET it was 55–72. Read one statement a row it was 9–17,
+    // which this does not tell from a busy moment.
+    expect(least(rounds, (r) => r.again / r.yard)).toBeLessThan(40);
   });
 });
