@@ -372,11 +372,6 @@ export class VectorStore {
     );
   }
 
-  clear(): void {
-    this.#write(false, (db) => db.exec("DELETE FROM vectors; DELETE FROM meta;"));
-    this.#cache = null;
-  }
-
   /**
    * Empties the index and writes the metadata of the build that takes its
    * place, in one transaction. A rebuild over an index of another model did

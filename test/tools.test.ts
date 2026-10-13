@@ -7106,34 +7106,57 @@ describe("a call that fails after it has written", () => {
 
     it("an index that fails after the deletion does not read as a deletion that failed", async () => {
       // The index's error used to be the whole result, for a thought that
-      // was gone for good.
-      const { call, calls } = await connect(
-        deleted(thought("RAG")),
-        deleting(() => {
-          throw new Error("database is locked");
-        }),
-      );
-      const result = await call("brain_delete_thought", {
-        brainId: BRAIN,
-        thoughtId: THOUGHT,
-        confirm: true,
-      });
+      // was gone for good. The index is the store itself, its file held by
+      // another process part of the way through a write: a fake stood here
+      // that threw SQLite's `database is locked`, which the store has not
+      // let out since it waits for a lock and says so in a sentence.
+      const dir = mkdtempSync(join(tmpdir(), "thebrain-mcp-tools-"));
+      const path = join(dir, `index-${BRAIN}.sqlite`);
+      const store = new VectorStore(path, { busyTimeoutMs: 30 });
+      store.setMeta({ brainId: BRAIN, model: "fake@v1#doc3", dimensions: 2, syncedThrough: null });
+      store.upsert([
+        { thoughtId: THOUGHT, name: "RAG", kind: 1, contentHash: "h", vector: new Float32Array([1, 0]) },
+      ]);
+      const writing = new DatabaseSync(path);
+      writing.exec("BEGIN IMMEDIATE");
+      try {
+        const { call, calls } = await connect(deleted(thought("RAG")), () => ({
+          config: { allowDestructive: true },
+          store: () => store,
+        }));
+        const result = await call("brain_delete_thought", {
+          brainId: BRAIN,
+          thoughtId: THOUGHT,
+          confirm: true,
+        });
 
-      expect(result.isError).toBe(true);
-      expect(result.text).toBe(
-        [
-          "## Done",
-          '- "RAG" is gone from the brain',
-          "",
-          "## Failed",
-          "- its entry in the semantic index: database is locked",
-          "",
-          "## Next",
-          `${IN_PART}. The thought is deleted, and is not to be deleted again. Its entry stays ` +
-            "in the semantic index until brain_index is run with action=sync.",
-        ].join("\n"),
-      );
-      expect(writes(calls)).toEqual([`DELETE /api/thoughts/${BRAIN}/${THOUGHT}`]);
+        expect(result.isError).toBe(true);
+        expect(result.text).toBe(
+          [
+            "## Done",
+            '- "RAG" is gone from the brain',
+            "",
+            "## Failed",
+            "- its entry in the semantic index: Another server process had the semantic index " +
+              "of this brain locked, and had not let go of it after 0.03 s. Every client " +
+              "session runs a server process of its own, and they share one index file. This " +
+              "write to the index was not made.",
+            "",
+            "## Next",
+            `${IN_PART}. The thought is deleted, and is not to be deleted again. Its entry stays ` +
+              "in the semantic index until brain_index is run with action=sync.",
+          ].join("\n"),
+        );
+        expect(result.text).not.toMatch(/database is locked/);
+        expect(writes(calls)).toEqual([`DELETE /api/thoughts/${BRAIN}/${THOUGHT}`]);
+        // As the result says: the entry is there still.
+        writing.exec("ROLLBACK");
+        expect(store.size()).toBe(1);
+      } finally {
+        writing.close();
+        store.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it("written whole it reads as it did, to the character", async () => {

@@ -1937,11 +1937,11 @@ describe("a link's name as TheBrain stores it", () => {
       ["line\nbreak", "line break"],
       ["\nleading and trailing\n", "leading and trailing"],
       ["a \n b", "a   b"],
-      [" nbsp ends ", "nbsp ends"],
+      ["\u00a0nbsp ends\u00a0", "nbsp ends"],
       // Kept as they are: a run of spaces, a carriage return, a no-break space inside.
       ["two  spaces", "two  spaces"],
       ["crlf\r\nbreak", "crlf\r break"],
-      ["nbsp inside", "nbsp inside"],
+      ["nbsp\u00a0inside", "nbsp\u00a0inside"],
       ["", ""],
     ] as const) {
       expect(linkNameAsStored(sent), JSON.stringify(sent)).toBe(stored);

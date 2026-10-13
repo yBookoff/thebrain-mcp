@@ -332,16 +332,6 @@ describe("index compatibility", () => {
     expect(s.getMeta()?.syncedThrough).toBe("2026-08-11T12:00:00Z");
     s.close();
   });
-
-  it("clear wipes everything", () => {
-    const s = store();
-    s.setMeta({ brainId: BRAIN, model: "m", dimensions: 2, syncedThrough: null });
-    s.upsert([{ thoughtId: "a", name: "a", kind: 1, contentHash: "h", vector: vec(1, 0) }]);
-    s.clear();
-    expect(s.size()).toBe(0);
-    expect(s.getMeta()).toBeNull();
-    s.close();
-  });
 });
 
 describe("scale", () => {
@@ -410,7 +400,6 @@ describe("the index file", () => {
     s.remove(["a"]);
     s.setKinds(new Map([["a", 4]]));
     s.upsert([]);
-    s.clear();
     s.close();
     expect(existsSync(data())).toBe(false);
   });
@@ -550,15 +539,13 @@ describe("one index file under several stores", () => {
       expect(ids(reader)).toEqual(["b"]);
     });
 
-    it("every row cleared, and the index started over", () => {
+    it("the index started over, and the first row of the build that follows", () => {
       const { writer, reader } = pair();
-      writer.clear();
-      expect(ids(reader)).toEqual([]);
-      writer.upsert([row("a", vec(1, 0))]);
-      expect(ids(reader)).toEqual(["a"]);
       writer.startOver({ ...meta, model: "other" });
       expect(ids(reader)).toEqual([]);
       expect(reader.getMeta()?.model).toBe("other");
+      writer.upsert([row("a", vec(1, 0))]);
+      expect(ids(reader)).toEqual(["a"]);
     });
 
     it("the rest of a build that the store first searched part of the way through", () => {
@@ -663,7 +650,6 @@ describe("one index file under several stores", () => {
       ["setKinds", (s) => s.setKinds(new Map([["a", 4]]))],
       ["setMeta", (s) => s.setMeta({ ...meta, model: "other" })],
       ["setSyncedThrough", (s) => s.setSyncedThrough("2026-10-11T00:00:00.000Z")],
-      ["clear", (s) => s.clear()],
       ["startOver", (s) => s.startOver({ ...meta, model: "other" })],
     ])("%s that waits for it in vain fails with a sentence, and writes nothing", (_name, write) => {
       // SQLite's own answer was the whole result of the tool: `database is

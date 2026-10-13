@@ -6068,7 +6068,7 @@ suite("resource layer against the live API", () => {
         "line\nbreak",
         "crlf\r\nbreak",
         "\nleading and trailing\n",
-        " nbsp ends ",
+        "\u00a0nbsp ends\u00a0",
       ]) {
         const { a, b } = await pair("there-stored");
         const posted = await post({ thoughtIdA: a, thoughtIdB: b, relation: 3, name: sent });

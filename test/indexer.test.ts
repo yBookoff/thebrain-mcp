@@ -1424,20 +1424,6 @@ describe("search", () => {
     expect(outcome.matches[0]!.thoughtId).toBe("a");
     store.close();
   });
-
-  it("a failure on one variant does not break the others", async () => {
-    const thoughts = new Map<string, FakeThought>([["a", { id: "a", name: "Unity" }]]);
-    const { api } = fakeApi(thoughts, [], new Map([["Unity", ["a"]]]));
-    // The "broken" variant is absent from the map, so it returns an empty list.
-    const store = new VectorStore(":memory:");
-    const outcome = await new SemanticSearch(api, store, new FakeEmbedder()).find(
-      BRAIN,
-      "broken",
-      { variants: ["Unity"] },
-    );
-    expect(outcome.matches).toHaveLength(1);
-    store.close();
-  });
 });
 
 describe("search: a phrasing TheBrain's search does not answer", () => {
@@ -1493,6 +1479,8 @@ describe("search: a phrasing TheBrain's search does not answer", () => {
     const outcome = await search.find(BRAIN, "engine", { variants: ["nothing has this"] });
     expect(outcome.phrasings).toBe(2);
     expect(outcome.notSearched).toEqual([]);
+    // A phrasing that finds nothing takes nothing from what the other found.
+    expect(outcome.matches.map((m) => m.thoughtId)).toEqual(["a"]);
     store.close();
   });
 
