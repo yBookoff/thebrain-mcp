@@ -53,18 +53,21 @@ export {
   type WrittenFact,
 } from "./written.js";
 export { compareLogTime, logEntryKey, logTime } from "./log.js";
+export {
+  MAX_NAME_LENGTH,
+  codePoints,
+  linkNameAsStored,
+  nameRefusal,
+  shownName,
+  thoughtNameAsStored,
+} from "./names.js";
 export { LOG_PAGE_SIZE } from "./resources/brains.js";
 export * from "./types.js";
 export {
   ALIASES_UNSUPPORTED,
   MAX_ALIASES,
-  MAX_NAME_LENGTH,
-  codePoints,
-  nameRefusal,
   normalizeAliases,
   replayThoughtIds,
-  shownName,
-  thoughtNameAsStored,
   type AliasChanges,
   type AliasOutcome,
   type CleanGraph,
@@ -75,7 +78,6 @@ export {
   isStructuralLink,
   isTagLink,
   isTypeLink,
-  linkNameAsStored,
   type CreateLinkInput,
   type UpdateLinkInput,
 } from "./resources/links.js";

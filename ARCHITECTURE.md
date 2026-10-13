@@ -301,8 +301,11 @@ batch's warning about notes with fenced code, the thoughts `brain_index`
 lists as not read, and the message for a create answered with an identifier
 of zeros. A refusal is worded in the API layer and a batch's line in the
 operation, both below the tools, so the function is defined beside
-`codePoints()` in `src/api/resources/thoughts.ts`, and `respond.ts` passes
-it on to the tools.
+`codePoints()` in `src/api/names.ts`, and `respond.ts` passes it on to the
+tools. That module imports nothing: `resources/kind.ts` words the refusals
+and `resources/thoughts.ts` reads a kind through it, so with the function in
+`thoughts.ts` the two imported each other. A test walks the imports under
+`src/` and fails on a module that is loaded by way of itself.
 
 ### What changed, and to which thought
 

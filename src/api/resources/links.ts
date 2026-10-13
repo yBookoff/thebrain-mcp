@@ -354,20 +354,6 @@ export function isStructuralLink(link: LinkDto): boolean {
   return link.meaning === LinkMeaning.Normal;
 }
 
-/**
- * A link's name as TheBrain keeps it, by a `POST` and by a `PATCH` alike: a
- * tab and a line feed are each a space, and the blanks at either end are
- * dropped, a no-break space among them. A run of spaces inside is kept, and
- * so is a carriage return (contract test; docs/api-map.md, L35).
- *
- * It is what a name asked for is set against the name a link has: sent as it
- * was given, `" motivates\n"` would pass for another label than the
- * `"motivates"` it was stored as, on every run of a plan.
- */
-export function linkNameAsStored(name: string): string {
-  return name.replace(/[\t\n]/g, " ").trim();
-}
-
 function sameId(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }

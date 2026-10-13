@@ -1,7 +1,7 @@
 import { assertUuid, type TheBrainClient } from "../client.js";
 import { TheBrainError } from "../errors.js";
+import { shownName } from "../names.js";
 import { type ThoughtDto, ThoughtKind } from "../types.js";
-import { shownName } from "./thoughts.js";
 
 /** The kinds a write can ask for, and the words a refusal is put in. */
 const REQUIRED = {
