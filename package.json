@@ -45,7 +45,7 @@
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run typecheck && npm run test && npm run build",
     "release": "npm version patch && git push --follow-tags",
-    "version": "node scripts/sync-server-json.mjs && git add server.json"
+    "version": "node scripts/sync-server-json.mjs && git add server.json src/server/index.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

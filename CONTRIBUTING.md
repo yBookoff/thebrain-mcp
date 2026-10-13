@@ -113,6 +113,11 @@ script also refuses to run if the identities drift apart — `mcpName` in
 `package.json` must equal `name` in `server.json`, and the npm entry's
 `identifier` must equal the package name.
 
+The same script and the same check keep `SERVER_VERSION` in
+`src/server/index.ts`, the version the server reports to a client at
+`initialize`. That line is not edited by hand: it said 0.1.0 from the 0.2.0
+package. A unit test sets it against `package.json` as well.
+
 There are **no publishing secrets in this repository at all**. Both npm and the
 MCP Registry authenticate over OIDC: GitHub Actions proves its identity, each
 issues a token valid for that single run, and npm produces a provenance

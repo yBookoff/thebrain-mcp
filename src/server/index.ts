@@ -14,7 +14,13 @@ import { registerReadTools } from "./tools/read.js";
 import { registerWriteTools } from "./tools/write.js";
 
 export const SERVER_NAME = "thebrain-mcp";
-export const SERVER_VERSION = "0.1.0";
+/**
+ * The package's version, as every client is told it at `initialize`. Not
+ * edited by hand: `npm version` writes this line through
+ * scripts/sync-server-json.mjs, whose `--check` the publish workflow runs,
+ * and a unit test sets it against package.json.
+ */
+export const SERVER_VERSION = "0.2.0";
 
 export function createServer(config: Config): {
   server: McpServer;

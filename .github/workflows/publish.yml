@@ -72,7 +72,7 @@ jobs:
           fi
           echo "publishing $(node -p "require('./package.json').name")@$pkg"
 
-      - name: Check that server.json agrees with package.json
+      - name: Check that server.json and the server's own version agree with package.json
         run: node scripts/sync-server-json.mjs --check
 
       # Built with the npm that ships with Node, as in CI.
