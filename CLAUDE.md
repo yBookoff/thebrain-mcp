@@ -167,7 +167,18 @@ silent wrong behaviour rather than a loud failure:
   any other relation before the first write. `links.update()` takes no
   relation either: a patch with 2 swaps the ends on every send. Change what a
   link is through `links.create()`, which rewrites the link two thoughts share.
-- **Markdown round-trip eats the closing ` ``` `.** Warn; suggest indented code.
+- **A note keeps a code block that is closed; a ` ``` ` line with no partner
+  is deleted.** Of the lines that begin with three backticks, whatever
+  follows them, the last goes when their number is odd, whole, and a pair
+  with no line between, the second of them bare, goes as an empty block:
+  each with a 200. `\r\n` comes back as `\n`; nothing else changes. So a
+  block left open loses its opening fence, and a line of prose that opens
+  with a triple-backtick span goes with its sentence. An append is gone over
+  as the whole note, and the bare request joins its text to the last line: a
+  block appended so loses its closing fence, which `notes.append()` prevents;
+  it returns the whole text. `noteAsStored()` is the rule: warn only of a
+  note that lost a line (`linesNotKept()`), and set a text against a note as
+  it would be stored. What the app's editor saves is not measured.
 - **`by-location` compares the host by case, and a URL is stored as given.**
   `Example.com/p` does not find `example.com/p`. Attach through
   `attachments.attachUrl()`, which also checks the thought's own list with the
@@ -346,8 +357,8 @@ Constraints to respect in any new code:
   (10 s) and is then refused with `IndexRunningError`, having read and written
   nothing. Code that reads the index, awaits, and writes by what it read
   belongs inside a claim; a single write, like `remove()` after a deletion,
-  does not. An index of another model is replaced through `startOver()`,
-  never `clear()` and then `setMeta()`.
+  does not. An index of another model is replaced through `startOver()`, in
+  one transaction; `clear()` is gone.
 - **A rebuild and a sync read everything before they write anything, and a
   read that fails is not an answer.** `auth`, `unknown_brain` and `network`
   stop the run, and so do the log's and the brain's reads whatever they fail
@@ -357,7 +368,10 @@ Constraints to respect in any new code:
   the watermark does not move, a rebuild removes no row its walk did not
   reach, and `brain_index` answers `isError`. Never `.catch(() => null)` a
   graph or `.catch(() => "")` a note there. Both runs ask
-  `Embedder.isAvailable?.()` before their first request.
+  `SemanticIndexer.cannotEmbed()` before their first request
+  (`Embedder.isAvailable?.()`, then `whyUnavailable?.()` for the reason), and
+  `brain_index` status asks it too: usable is an index a search can rank by
+  and an embedder that can embed.
 
 ## Tests
 
