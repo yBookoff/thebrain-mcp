@@ -86,6 +86,18 @@ silent wrong behaviour rather than a loud failure:
   so paging back and reading from a watermark both hold. Never count edits by
   entries, or expect an entry to stay where it was read.
 - **A thought's type also appears in `parents`.** Filter it in traversal.
+- **A name of white space alone is a 400 for a new thought and a 200 that
+  renames nothing, and white space is Unicode's `White_Space`, not what
+  `trim()` drops.** A next line (U+0085) is of it and a byte order mark is
+  not. A name is stored with each tab and line feed as a space and without the
+  white space at its ends, and past 1,024 UTF-16 units it is cut, each with a
+  200. Ask `nameRefusal()` ahead of any write that carries a name, and compare
+  and report a name through `thoughtNameAsStored()`: a plan thought looked for
+  as it was sent was made again by every run. A name of characters that do
+  not show is stored like any other and is not refused: print a thought's
+  name through `shownName()`, which spells out one whose every code point is
+  `White_Space`, `Default_Ignorable_Code_Point` or `Cc`. `table()` does that
+  for a cell.
 - **Aliases only replace as a whole list, and a read straight after the write
   usually returns the old one.** Add and remove through
   `thoughts.changeAliases()`, which waits for the write to read back: two
@@ -222,7 +234,8 @@ silent wrong behaviour rather than a loud failure:
   thought is the same name under the same relation to the same thought; one
   of that name under another relation fails with its identifier, neither
   reused nor made again. A graph that has been read is answered from a copy,
-  up to 0.2 s behind a create, so `ingest()` returns once the graphs list
+  0.2 s behind a create as a rule and past 0.3 s now and then, so `ingest()`
+  returns once the graphs list
   what it made and counts what they still lack after 2 s in `unlisted`. A
   read of that graph that fails fails the thought, never "nothing there". A
   thought with no parent is still made by every run, and a `relation` with no
@@ -265,10 +278,17 @@ silent wrong behaviour rather than a loud failure:
   the plan's only when that read answers that there is none; a read that fails
   is not that answer. A found thought used to lose its note on every run.
   Changing a note is `brain_set_note` or `brain_append_note`, never a plan.
-- **A graph is behind any write, not a batch's own alone.** The single-thought
-  tools return at once. `ingest()` waits out what is left of `COPY_LAG_MS`
-  since `client.sinceLastWrite()` before its first look; anything new that
-  decides by a graph or by a note being there needs the same.
+- **A graph is behind any write, not a batch's own alone, and by no fixed
+  time.** The single-thought tools return at once. The copy has a new thought
+  within 0.2 s as a rule; with the app slow to answer it was first seen 364 ms
+  after the create's answer. `ingest()` waits out what is left of
+  `COPY_LAG_MS` since `client.sinceLastWrite()` before its first look, and
+  then reads the graph until it shows what `client.written` (`RecentWrites`)
+  kept of this process's creates, links and renames; a thought fails with
+  `IngestBehindError` when it never does. Anything new that decides by a
+  graph needs both. A new write whose mark on a graph has been measured
+  records it in `client.written`; one that takes a thought or a link away
+  calls `forget()` or `unlinked()`.
 - **Two thoughts of one name in one list of a graph are in no order to rely
   on.** They change places from read to read. `ingest()` fails a plan thought
   with two candidates and names both.
