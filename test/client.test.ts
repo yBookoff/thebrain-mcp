@@ -14,6 +14,8 @@ import {
   normalizeBaseUrl,
 } from "../src/api/client.js";
 import { TheBrainError } from "../src/api/errors.js";
+import { Relation } from "../src/api/types.js";
+import { RecentWrites, WRITTEN_KEPT_MS, type ShownGraph } from "../src/api/written.js";
 
 const KEY = "test-key";
 const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
@@ -461,6 +463,178 @@ describe("how long ago the client last wrote", () => {
       await expect(deaf.get("/api/brains")).rejects.toMatchObject({ kind: "network" });
       await vi.advanceTimersByTimeAsync(40);
       expect(deaf.sinceLastWrite()).toBe(40);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("what a process wrote a moment ago, set against a graph", () => {
+  const OTHER_BRAIN = "aaaaaaaa-0000-4000-8000-00000000000f";
+  const ROOT = "bbbbbbbb-0000-4000-8000-000000000002";
+  const NEW = "cccccccc-0000-4000-8000-000000000003";
+  const ELSE = "dddddddd-0000-4000-8000-000000000004";
+  /** The graph of `of`, listing the given thoughts as `id: name`. */
+  type Graph = ShownGraph & { of: string };
+  const graph = (
+    of: string,
+    lists: Partial<Record<"children" | "parents" | "jumps", Record<string, string>>> = {},
+  ): Graph => {
+    const listed = (there: Record<string, string> = {}) =>
+      Object.entries(there).map(([thoughtId, name]) => ({ id: thoughtId, name }));
+    return {
+      of,
+      children: listed(lists.children),
+      parents: listed(lists.parents),
+      jumps: listed(lists.jumps),
+    };
+  };
+  const lacking = (written: RecentWrites, read: Graph, brainId = BRAIN) =>
+    written
+      .notShownBy(brainId, read.of, read)
+      .map((f) =>
+        f.of === "listed" ? `${f.thoughtId} in ${f.list}` : `${f.thoughtId} as ${f.name}`,
+      );
+
+  it("a client that wrote nothing holds no graph to anything", () => {
+    const { client } = clientReturning("{}");
+    expect(client.written.notShownBy(BRAIN, ROOT, graph(ROOT))).toEqual([]);
+  });
+
+  it("a thought made next to another is in the list its relation puts it in, on both sides", () => {
+    for (const [relation, there, back] of [
+      [Relation.Child, "children", "parents"],
+      [Relation.Parent, "parents", "children"],
+      [Relation.Jump, "jumps", "jumps"],
+    ] as const) {
+      const written = new RecentWrites();
+      written.linked(BRAIN, ROOT, NEW, relation);
+
+      // A copy from before the write lacks it, and one that lists it under
+      // another relation is from before the write too.
+      expect(lacking(written, graph(ROOT)), there).toEqual([`${NEW} in ${there}`]);
+      const elsewhere = there === "jumps" ? "children" : "jumps";
+      expect(lacking(written, graph(ROOT, { [elsewhere]: { [NEW]: "n" } })), there).toEqual([
+        `${NEW} in ${there}`,
+      ]);
+      expect(lacking(written, graph(ROOT, { [there]: { [NEW]: "n" } })), there).toEqual([]);
+      // The source is in the new thought's graph, seen from that end.
+      expect(lacking(written, graph(NEW)), back).toEqual([`${ROOT} in ${back}`]);
+      expect(lacking(written, graph(NEW, { [back]: { [ROOT]: "r" } })), back).toEqual([]);
+      // No other graph is held to it, and none of another brain.
+      expect(lacking(written, graph(ELSE))).toEqual([]);
+      expect(lacking(written, graph(ROOT), OTHER_BRAIN)).toEqual([]);
+    }
+  });
+
+  it("an identifier is the same in capitals, as it is to the API", () => {
+    const written = new RecentWrites();
+    written.linked(BRAIN, ROOT.toUpperCase(), NEW, Relation.Child);
+    expect(lacking(written, graph(ROOT))).toEqual([`${NEW} in children`]);
+    expect(
+      lacking(written, graph(ROOT, { children: { [NEW.toUpperCase()]: "n" } }), BRAIN.toUpperCase()),
+    ).toEqual([]);
+  });
+
+  it("two thoughts share one link: a later link between the pair takes the place of what was known", () => {
+    const written = new RecentWrites();
+    written.linked(BRAIN, ROOT, NEW, Relation.Child);
+    // Posted from the other end, as a jump: the child link is that jump now.
+    written.linked(BRAIN, NEW, ROOT, Relation.Jump);
+
+    expect(lacking(written, graph(ROOT, { children: { [NEW]: "n" } }))).toEqual([`${NEW} in jumps`]);
+    expect(lacking(written, graph(ROOT, { jumps: { [NEW]: "n" } }))).toEqual([]);
+    expect(lacking(written, graph(NEW, { jumps: { [ROOT]: "r" } }))).toEqual([]);
+  });
+
+  it("a renamed thought is listed under its new name, wherever a graph lists it", () => {
+    const written = new RecentWrites();
+    written.named(BRAIN, NEW, "After");
+
+    for (const list of ["children", "parents", "jumps"] as const) {
+      expect(lacking(written, graph(ROOT, { [list]: { [NEW]: "Before" } })), list).toEqual([
+        `${NEW} as After`,
+      ]);
+      expect(lacking(written, graph(ROOT, { [list]: { [NEW]: "After" } })), list).toEqual([]);
+    }
+    // A graph that does not list it has nothing to be behind in,
+    expect(lacking(written, graph(ROOT, { children: { [ELSE]: "Before" } }))).toEqual([]);
+    // and the last name given is the one that counts.
+    written.named(BRAIN, NEW, "Later");
+    expect(lacking(written, graph(ROOT, { children: { [NEW]: "After" } }))).toEqual([
+      `${NEW} as Later`,
+    ]);
+  });
+
+  it("nothing is asked of a graph about a thought that was forgotten, as either end", () => {
+    const written = new RecentWrites();
+    written.linked(BRAIN, ROOT, NEW, Relation.Child);
+    written.linked(BRAIN, ROOT, ELSE, Relation.Child);
+    written.named(BRAIN, NEW, "After");
+    written.forget(BRAIN, NEW.toUpperCase());
+
+    expect(lacking(written, graph(ROOT, { jumps: { [NEW]: "Before" } }))).toEqual([
+      `${ELSE} in children`,
+    ]);
+    expect(lacking(written, graph(NEW))).toEqual([]);
+    // In another brain it is another thought.
+    written.forget(OTHER_BRAIN, ELSE);
+    expect(lacking(written, graph(ROOT))).toEqual([`${ELSE} in children`]);
+  });
+
+  it("a link deleted by its identifier leaves no thought of that brain known to be next to another", () => {
+    const written = new RecentWrites();
+    written.linked(BRAIN, ROOT, NEW, Relation.Child);
+    written.linked(OTHER_BRAIN, ROOT, NEW, Relation.Child);
+    written.named(BRAIN, NEW, "After");
+    written.unlinked(BRAIN);
+
+    expect(lacking(written, graph(ROOT))).toEqual([]);
+    // A name is no link, and the other brain's links are its own.
+    expect(lacking(written, graph(ROOT, { children: { [NEW]: "Before" } }))).toEqual([
+      `${NEW} as After`,
+    ]);
+    expect(lacking(written, graph(ROOT), OTHER_BRAIN)).toEqual([`${NEW} in children`]);
+  });
+
+  it("a write is kept for ten seconds and no longer", () => {
+    vi.useFakeTimers();
+    try {
+      const written = new RecentWrites();
+      written.linked(BRAIN, ROOT, NEW, Relation.Child);
+      written.named(BRAIN, ELSE, "After");
+      const behind = graph(ROOT, { jumps: { [ELSE]: "Before" } });
+
+      vi.advanceTimersByTime(WRITTEN_KEPT_MS);
+      expect(WRITTEN_KEPT_MS).toBe(10_000);
+      expect(lacking(written, behind)).toEqual([`${NEW} in children`, `${ELSE} as After`]);
+      vi.advanceTimersByTime(1);
+      expect(lacking(written, behind)).toEqual([]);
+      // Each from its own write: a later one outlives an earlier.
+      written.linked(BRAIN, ROOT, NEW, Relation.Child);
+      vi.advanceTimersByTime(6000);
+      written.named(BRAIN, ELSE, "After");
+      vi.advanceTimersByTime(6000);
+      expect(lacking(written, behind)).toEqual([`${ELSE} as After`]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("what is past its time goes as the next write is kept: a process that never looks at a graph keeps ten seconds of writes", () => {
+    vi.useFakeTimers();
+    try {
+      const written = new RecentWrites();
+      const id = (n: number): string => `cccccccc-0000-4000-8000-${String(n).padStart(12, "0")}`;
+      // A create a second for a minute, and no graph read in all that time.
+      for (let n = 0; n < 60; n += 1) {
+        written.linked(BRAIN, ROOT, id(n), Relation.Child);
+        written.named(BRAIN, id(n), "After");
+        vi.advanceTimersByTime(1000);
+      }
+      // Two for a link, one for a name, of the eleven writes ten seconds hold.
+      expect(written.size).toBeLessThanOrEqual(11 * 3);
+      expect(written.size).toBeGreaterThan(0);
     } finally {
       vi.useRealTimers();
     }

@@ -45,6 +45,13 @@ export {
   mayHaveLanded,
 } from "./client.js";
 export { TheBrainError, type ApiErrorKind } from "./errors.js";
+export {
+  RecentWrites,
+  WRITTEN_KEPT_MS,
+  type GraphList,
+  type ShownGraph,
+  type WrittenFact,
+} from "./written.js";
 export { compareLogTime, logEntryKey, logTime } from "./log.js";
 export { LOG_PAGE_SIZE } from "./resources/brains.js";
 export * from "./types.js";

@@ -15,6 +15,7 @@ import {
   kindForStatus,
   looksLikeHtml,
 } from "./errors.js";
+import { RecentWrites } from "./written.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -138,6 +139,12 @@ export class TheBrainClient {
   readonly #fetch: typeof fetch;
   /** When the last request that was not a read came back, answered or not. */
   #lastWrite = Number.NEGATIVE_INFINITY;
+  /**
+   * What the writes sent through this client put into the graphs: kept by the
+   * resources as each write is answered, for a reader that decides by a graph
+   * and has to know one that is behind. See `RecentWrites`.
+   */
+  readonly written = new RecentWrites();
 
   constructor(options: ClientOptions) {
     if (!options.apiKey) {
@@ -179,9 +186,12 @@ export class TheBrainClient {
    * no answer. Infinity when it has sent none.
    *
    * It is for a read that has to follow a write: a graph that has been read
-   * is answered from a copy up to 0.2 s behind one (docs/api-map.md, L27),
-   * and nothing in the answer tells a copy that is behind from one that is
-   * not. Only this process's own writes are known here.
+   * is answered from a copy that is behind one, by 0.2 s as a rule and now
+   * and then by more (docs/api-map.md, L27), and nothing in the answer tells
+   * a copy that is behind from one that is not. So this is for the writes
+   * that leave nothing to look for, a create that got no answer among them;
+   * for the others `written` says what a graph has to show. Only this
+   * process's own writes are known here.
    */
   sinceLastWrite(): number {
     return Date.now() - this.#lastWrite;

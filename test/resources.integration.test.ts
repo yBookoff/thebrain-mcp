@@ -17,7 +17,7 @@
  *
  * Missing either variable skips the suite.
  */
-import { afterAll, beforeAll, describe, expect, it, type TestContext } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi, type TestContext } from "vitest";
 
 import {
   EntityType,
@@ -4698,9 +4698,12 @@ suite("resource layer against the live API", () => {
       // relation, each next to a thought whose graph had been read: the read
       // straight after the answer lacked the new thought 112 times, and had
       // it 10 to 205 ms later, about 80 ms at the median. The copy was still
-      // the one answered a minute after it was made (19 of 20). Next to a
-      // thought whose graph nothing had read, the same read had it 60 times
-      // of 60.
+      // the one answered a minute after it was made (19 of 20). Measured
+      // again three days on, that did not hold: read straight before the
+      // create the graph lacked the thought 355 times in 400, read 0.3 s
+      // before it 37 in 600, and a second before it 0 in 36. So the graph
+      // is read straight before the create here. Next to a thought whose
+      // graph nothing had read, the same read had it 60 times of 60.
       let lacked = 0;
       for (const relation of [...RELATIONS, ...RELATIONS]) {
         const source = await make(`sr-read-${relation}`);
@@ -4823,34 +4826,169 @@ suite("resource layer against the live API", () => {
       expect(named.created.map((c) => c.tempId)).toEqual(["leaf"]);
     }, 30_000);
 
-    it("ingest sent straight after another call made a thought finds it, though the graph it looks in had been read", async () => {
-      // The tools that write one thought return at once, and a plan sent
+    it("ingest finds what another call of this process wrote a moment ago, though the graph it looks in is the copy from before it", async () => {
+      // The tools that write one thing return at once, and a plan sent
       // straight after one read the copy from before it. Through the real
       // handlers, 20 times each at 0 to 150 ms after the write: after
       // brain_create_thought the thought was made again 8 times in 100,
-      // after brain_link 14, after a rename 3, and never from 200 ms on (0
-      // of 60). Now ingest waits out what is left of 300 ms since this
-      // client's last write before it looks: 0 of 360. Eight tries here are
-      // no proof by themselves: without the wait they made no thought twice
-      // about one run in two. The unit tests hold the wait to its time.
+      // after brain_link 14, after a rename 3. So `ingest()` waits out what
+      // is left of 300 ms since this client's last write, and for a while
+      // that was all: 0 of 360. It is no bound. Read once 250 ms after a
+      // create, the graph of a thought read 0.3 s earlier still lacked the
+      // new thought 4 times in 600; read on every 10 ms, it first had it
+      // more than 300 ms after the answer 7 times in 1,800, 364 ms at the
+      // latest, all while the app was slow to answer. The test that stood
+      // here, eight tries behind that wait, went red in one run of ten on
+      // one day and in none of 160 on the next: it measured the day, and
+      // said nothing of the code when it was green.
+      //
+      // So the clock is taken out of the way here, and the worst case is
+      // made: the graph is read straight before the write, where the read
+      // straight after it lacked the new thought 197 times in 200. By the
+      // clock the write is long past, as it is for a copy that is further
+      // behind than the wait. What `ingest()` has left is what the client
+      // kept of the write, and it reads until the graph shows that. Without
+      // it every try below makes the thought a second time.
       const name = (what: string): string => `${PREFIX}sr-after-${what}`;
-      for (let i = 0; i < 8; i += 1) {
-        const root = await make(`sr-after-root-${i}`);
+      /** One thing written next to `root` by a call of its own, and the thought a plan then names. */
+      const WRITES = {
+        async child(root: string, title: string) {
+          return api.thoughts.create(brainId, { name: title, sourceThoughtId: root });
+        },
+        async parent(root: string, title: string) {
+          return api.thoughts.create(brainId, {
+            name: title,
+            sourceThoughtId: root,
+            relation: Relation.Parent,
+          });
+        },
+        async jump(root: string, title: string) {
+          return api.thoughts.create(brainId, {
+            name: title,
+            sourceThoughtId: root,
+            relation: Relation.Jump,
+          });
+        },
+        // An existing thought put under the root, as brain_link does.
+        async linked(root: string, title: string) {
+          const id = await api.thoughts.create(brainId, { name: title });
+          created.push(id);
+          await api.thoughts.getGraph(brainId, root);
+          await api.links.create(brainId, {
+            thoughtIdA: root,
+            thoughtIdB: id,
+            relation: Relation.Child,
+          });
+          return id;
+        },
+        // A child the graph lists already, renamed, as brain_update_thought does.
+        async renamed(root: string, title: string) {
+          const id = await api.thoughts.create(brainId, {
+            name: `${title}-before`,
+            sourceThoughtId: root,
+          });
+          created.push(id);
+          await eventually(
+            () => api.thoughts.getGraph(brainId, root),
+            (g) => g.children.some((t) => t.id === id),
+          );
+          await api.thoughts.getGraph(brainId, root);
+          await api.thoughts.update(brainId, id, { name: title });
+          return id;
+        },
+      };
+      const RELATION_OF = { child: "child", parent: "parent", jump: "jump" } as const;
+      const clock = vi
+        .spyOn(api.client, "sinceLastWrite")
+        .mockReturnValue(Number.POSITIVE_INFINITY);
+      try {
+        for (const [i, how] of (
+          ["child", "parent", "jump", "linked", "renamed", "child", "linked", "renamed"] as const
+        ).entries()) {
+          const root = await make(`sr-after-root-${i}`);
+          // The copy the plan will be answered from, made straight before the write.
+          await api.thoughts.getGraph(brainId, root);
+          const made = await WRITES[how](root, name(`${how}-${i}`));
+          created.push(made);
+
+          const outcome = await ingest(api, brainId, {
+            thoughts: [
+              {
+                tempId: "x",
+                name: name(`${how}-${i}`),
+                parent: root,
+                relation: how in RELATION_OF ? RELATION_OF[how as keyof typeof RELATION_OF] : "child",
+              },
+            ],
+          });
+          for (const c of outcome.created) created.push(c.thoughtId);
+          // All three at once: a red run then says whether a thought was
+          // made again or a read failed.
+          expect(
+            {
+              reused: outcome.reused.map((r) => r.thoughtId),
+              created: outcome.created.map((c) => c.thoughtId),
+              failures: outcome.failures.map((f) => f.reason),
+            },
+            `${how} (${i})`,
+          ).toEqual({ reused: [made], created: [], failures: [] });
+        }
+      } finally {
+        clock.mockRestore();
+      }
+    }, 30_000);
+
+    it("the graphs come to show what the client keeps of a create, a link and a rename, on both sides", async () => {
+      // `RecentWrites` holds a graph to these, and a graph that never came
+      // to show one would fail every plan next to that thought for ten
+      // seconds. Each is in the other's graph in the list the relation puts
+      // it in, for a thought created next to another as for two joined by a
+      // link, and a renamed thought is listed under its name as stored.
+      const EMPTY = { children: [], parents: [], jumps: [] };
+      const lacking = async (id: string): Promise<string[]> =>
+        api.client.written
+          .notShownBy(brainId, id, await api.thoughts.getGraph(brainId, id))
+          .map((f) => (f.of === "listed" ? `${f.thoughtId} in ${f.list}` : `${f.thoughtId} named`));
+      const shown = async (...ids: string[]): Promise<string[][]> =>
+        eventually(
+          () => Promise.all(ids.map(lacking)),
+          (all) => all.every((none) => none.length === 0),
+          { timeoutMs: 5000, stepMs: 25 },
+        );
+
+      for (const relation of [Relation.Child, Relation.Parent, Relation.Jump]) {
+        const root = await make(`sr-kept-root-${relation}`);
+        const loose = await make(`sr-kept-loose-${relation}`);
+        // Both graphs read, so that each is a copy to be behind.
         await api.thoughts.getGraph(brainId, root);
-        await settle(300);
+        await api.thoughts.getGraph(brainId, loose);
+
         const made = await api.thoughts.create(brainId, {
-          name: name(String(i)),
+          name: `${PREFIX}sr-kept-made-${relation}`,
           sourceThoughtId: root,
+          relation,
         });
         created.push(made);
+        await api.links.create(brainId, { thoughtIdA: root, thoughtIdB: loose, relation });
+        // Two of the root's, and the root from each of the others.
+        expect(api.client.written.notShownBy(brainId, root, EMPTY), String(relation)).toHaveLength(2);
+        expect(api.client.written.notShownBy(brainId, made, EMPTY), String(relation)).toHaveLength(1);
+        expect(api.client.written.notShownBy(brainId, loose, EMPTY), String(relation)).toHaveLength(1);
 
-        const outcome = await ingest(api, brainId, {
-          thoughts: [{ tempId: "x", name: name(String(i)), parent: root }],
-        });
-        for (const c of outcome.created) created.push(c.thoughtId);
-        expect(outcome.reused.map((r) => r.thoughtId), String(i)).toEqual([made]);
-        expect(outcome.created, String(i)).toEqual([]);
+        expect(await shown(root, made, loose), String(relation)).toEqual([[], [], []]);
       }
+
+      const root = await make("sr-kept-renamed-root");
+      const child = await api.thoughts.create(brainId, {
+        name: `${PREFIX}sr-kept-before`,
+        sourceThoughtId: root,
+      });
+      created.push(child);
+      expect(await shown(root)).toEqual([[]]);
+      await api.thoughts.update(brainId, child, { name: ` ${PREFIX}sr-kept\tafter\n` });
+      expect(await shown(root)).toEqual([[]]);
+      const listed = (await api.thoughts.getGraph(brainId, root)).children.map((t) => t.name);
+      expect(listed).toEqual([`${PREFIX}sr-kept after`]);
     }, 30_000);
 
     it("a create whose answer is lost is found by the same plan sent at once", async () => {

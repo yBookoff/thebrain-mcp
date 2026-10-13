@@ -102,7 +102,13 @@ export class LinksResource {
     if (relation === Relation.Parent) {
       await this.requireParent(brainId, input.thoughtIdB, "thoughtIdB");
     }
-    return this.#post(brainId, input);
+    const id = await this.#post(brainId, input);
+    // Each end's graph lists the other from now on, where the relation puts
+    // it, and a copy of either graph from before this answer does not: kept
+    // for a reader that looks there next. Not for a tag's attachment, which
+    // does not come through here.
+    this.client.written.linked(brainId, input.thoughtIdA, input.thoughtIdB, relation);
+    return id;
   }
 
   /**
@@ -185,6 +191,15 @@ export class LinksResource {
   async delete(brainId: string, linkId: string): Promise<void> {
     assertUuid(brainId, "brainId");
     assertUuid(linkId, "linkId");
+    // Which two thoughts it joined is not known here, so no graph of the
+    // brain is held to listing what a link of this process put there. Ahead
+    // of the request: one that got no answer may have deleted the link.
+    this.client.written.unlinked(brainId);
+    await this.#remove(brainId, linkId);
+  }
+
+  /** The request itself: for a tag's attachment and a type's link, which no graph is held to. */
+  async #remove(brainId: string, linkId: string): Promise<void> {
     await this.client.delete(`/api/links/${brainId}/${linkId}`);
   }
 
@@ -298,7 +313,7 @@ export class LinksResource {
     if (link === null || !isTagLink(link) || !sameId(link.thoughtIdA, tagThoughtId)) {
       return false;
     }
-    await this.delete(brainId, link.id);
+    await this.#remove(brainId, link.id);
     return true;
   }
 
@@ -316,7 +331,7 @@ export class LinksResource {
   ): Promise<boolean> {
     const link = await this.between(brainId, typeThoughtId, thoughtId);
     if (link === null || !isTypeLink(link)) return false;
-    await this.delete(brainId, link.id);
+    await this.#remove(brainId, link.id);
     return true;
   }
 }

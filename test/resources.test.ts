@@ -1588,6 +1588,205 @@ describe("the identifier of zeros, sent by a caller", () => {
   });
 });
 
+describe("what a write leaves for a reader of a graph", () => {
+  // A graph is answered from a copy that is behind a write, and nothing in
+  // it says so. The client keeps what an answered write put into the graphs,
+  // so that a reader can tell: `ingest()` looks in a copy 0.3 s after
+  // another call's create, and one further behind than that lacks the
+  // thought, which is then made again.
+  const NEW = "eeeeeeee-0000-4000-8000-000000000005";
+  const OTHER = "ffffffff-0000-4000-8000-000000000006";
+  const LINK = "99999999-0000-4000-8000-000000000009";
+  const ZEROS = "00000000-0000-0000-0000-000000000000";
+
+  /** A brain of ordinary thoughts that answers every write, a create with `created`. */
+  const brain = (created: unknown = { id: NEW }) =>
+    apiWith([
+      ["POST /api/thoughts", () => created],
+      ["POST /api/links", () => created],
+      ["PATCH /api/", () => 200],
+      ["DELETE /api/", () => 200],
+      [
+        "/api/links/",
+        () => ({ id: LINK, thoughtIdA: TAG, thoughtIdB: THOUGHT, relation: 1, meaning: 5 }),
+      ],
+      [
+        "/api/thoughts/",
+        (url) => {
+          const id = url.pathname.split("/").pop()!;
+          return thought(id, "any", { kind: id === TAG ? 4 : id === TYPE ? 2 : 1 });
+        },
+      ],
+    ]);
+  /** A copy of a graph from before anything was written: it lists nobody. */
+  const EMPTY = { children: [], parents: [], jumps: [] };
+  /** What the client would have the graph of `id` show that an empty one does not. */
+  const asked = (api: TheBrainApi, id: string): string[] =>
+    api.client.written
+      .notShownBy(BRAIN, id, EMPTY)
+      .map((f) => (f.of === "listed" ? `${f.thoughtId} in ${f.list}` : `${f.thoughtId} named`));
+
+  it("a thought created next to another is to be in that thought's graph, where the relation puts it", async () => {
+    for (const [relation, there, back] of [
+      [undefined, "children", "parents"],
+      [Relation.Child, "children", "parents"],
+      [Relation.Parent, "parents", "children"],
+      [Relation.Jump, "jumps", "jumps"],
+    ] as const) {
+      const { api } = brain();
+      const id = await api.thoughts.create(BRAIN, {
+        name: "New",
+        sourceThoughtId: THOUGHT,
+        ...(relation !== undefined ? { relation } : {}),
+      });
+
+      expect(asked(api, THOUGHT), there).toEqual([`${id} in ${there}`]);
+      expect(asked(api, id), back).toEqual([`${THOUGHT} in ${back}`]);
+      expect(asked(api, OTHER)).toEqual([]);
+    }
+  });
+
+  it("nothing is kept of a create with no source, of a type or a tag, or of one that was not answered with a thought", async () => {
+    const plain = brain();
+    await plain.api.thoughts.create(BRAIN, { name: "New" });
+    expect([asked(plain.api, THOUGHT), asked(plain.api, NEW)]).toEqual([[], []]);
+
+    // Where a new type or tag is listed next to its source was not measured.
+    for (const kind of [2, 4]) {
+      const { api } = brain();
+      await api.thoughts.create(BRAIN, {
+        name: "New",
+        kind,
+        sourceThoughtId: THOUGHT,
+        relation: Relation.Jump,
+      });
+      expect(asked(api, THOUGHT), String(kind)).toEqual([]);
+    }
+
+    const refused = brain(400);
+    await expect(
+      refused.api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: THOUGHT }),
+    ).rejects.toMatchObject({ kind: "bad_request" });
+    expect(asked(refused.api, THOUGHT)).toEqual([]);
+
+    const zeros = brain({ id: ZEROS });
+    await expect(
+      zeros.api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: THOUGHT }),
+    ).rejects.toMatchObject({ kind: "zero_id" });
+    expect(asked(zeros.api, THOUGHT)).toEqual([]);
+  });
+
+  it("a link puts each end into the other's graph, where the relation puts it", async () => {
+    for (const [relation, there, back] of [
+      [undefined, "children", "parents"],
+      [Relation.Child, "children", "parents"],
+      [Relation.Parent, "parents", "children"],
+      [Relation.Jump, "jumps", "jumps"],
+    ] as const) {
+      const { api } = brain({ id: LINK });
+      await api.links.create(BRAIN, {
+        thoughtIdA: THOUGHT,
+        thoughtIdB: OTHER,
+        ...(relation !== undefined ? { relation } : {}),
+      });
+
+      expect(asked(api, THOUGHT), there).toEqual([`${OTHER} in ${there}`]);
+      expect(asked(api, OTHER), back).toEqual([`${THOUGHT} in ${back}`]);
+    }
+  });
+
+  it("nothing is kept of a tag attached, nor of a link that was refused or answered with zeros", async () => {
+    // A tag is in neither of the three lists, and its attachment is looked
+    // up by the pair, which is not behind a write.
+    const tagged = brain({ id: LINK });
+    await tagged.api.links.attachTag(BRAIN, THOUGHT, TAG);
+    expect([asked(tagged.api, THOUGHT), asked(tagged.api, TAG)]).toEqual([[], []]);
+
+    for (const [answer, kind] of [
+      [400, "bad_request"],
+      [{ id: ZEROS }, "zero_id"],
+    ] as const) {
+      const { api } = brain(answer);
+      await expect(
+        api.links.create(BRAIN, { thoughtIdA: THOUGHT, thoughtIdB: OTHER, relation: Relation.Jump }),
+      ).rejects.toMatchObject({ kind });
+      expect([asked(api, THOUGHT), asked(api, OTHER)], kind).toEqual([[], []]);
+    }
+  });
+
+  it("a rename is kept under the name as TheBrain stores it, and nothing of a patch that names nothing", async () => {
+    const { api } = brain();
+    await api.thoughts.update(BRAIN, NEW, { label: "caption" });
+    const lists = (name: string) => ({ children: [{ id: NEW, name }], parents: [], jumps: [] });
+    const behind = (name: string) => api.client.written.notShownBy(BRAIN, THOUGHT, lists(name));
+    expect(behind("Before")).toEqual([]);
+
+    await api.thoughts.update(BRAIN, NEW, { name: " After\tthat\n" });
+    expect(behind("Before")).toMatchObject([{ of: "named", thoughtId: NEW, name: "After that" }]);
+    expect(behind("After that")).toEqual([]);
+
+    const refused = apiWith([["PATCH /api/", () => 400]]);
+    await expect(refused.api.thoughts.update(BRAIN, NEW, { name: "After" })).rejects.toMatchObject({
+      kind: "bad_request",
+    });
+    expect(refused.api.client.written.notShownBy(BRAIN, THOUGHT, lists("Before"))).toEqual([]);
+  });
+
+  it("a thought deleted, or given another kind, is asked of no graph, whatever came of the request", async () => {
+    for (const [what, answer, change] of [
+      ["deleted", 200, (api: TheBrainApi) => api.thoughts.delete(BRAIN, NEW)],
+      // Unanswered or refused, it may be gone all the same.
+      ["a delete refused", 500, (api: TheBrainApi) => api.thoughts.delete(BRAIN, NEW)],
+      ["another kind", 200, (api: TheBrainApi) => api.thoughts.update(BRAIN, NEW, { kind: 4 })],
+      ["a kind refused", 400, (api: TheBrainApi) => api.thoughts.update(BRAIN, NEW, { kind: 4 })],
+    ] as const) {
+      const { api } = apiWith([
+        ["POST /api/thoughts", () => ({ id: NEW })],
+        ["DELETE /api/", () => answer],
+        ["PATCH /api/", () => answer],
+        ["/api/thoughts/", (url) => thought(url.pathname.split("/").pop()!, "any")],
+      ]);
+      await api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: THOUGHT });
+      await api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: OTHER });
+      expect(asked(api, THOUGHT), what).toEqual([`${NEW} in children`]);
+
+      await change(api).catch(() => undefined);
+      expect([asked(api, THOUGHT), asked(api, OTHER), asked(api, NEW)], what).toEqual([[], [], []]);
+    }
+  });
+
+  it("a link deleted by its identifier takes every link kept for that brain; a tag or a type taken off takes none", async () => {
+    const linked = async () => {
+      const made = brain();
+      await made.api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: THOUGHT });
+      return made;
+    };
+
+    const unlinked = await linked();
+    await unlinked.api.links.delete(BRAIN, LINK);
+    expect(asked(unlinked.api, THOUGHT)).toEqual([]);
+
+    // Neither is a link in one of the three lists.
+    const untagged = await linked();
+    expect(await untagged.api.links.detachTag(BRAIN, THOUGHT, TAG)).toBe(true);
+    expect(untagged.calls.at(-1)).toMatchObject({ method: "DELETE" });
+    expect(asked(untagged.api, THOUGHT)).toEqual([`${NEW} in children`]);
+
+    const untyped = apiWith([
+      ["POST /api/thoughts", () => ({ id: NEW })],
+      ["DELETE /api/", () => 200],
+      [
+        "/api/links/",
+        () => ({ id: LINK, thoughtIdA: TYPE, thoughtIdB: THOUGHT, relation: 1, meaning: 2 }),
+      ],
+      ["/api/thoughts/", (url) => thought(url.pathname.split("/").pop()!, "any")],
+    ]);
+    await untyped.api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: THOUGHT });
+    expect(await untyped.api.links.detachType(BRAIN, THOUGHT, TYPE)).toBe(true);
+    expect(asked(untyped.api, THOUGHT)).toEqual([`${NEW} in children`]);
+  });
+});
+
 describe("a link's name as TheBrain stores it", () => {
   it("has a tab and a line feed for a space each, and no blanks at either end", () => {
     // Measured on 15.0.640, by a POST and by a PATCH alike (contract test).

@@ -22,9 +22,10 @@
  *     thought made as a child under `children`, one made as a parent under
  *     `parents` and a jump under `jumps`. Looked for among `children` alone,
  *     the last two were made again by every run of the plan.
- *  5. A graph that has been read is answered from a copy, which is up to 0.2 s
- *     behind a create. So the batch returns once the graphs list what it made:
- *     a second run sent straight after it used to make the children again too.
+ *  5. A graph that has been read is answered from a copy, which is behind a
+ *     create, by 0.2 s as a rule. So the batch returns once the graphs list
+ *     what it made: a second run sent straight after it used to make the
+ *     children again too.
  *  6. Two plan items for one thought are one create. When it fails the other
  *     item is not sent on its own, and is listed as skipped, not as failed:
  *     it would be the same request again, under another label.
@@ -53,6 +54,12 @@
  *     a line feed a space each, the white space at the ends dropped. Looked
  *     for under the name as the plan had it, such a thought was made again
  *     by every run.
+ * 15. A graph is not taken at its word while it lacks what this process
+ *     wrote. The wait by the clock ahead of the first look is 0.3 s, and a
+ *     copy can be further behind: the thought another call had made a moment
+ *     before is then made again. What the process's own writes put next to
+ *     a thought is known (`RecentWrites`), so the graph is read until it
+ *     shows that, and a thought fails when it never does.
  */
 
 import {
@@ -69,6 +76,7 @@ import {
   thoughtNameAsStored,
   type CleanGraph,
   type TheBrainApi,
+  type WrittenFact,
 } from "../api/index.js";
 import { Relation, ThoughtKind, type LinkDto } from "../api/types.js";
 import { mapWithConcurrency } from "../semantic/indexer.js";
@@ -99,18 +107,22 @@ const RELATION_NAMES = Object.keys(LIST_OF) as RelationName[];
 type Neighbours = Record<RelationName, Map<string, Array<{ id: string; kind?: number }>>>;
 
 /**
- * How long a batch waits for the graphs to list what it made. Measured on a
- * quiet brain: about 80 ms at the median, 205 ms at the most. A graph that
- * answers and does not list yet is asked again a step later; one whose read
- * failed after twice the pause before, up to `maxStepMs`.
+ * How long a batch waits for the graphs to list what it made, and how long a
+ * look next to a thought waits for its graph to show what this process wrote
+ * there. Measured on a quiet brain: about 80 ms at the median, 205 ms at the
+ * most. A graph that answers and does not show it yet is asked again a step
+ * later; one whose read failed after twice the pause before, up to
+ * `maxStepMs`.
  */
 const LISTED = { stepMs: 25, maxStepMs: 400, timeoutMs: 2000 };
 
 /**
  * How long after this process's last write a graph is read to look for a
- * thought. The copy a graph is answered from was 205 ms behind a create at
- * the most, and a plan sent 200 ms after a write made nothing twice (0 of
- * 60).
+ * thought. It is for the writes that leave nothing to look for in a graph: a
+ * create that got no answer, and whatever `RecentWrites` keeps no mark of.
+ * The copy a graph is answered from was 205 ms behind a create at the most
+ * when this was set, and a plan sent 200 ms after a write made nothing twice
+ * (0 of 60). It is no bound: see `graphShowingWrites`.
  */
 const COPY_LAG_MS = 300;
 
@@ -277,6 +289,37 @@ export class IngestReadError extends Error {
     super(`${context}: ${describe(cause)}`, { cause });
     this.name = "IngestReadError";
     this.context = context;
+  }
+}
+
+/**
+ * A thought that was not looked for, and so not created, because the graph
+ * it would be looked for in was still behind a write of this process when
+ * the wait for it ran out. `behind` is what the graph did not show.
+ *
+ * The message is whole as it is: what was read, for how long, what was
+ * missing from it, and what to do.
+ */
+export class IngestBehindError extends Error {
+  readonly thoughtId: string;
+  readonly behind: readonly WrittenFact[];
+
+  constructor(thoughtId: string, behind: readonly WrittenFact[], waitedMs: number) {
+    const lacking = behind.map((f) =>
+      f.of === "listed"
+        ? `${f.thoughtId} among its ${f.list}`
+        : `${f.thoughtId} under the name ${JSON.stringify(f.name)}`,
+    );
+    super(
+      `${thoughtId} was read for ${waitedMs} ms to look for a thought of this name next to ` +
+        `it, and its graph still does not show what this server wrote a moment ago: ` +
+        `${lacking.join(", ")}. TheBrain answers a graph from a copy, and this one is ` +
+        "behind, so a thought of this name may be there unseen: nothing was created. Send " +
+        "this thought again in a few seconds",
+    );
+    this.name = "IngestBehindError";
+    this.thoughtId = thoughtId;
+    this.behind = behind;
   }
 }
 
@@ -571,6 +614,9 @@ export async function ingest(
     try {
       return await neighboursOf(anchorId);
     } catch (error) {
+      // The graph was read, and is behind: the thought is there, and the
+      // error says all there is to say.
+      if (error instanceof IngestBehindError) throw error;
       const nobodyHasIt = await api.thoughts.get(brainId, anchorId).then(
         () => false,
         (e: unknown) => e instanceof TheBrainError && e.kind === "not_found",
@@ -661,6 +707,11 @@ export async function ingest(
   // write came back less than that long ago: any other call costs nothing.
   // The read of a note is behind a first write in the same way, once in ten
   // still at 150 ms and never from 200 on, and comes after this wait too.
+  //
+  // The clock is not all there is to go by, though, and it is not enough:
+  // the copy can be past it. What this process's own writes put next to a
+  // thought is known, and the look itself holds the graph to that
+  // (`graphShowingWrites`). This wait is left for what leaves no such mark.
   if (dedupe && plan.thoughts.some((t) => t.parent !== undefined && !tempIds.has(t.parent))) {
     const wait = COPY_LAG_MS - api.client.sinceLastWrite();
     if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
@@ -987,13 +1038,60 @@ export async function ingest(
   return outcome;
 }
 
+/**
+ * A thought's graph, read until it shows what this process wrote next to the
+ * thought a moment ago.
+ *
+ * A graph is answered from a copy, and nothing in it says how far behind it
+ * is. A wait by the clock ahead of the read was the whole of the guard: 0.3 s
+ * from the last write, half as long again as the longest lag measured till
+ * then. That was the margin of a good day: with the app slow to answer, a
+ * reader first saw a new thought in the copy more than 0.3 s after the
+ * create's answer 7 times in 1,800, 364 ms at the latest, and the test
+ * behind the wait went red in one run of ten. A copy that far behind lacks
+ * the thought `brain_create_thought` made a moment before, and a plan that
+ * names it makes it a second time. What the app is busy with decides the
+ * lag, so no time is long enough for certain.
+ *
+ * What a process wrote itself it knows, though: `RecentWrites` keeps the
+ * thoughts its creates and links put next to this one, and the names its
+ * renames gave. A graph that lacks one of those is behind, by that and not
+ * by the clock, and is read again a step later until it is not. It costs no
+ * request when the first read shows them all, which is every call that does
+ * not follow a write of this process to this thought by seconds.
+ *
+ * When the wait runs out the graph is still not taken at its word: the
+ * thought fails, with `IngestBehindError`, and what hangs on it is skipped.
+ * Created then, it may be a second thought of its name, which only a person
+ * can remove. The same is true when the graph is right and the record is
+ * not, a thought this process linked here having been unlinked in the app
+ * since: nothing in either says which, and the record is dropped within
+ * `WRITTEN_KEPT_MS`.
+ */
+async function graphShowingWrites(
+  api: TheBrainApi,
+  brainId: string,
+  thoughtId: string,
+): Promise<CleanGraph> {
+  const started = Date.now();
+  const deadline = started + LISTED.timeoutMs;
+  for (;;) {
+    const graph = await api.thoughts.getGraph(brainId, thoughtId);
+    const behind = api.client.written.notShownBy(brainId, thoughtId, graph);
+    if (behind.length === 0) return graph;
+    const left = deadline - Date.now();
+    if (left <= 0) throw new IngestBehindError(thoughtId, behind, Date.now() - started);
+    await new Promise((resolve) => setTimeout(resolve, Math.min(LISTED.stepMs, left)));
+  }
+}
+
 /** A thought's graph as `Neighbours`. The type is not among the parents: `getGraph` drops it. */
 async function readNeighbours(
   api: TheBrainApi,
   brainId: string,
   thoughtId: string,
 ): Promise<Neighbours> {
-  const graph = await api.thoughts.getGraph(brainId, thoughtId);
+  const graph = await graphShowingWrites(api, brainId, thoughtId);
   const byName = (relation: RelationName): Neighbours[RelationName] => {
     const named: Neighbours[RelationName] = new Map();
     for (const t of graph[LIST_OF[relation]]) {

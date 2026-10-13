@@ -95,6 +95,14 @@ and repeating even a write is safe. A timeout or a dropped connection may have
 reached TheBrain, so it is reported rather than retried elsewhere. An explicit
 `THEBRAIN_BASE_URL` is used alone, with no fallback.
 
+**The client keeps what it wrote.** `client.sinceLastWrite()` is when its last
+write came back, and `client.written` (`RecentWrites`) is what its answered
+creates, links and renames put into the graphs, kept for ten seconds. Both
+are for a reader of a graph, which is answered from a copy that is behind a
+write by no fixed time (§4, *What a second run finds*). A new write whose
+mark on a graph has been measured records it there, in the resource that
+sends it; one that takes a thought or a link away drops what was kept of it.
+
 ### `src/semantic/` — meaning-based retrieval
 
 Five modules, each with one job:
@@ -514,7 +522,7 @@ fail what goes under it.
 **The graph is a copy, and the batch waits for it.** A graph that has been
 read is answered from a copy, brought up to date about every 0.1 s (§7, item
 20). Read straight after a create, it lacked the new thought 112 times in
-120, and had it 10–205 ms later. A second run sent in that moment made the
+120, and had it 10–205 ms later: as a rule, and not as a bound (below). A second run sent in that moment made the
 children again too: 5 of 6. So `ingest()` returns once the graph of every
 thought that was there before the batch lists what the batch made next to it,
 read or not by this batch: the copy may be from an earlier read. It asks last,
@@ -553,6 +561,75 @@ it. After it, 0 of 360 were made twice, and the plan after an unanswered
 create found the thought 6 times of 6, in 310–315 ms. It knows this process's
 writes alone. A thought made in that moment in the app, or by another server,
 is still missed.
+
+**The clock is not enough, so the graph is held to what this process wrote.**
+The 300 ms were set against a longest lag of 205 ms, and that was the longest
+of one evening. The contract test behind the wait, eight tries a run, went
+red in one run of ten on 2026-10-12 and in none of 160 the day after, on the
+same code. Measured that day after, on two brains: 1,800 creates next to a
+thought whose graph had been read 0.3 s before, six runs of 300. A single
+read 150 ms after the answer lacked the new thought 29 times in 600, and one
+at 250 ms 4 times in 600. A reader that found the graph behind and went on
+reading every 10 ms first saw the thought more than 300 ms after its answer
+7 times in the 1,800, 364 ms at the latest. All seven came in the four runs
+in which the app took 30–66 ms at the median to answer a create, and none in
+the two in which it took 25 ms; nor did a single read at 300 ms lack the
+thought once in 2,560 while the app was that quick. So the wait stood one
+refresh of the copy clear of the lag on a good day, and the lag follows what
+the app is busy with, as a write's read-back does after a burst (§7). There
+is no bound to set a wait by.
+
+Nothing in a graph says how old it is. But a process knows what it wrote. The
+client keeps, for ten seconds, what each answered write put into the graphs
+(`RecentWrites`, `client.written`): a thought created next to another, and a
+link between two, are each in the other's graph in the list the relation puts
+them in, and a renamed thought is listed under its new name. Those are the
+three writes that made a plan create a thought again. `ingest()` asks of
+every graph it looks in what of that the graph does not show, and while
+there is something it reads the graph again 25 ms later. A copy is behind by
+what it lacks, then, and not by the clock: with the clock taken out of the
+way and the graph read straight before the write, where the read straight
+after it lacked the new thought 197 times in 200, a plan found what a create,
+a link and a rename had left 192 times of 192, and without this made the
+thought again in each of 24 runs, at the first or second try (contract test).
+What such a miss is, with every request timed: the read 152–155 ms after the
+answer was a 200 that listed no children, as the one before the create had,
+and the copy had both thoughts 20–60 ms later, 3 times in 150.
+
+It costs no request when the first read shows everything. After the wait by
+the clock that was every one of the 2,560 calls above; a call that does
+meet a copy still behind reads it again 25 ms apart, which for the seven
+latest above is one to three reads more. The wait by the clock stays, for
+the writes that leave nothing to look for: a create that got no answer,
+which has no identifier, a deletion, and a note (below).
+
+When two seconds of asking have not brought the graph up to date, it is
+still not taken at its word. The thought fails, what hangs on it is skipped,
+and its line says which thought the graph does not list and to send that
+part again in a few seconds: made then, it might be the second of its name,
+which only a person can remove (§6). The record can be the one that is wrong:
+a thought this process linked somewhere and a person then unlinked in the
+app will never be listed there. Nothing tells the two apart, so the plan
+fails there as well, until the record is dropped: after ten seconds, or at
+once when this process deletes the thought, changes its kind, or deletes a
+link.
+
+Three other ways were weighed.
+
+- *A longer wait.* Any number is that day's number, and it is paid in full
+  by every call that follows a write within it, the second of two plans sent
+  in one turn among them, whether the copy is behind or not.
+- *A second look before a create.* It is the clock again, one step on, and
+  the calls that pay are the plans that make something next to a thought
+  that was there, which is most plans.
+- *Have the other tools wait*, as weighed above: a rename has no graph to
+  wait for, and a create that got no answer has nothing to wait by.
+
+**Not guarded.** A create that got no answer is behind the clock's 300 ms
+and nothing more. A thought this process deleted can still be in a copy,
+and a plan that names it is told it existed: which graphs a deletion shows
+in, and when, was not measured. And a write made in the app or by another
+process is not known here at all.
 
 **Two runs at the same moment are not guarded.** Two `brain_ingest` calls
 sent at once with a thought in common each made it, 6 times of 6: neither
@@ -1420,9 +1497,17 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     0.1 s after that. A thought created next to one whose graph had been read
     was missing from the read that followed 112 times in 120, and listed
     10–205 ms later; next to one whose graph nothing had read it was there at
-    once, 60 of 60. The copy outlives a minute. `ingest()` looks for a thought
-    in its parent's graph, so it waits for the graphs to list what it made,
-    and before it looks, for this process's last write to be 0.3 s old (§4).
+    once, 60 of 60. How often it is missing went with how lately the graph
+    had been read, when it was measured again: 355 times in 400 for a graph
+    read straight before the create, 37 in 600 for one read 0.3 s before, and
+    none in 36 for one read a second before, where the first count had 19 in
+    20 for a copy up to a minute old. And the lag has no bound: of 1,800
+    creates next to a thought read 0.3 s before, 7 were first seen in its
+    graph more than 300 ms after their answer, 364 ms at the latest, all of
+    them while the app was slow to answer. `ingest()` looks for a thought in
+    its parent's graph, so it waits for the graphs to list what it made; and
+    before it looks, for this process's last write to be 0.3 s old, and then
+    for the graph to show what this process wrote next to that thought (§4).
 21. **A tag is no parent either, an identifier of zeros is no link, and two
     thoughts share one link.** Three ways the tools reported a link that was
     not there, or not the one asked for, each measured through the real
@@ -1543,7 +1628,7 @@ Measured against a live API by polling until the result appeared:
 | a note deleted → the thought's `graph` | still lists it for up to 0.2 s, while the note's read is a 403 |
 | `attachTag` → `graph.tags` | ~0.1–0.5 s |
 | a tag attached or detached, a link posted, a link's name patched → the lookup of the pair (`GET /api/links/{a}/{b}`) | at once, 20 times of 20 each, the lookup having been answered before the write |
-| `create` next to a thought → that thought's `graph` lists it | 10–205 ms, about 80 ms at the median: a copy refreshed about every 0.1 s. Live on its first read |
+| `create` next to a thought → that thought's `graph` lists it | 10–205 ms, about 80 ms at the median: a copy refreshed about every 0.1 s. First seen past 300 ms 7 times in 1,800 while the app was slow to answer, 364 ms at the latest: there is no bound. Live on its first read |
 | `attach URL` → `by-location` | instant |
 | `attach URL` → the thought's attachment list | up to 0.2 s: a copy refreshed about every 0.1 s. Live on its first read |
 | **`create` → `findByName`** | **~5.6 s** |
