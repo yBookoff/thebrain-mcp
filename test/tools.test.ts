@@ -8618,17 +8618,20 @@ describe("a thought's name: none, white space alone, too long, and one that does
       ]);
     });
 
-    it("brain_ingest: the warning about a note with a fenced block", async () => {
+    it("brain_ingest: the warning about a note that lost a line", async () => {
       const written = await connect([
         ["POST /api/notes/", () => 200],
         ["GET /api/notes/", () => noNote],
         ...brainRoutes({ aliases: true }),
       ]);
-      const warned = await written.call("brain_ingest", plan({ note: "```\ncode\n```\n" }));
+      // A code block left open, so the note is one TheBrain does not keep
+      // whole: a block that is closed is not warned about at all.
+      const warned = await written.call("brain_ingest", plan({ note: OPEN_FENCE }));
       expect(warned.isError).toBe(false);
       expect(warned.text).toContain(
-        "## Warning\nTheBrain drops the closing ``` on save, so notes with fenced code blocks " +
-          `will be corrupted: ${UNSEEN}. Prefer indenting code by four spaces.`,
+        "\n\n## Warning\nTheBrain did not keep every line of a note:\n" +
+          `- "${UNSEEN}" (${THOUGHT}): line 3, "\`\`\`js"\n` +
+          `${FENCE_RULE} Read it ${WRITE_IT_AGAIN}\n\n## Next\n`,
       );
     });
 

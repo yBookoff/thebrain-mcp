@@ -297,7 +297,7 @@ Three places were left out of that at first and printed the name as it is:
 the active thought of `brain_list`, a refusal that quotes the name of a type
 or a tag, and a batch's lines under "Failed" and "Skipped", where a thought
 read `thought "" (t1)`. They go through `shownName()` now, and so do a
-batch's warning about notes with fenced code, the thoughts `brain_index`
+batch's warning about notes that lost a line, the thoughts `brain_index`
 lists as not read, and the message for a create answered with an identifier
 of zeros. A refusal is worded in the API layer and a batch's line in the
 operation, both below the tools, so the function is defined beside
