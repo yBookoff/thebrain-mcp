@@ -178,8 +178,11 @@ So the agent thinks, and the server's job is to make that thinking *informed*
 
 ## 4. Tool design
 
-Seventeen tools. Measured on the built server: the descriptions total about 1050
-tokens, and the full `tools/list` payload including schemas about 4200.
+Seventeen tools. Measured on the built server: the descriptions total about 1080
+tokens, and the full `tools/list` payload including schemas about 4500. That is
+4,309 and 18,103 characters, with a token at four: the tools of `tools/list` as
+JSON, asked for in process, which is the figure the sections below count their
+own cost against.
 
 **One tool per intent, not per endpoint.** `brain_get_thought` returns the
 thought, its graph neighbourhood, and its note — three endpoints, one call,
@@ -288,9 +291,18 @@ name: nothing is lost, up to the eight that are spelled out. It is used by
 of a create and of a rename, where the caller can still put it right.
 `table()` does the same for any cell that holds something and shows
 nothing, which covers a search hit and a batch's table. A name that shows
-costs nothing: its result is what it was, to the character. Left as they
-were: the active thought `brain_list` prints, a refusal that quotes the
-name of a type or a tag, and a batch's lines under "Failed" and "Skipped".
+costs nothing: its result is what it was, to the character.
+
+Three places were left out of that at first and printed the name as it is:
+the active thought of `brain_list`, a refusal that quotes the name of a type
+or a tag, and a batch's lines under "Failed" and "Skipped", where a thought
+read `thought "" (t1)`. They go through `shownName()` now, and so do a
+batch's warning about notes with fenced code, the thoughts `brain_index`
+lists as not read, and the message for a create answered with an identifier
+of zeros. A refusal is worded in the API layer and a batch's line in the
+operation, both below the tools, so the function is defined beside
+`codePoints()` in `src/api/resources/thoughts.ts`, and `respond.ts` passes
+it on to the tools.
 
 ### What changed, and to which thought
 
@@ -1343,6 +1355,15 @@ Take identifiers from brain_list, brain_search or brain_get_thought — do not i
 `auth` failure points at Settings → User → Local API Key; a `network` failure
 points at the desktop app not running.
 
+A `network` failure is one of three facts, and the client words them apart:
+nothing listened at any address (`could not reach … — is TheBrain
+running?`), no answer came in time (`request exceeded 30000 ms`), or the
+connection failed before an answer came, with `fetch`'s own words for it in
+brackets (`read ECONNRESET`, `other side closed`). After the first nothing
+was sent. After the other two a write may have been carried out, which is
+the line `mayHaveLanded()` draws (§4), and a connection that was there and
+dropped used to be worded as the first.
+
 **The status is not the meaning.** The API answers a `brainId` that is no
 brain with a 401, the status of a rejected key, in other words. It answers
 the graph of a thought nobody has with a 403 that is about no permission, and
@@ -1354,7 +1375,10 @@ identifier in it dropped. So the client makes two kinds of the 401, `auth`
 and `unknown_brain`, and `describeError()` keeps the API's words wherever
 they name what was wrong, names the thought or the link a bare 404 is about
 from the request's path, and for the 403 says that no cause was given and
-what that most often means. A message never points at an identifier the
+what that most often means: an identifier of the call that names nothing.
+Not so for a request that carries no identifier, the app's state and the
+list of brains, which was told the same.
+A message never points at an identifier the
 failure was not about: the one for a brain that is not there sends the model
 to `brain_list` and says the other identifiers were not looked at; the ones
 for an identifier nobody has do not mention `brainId`. And a refusal about
@@ -1409,6 +1433,20 @@ by hand, less carefully. It is guarded twice:
 **An elicitation failure counts as refusal.** If the client advertised the
 capability and then threw, the server does not delete. The agent is never the
 last authority on an irreversible action.
+
+**The question says what goes with the thought, and each line is what it
+says.** It is what a person agrees to. It names the thought, marked when it
+is a type or a tag, and counts its links, what stands under it, its note and
+its attachments. Under a type that count is of "thoughts of this type" and
+under a tag of "thoughts with this tag", in the words `brain_get_thought`
+titles them with (§4): it said "children" of both, which a type and a tag
+have none of. And the note is counted once, on its own line. The API lists
+a note among its thought's attachments (`isNotes`), so "attachments: 1"
+used to stand under "note: 18 characters" for a thought with a note and
+nothing attached. `brain_get_thought` leaves the note out of its
+Attachments section for the same reason: it stood there as "(unnamed) —
+Notes.md", beside the Note section. The question is not put at all when the
+note could not be read (§4, *A read that fails inside a tool*).
 
 ---
 
@@ -1899,6 +1937,25 @@ This works better than it sounds, because vector search is not perfect either
 (see the ceiling below) and the skills already train agents to supply variants.
 The reason for degradation is returned in the result so the tool can show it.
 
+What the tool says to do goes by the reason. With no index to rank by, or
+one of another model, it is to build the index. With an index that is there
+and an embedder that cannot embed, it is the package: "Build the index" was
+said of that too, and sent the model to a rebuild the same package refuses.
+A package that fails to load is not one that is not installed, either.
+`EmbedderUnavailableError` used to say "is not installed" of every failure
+of the import, with the cause printed nowhere. It tells the two apart by
+what the import said, Node's `Cannot find package
+'@huggingface/transformers'` and the words Vite has for it, and anything
+else is "failed to load" with the import's own words (`loadFailure`). That
+reason reaches a rebuild, a sync and status through
+`Embedder.whyUnavailable()`.
+
+Ranking by vectors has a best row for any query, so in vector mode a result
+lists nothing in one case only: the index holds no row a search ranks,
+which by default is an index of types and tags alone. That was a result
+with no text in it. It says so now, and what to call: `includeAuxiliary`
+for the types and tags, a sync for a thought added since.
+
 ### A request that fails is not an empty answer
 
 > **Correction.** The fan-out dropped every failure of a request and counted
@@ -1975,6 +2032,19 @@ failure's own message. Status also reported a build that never finished as
 metadata before its first request: after a rebuild that failed on the missing
 embeddings package, for one. Built is now a build that finished, and usable
 is what `brain_search` asks of an index before it ranks by it.
+
+> **Since then** usable takes an embedder as well. A model reads the word as
+> "brain_search ranks by this index", and status said it from the index
+> alone: without the embeddings package it was "usable: yes" of an index
+> every search fell back from. Status asks the embedder now
+> (`SemanticIndexer.cannotEmbed()`, which is also what refuses a run), and
+> says "usable: no — the embeddings package is not installed", or "does not
+> load". What to do is then the package first, whatever the index, and the
+> rebuild after it where there is one to make: "Call this tool with
+> action=rebuild" alone sent the model to a call that fails. The cost is an
+> import of the package where it is installed, once a process, which the
+> next search would have made. The `Semantic` column of `brain_list` still
+> goes by the index alone: it is a look at a file for every brain listed.
 
 The index file is named by `brainId`, and it used to be opened, and so
 created, before any request could refuse the identifier: `status` for
@@ -2224,7 +2294,10 @@ could have got past it, and by one thing more: what it is about to write.
 **The result of a run that left anything is an error**, and its title does
 not say built or refreshed: "Index rebuilt in part" or "Index refreshed in
 part", and "Index not rebuilt" or "Index not refreshed" when no thought was
-read. It gives the counts of what was written, a "Not read" section, and
+read. Each title goes by what ran, and so does that of a run that read
+everything: a sync with no finished index to refresh is a rebuild, and
+answered "Index refreshed" while the title went by the action asked for.
+It gives the counts of what was written, a "Not read" section, and
 "What to do". "Not read" names each thought by identifier, with its name
 where a read had given one, the read that failed and what TheBrain answered,
 once when it is the same for all; the first twenty are listed and the rest
@@ -2377,7 +2450,8 @@ spending.
 >   Read from the code and not reached by a kill: `clear()` deleted the rows
 >   and the metadata as two statements, and the new metadata went in as
 >   three more. Stopped after the first, the file held the old model's
->   metadata, watermark included, over no rows.
+>   metadata, watermark included, over no rows. (`clear()` had no caller
+>   left once `startOver()` took its place, and is gone.)
 
 **The rows in memory follow the file.** A search asks SQLite for `PRAGMA
 data_version` before it ranks, and reads the rows again when the number has

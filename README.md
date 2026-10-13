@@ -134,7 +134,9 @@ them together through temporary identifiers, and the whole thing lands in one ca
 ```
 
 The order of thoughts in the input does not matter — dependencies resolve
-themselves. Running the same plan twice duplicates nothing. Bad plans (a cycle, a
+themselves. Running the same plan twice duplicates nothing, and a thought that
+was already there keeps the note it has: a plan's note is written only where
+there is none, and the result says which notes were kept. Bad plans (a cycle, a
 reference to nowhere) are rejected **before** the first write.
 
 ## Skills

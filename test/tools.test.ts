@@ -1192,6 +1192,21 @@ describe("brain_recent_changes, the names the log keeps and the identifiers it h
   });
 });
 
+describe("tools/list", () => {
+  it("is the size the documents give for it", async () => {
+    // ARCHITECTURE.md §4 and CONTRIBUTING.md count it in tokens at four
+    // characters each, "about 1080" for the descriptions and "about 4500"
+    // for the whole of it, and had gone stale apart: 4200 in one and 3900 in
+    // the other. A description or a schema that changes these numbers
+    // changes those two sentences.
+    const { client } = await connect([]);
+    const { tools } = await client.listTools();
+    expect(tools).toHaveLength(17);
+    expect(tools.reduce((sum, tool) => sum + (tool.description ?? "").length, 0)).toBe(4309);
+    expect(JSON.stringify(tools).length).toBe(18103);
+  });
+});
+
 describe("brain_update_thought", () => {
   /** A thought whose aliases a PATCH really changes, so a write reads back. */
   const routes = (initial: string[]): Route[] => {
