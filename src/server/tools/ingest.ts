@@ -6,7 +6,7 @@ import { z } from "zod";
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { MAX_ALIASES, thoughtNameAsStored, warnIfFencedCode } from "../../api/index.js";
+import { MAX_ALIASES, thoughtNameAsStored } from "../../api/index.js";
 import {
   IngestMissingError,
   IngestReadError,
@@ -28,7 +28,7 @@ import {
   sentence,
   table,
 } from "../respond.js";
-import { ALIAS_COST } from "./write.js";
+import { AFTER_A_LINE_LOST, ALIAS_COST, FENCE_RULE, linesNotKept } from "./write.js";
 
 const relation = z
   .enum(["child", "parent", "jump"])
@@ -149,13 +149,18 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
 
       // Only the notes that were written: one that was not, its thought
       // having failed or the note itself, used to be listed here as one that
-      // "will be corrupted".
+      // "will be corrupted". And of those only the ones TheBrain did not keep
+      // whole: every note with a fenced block used to be listed, and a block
+      // that is closed is kept to the character. By identifier, as a note
+      // that failed is: the tool that writes it again takes one.
       const noted = new Set(outcome.notesWrittenFor);
-      const fenceWarnings = thoughts
-        .filter(
-          (t) => noted.has(t.tempId) && t.note !== undefined && warnIfFencedCode(t.note) !== null,
-        )
-        .map((t) => t.name);
+      const idOf = new Map(
+        [...outcome.created, ...outcome.reused].map((t) => [t.tempId, t.thoughtId]),
+      );
+      const notKept = thoughts.flatMap((t) => {
+        const lines = noted.has(t.tempId) && t.note !== undefined ? linesNotKept(t.note) : null;
+        return lines === null ? [] : [`"${t.name}" (${idOf.get(t.tempId)}): ${lines}`];
+      });
 
       // A batch that left something unwritten is an error, so that it is not
       // read as done. Its table names each thought by tempId too: the plan
@@ -243,13 +248,13 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
           ),
           section("Failed", bullet(outcome.failures.map((f) => `${f.what}: ${whyFailed(f)}`))),
           section("Skipped", bullet(outcome.skipped.map((s) => `${s.what}: ${s.reason}`))),
-          fenceWarnings.length === 0
+          notKept.length === 0
             ? null
             : section(
                 "Warning",
-                "TheBrain drops the closing ``` on save, so notes with fenced code blocks " +
-                  `will be corrupted: ${fenceWarnings.join(", ")}. ` +
-                  "Prefer indenting code by four spaces.",
+                "TheBrain did not keep every line of " +
+                  `${notKept.length === 1 ? "a note" : "these notes"}:\n${bullet(notKept)}\n` +
+                  `${FENCE_RULE} Read ${notKept.length === 1 ? "it" : "each"} ${AFTER_A_LINE_LOST}`,
               ),
           outcome.unlisted === 0
             ? null

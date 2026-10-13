@@ -37,11 +37,14 @@ import {
   logEntryKey,
   logTime,
   nameRefusal,
+  noteAsStored,
+  noteLinesDropped,
   replayThoughtIds,
   thoughtNameAsStored,
   type CleanGraph,
   type LinkDto,
   type ModificationLogDto,
+  type NotesDto,
   type SearchResultDto,
   type ThoughtDto,
   type ThoughtGraphDto,
@@ -460,7 +463,7 @@ suite("resource layer against the live API", () => {
     const afterChange = async (
       id: string,
       since: string,
-      write: () => Promise<void>,
+      write: () => Promise<unknown>,
       than?: ModificationLogDto,
     ): Promise<ModificationLogDto[]> => {
       await write();
@@ -5181,6 +5184,341 @@ suite("resource layer against the live API", () => {
       expect([second.created, second.notesWritten, second.failures]).toEqual([[], 0, []]);
       await settle(400);
       expect(await api.notes.get(brainId, made)).toBe(edited);
+    }, 30_000);
+  });
+
+  /**
+   * What TheBrain keeps of a note's Markdown, and what it shows of it. L5 had
+   * it that a Markdown round trip loses the closing fence of a code block,
+   * and the tools warned of that under every note with one. A block that is
+   * closed reads back to the character. What TheBrain does delete, with a
+   * 200, is a line that begins with three backticks and has no partner, and
+   * a block with nothing in it. Measured on 15.0.640, 2026-10-13.
+   */
+  describe("a note's Markdown as it is stored", () => {
+    const F = "```";
+    /** The note once it reads as `text`: a first note can be behind its write. */
+    const read = (id: string, text: string): Promise<string> =>
+      eventually(
+        () => api.notes.get(brainId, id),
+        (note) => note === text,
+        { timeoutMs: 2000, stepMs: 50 },
+      );
+    /** The bare requests, with nothing of `NotesResource` around them. */
+    const rawAppend = (id: string, markdown: string): Promise<unknown> =>
+      api.client.post(`/api/notes/${brainId}/${id}/append`, { json: { markdown } });
+    const form = async (id: string, which: "html" | "text"): Promise<string> =>
+      (await api.client.get<NotesDto>(`/api/notes/${brainId}/${id}/${which}`))[which] ?? "";
+    /** Whether `marker` stands inside a `<pre>` of the HTML form. */
+    const inPre = (html: string, marker: string): boolean => {
+      const at = html.indexOf(marker);
+      return at >= 0 && html.lastIndexOf("<pre", at) > html.lastIndexOf("</pre>", at);
+    };
+
+    /** Notes whose code blocks are each closed, and notes with a fence that is none to TheBrain. */
+    const KEPT: readonly string[] = [
+      `before\n\n${F}\ncode = 1;\n${F}`,
+      `before\n\n${F}\ncode = 1;\n${F}\n`,
+      `before\n\n${F}js\ncode = 1;\n${F}`,
+      `before\n\n${F}js\ncode = 1;\n${F}\n`,
+      `before\n\n${F}\ncode = 1;\n${F}\n\nafter`,
+      `before\n\n${F}js\ncode = 1;\n${F}\n\nafter`,
+      `before\n${F}\ncode = 1;\n${F}\nafter`,
+      `before\n\n${F}python title="x.py"\ncode = 1\n${F}\n\nafter`,
+      `${F}\ncode = 1;\n${F}`,
+      `${F}js\ncode = 1;\n${F}\n`,
+      `one\n\n${F}js\ncode = 1;\n${F}\n\nmiddle\n\n${F}sh\necho two\n${F}\n\nafter`,
+      `${F}\none\n${F}\n${F}\ntwo\n${F}`,
+      `before\n\n${F}py\ndef f():\n\n    return 1\n\t# tab\n\n${F}\n\nafter`,
+      `before\n\n${F}html\n<div class="c">&amp; *not bold* # no heading</div>\n${F}\n\nafter`,
+      `# Title\n\n${F}js\ncode = 1;\n${F}\n\n## Next\n\n- one\n- two\n\n**bold** end`,
+      `до\n\n${F}\ncode = "привет";\n${F}\n\nпосле`,
+      // A block of one blank line, a closing fence that is longer or has
+      // blanks after it, and a fence of four backticks.
+      `a\n\n${F}\n\n${F}\n\nend`,
+      `a\n\n${F}\ncode\n${F}${F}\n\nend`,
+      `a\n\n${F}\ncode\n${F}   \n\nend`,
+      `a\n\n${F}\`\ncode\n${F}\`\n\nend`,
+      `before\n\n${F}\`md\n${F}js\ncode = 1;\n${F}\n${F}\`\n\nafter`,
+      // No fence to TheBrain: of tildes, indented, in a list item, in a quote.
+      "before\n\n~~~\ncode = 1;\n~~~\n\nafter",
+      "before\n\n~~~js\ncode = 1;\n~~~",
+      `before\n\n   ${F}\n   code = 1;\n   ${F}\n\nafter`,
+      `- item one\n\n  ${F}js\n  code = 1;\n  ${F}\n\n- item two\n\nafter`,
+      `> quoted\n>\n> ${F}js\n> code = 1;\n> ${F}\n\nafter`,
+      // Left open, and still kept: a fence that is not at the start of a line.
+      `a\n\n    ${F}\n    code\n\nend`,
+      `a\n\n\t${F}\ncode\n\nend`,
+      "a\n\n~~~\ncode\n\nend",
+      `a ${F}inline${F} b and a lone ${F} too`,
+    ];
+
+    /** Sent, and what TheBrain keeps of it: the last fence of an odd number is gone. */
+    const UNPAIRED: ReadonlyArray<readonly [string, string]> = [
+      // A block left open loses the fence that opened it.
+      [`before\n\n${F}js\ncode();\n\nafter`, "before\n\ncode();\n\nafter"],
+      [`before\n\n${F}\n`, "before\n\n"],
+      [`${F}js\ncode\nmore`, "code\nmore"],
+      // Of three it is the third, and of five the fifth.
+      [`a\n\n${F}\none\n${F}\n\nb\n\n${F}\ntwo\n\nend`, `a\n\n${F}\none\n${F}\n\nb\n\ntwo\n\nend`],
+      [`${F}\n1\n${F}\n2\n${F}\n3\n${F}\n4\n${F}\n5`, `${F}\n1\n${F}\n2\n${F}\n3\n${F}\n4\n5`],
+      // A block whose first fence is not at the start of its line loses the
+      // fence that closes it.
+      [`intro ${F}js\ncode\n${F}\n\nend`, `intro ${F}js\ncode\n\nend`],
+      [`\ufeff${F}\ncode\n${F}\n\nend`, `\ufeff${F}\ncode\n\nend`],
+      // Whatever follows the backticks on the line goes with them.
+      [`a\n\n${F}x${F} is inline code\n\nend`, "a\n\n\nend"],
+      [`a\n\n${F}some words here\ncode\n\nend`, "a\n\ncode\n\nend"],
+      [`a\n\n${F}\`\ncode\n\nend`, "a\n\ncode\n\nend"],
+      // A fence of tildes is none, so the one of backticks inside is alone.
+      [`a\n\n~~~\n${F}\n~~~\n\nend`, "a\n\n~~~\n~~~\n\nend"],
+      [`a\r\n\r\n${F}js\r\ncode\r\n\r\nend\r\n`, "a\n\ncode\n\nend\n"],
+    ];
+
+    /** Sent, and what TheBrain keeps of it: a block with nothing in it is gone. */
+    const EMPTY: ReadonlyArray<readonly [string, string]> = [
+      [`a\n\n${F}\n${F}\n\nend`, "a\n\n\nend"],
+      [`a\n\n${F}js\n${F}\n\nend`, "a\n\n\nend"],
+      [`a\n\n${F}\n${F}`, "a\n"],
+      [`a\n${F}\n${F}\nb`, "a\nb"],
+      [`a\n\n${F}\ncode\n${F}\n\nb\n\n${F}\n${F}\n\nend`, `a\n\n${F}\ncode\n${F}\n\nb\n\n\nend`],
+      // The fences pair up in order: the block with nothing in it is the last two.
+      [`${F}\n${F}js\n${F}\n${F}`, `${F}\n${F}js`],
+      // A longer fence around a bare one is such a block: its first two lines.
+      [`${F}\`md\n${F}\nnested\n${F}\n${F}\``, `nested\n${F}\n${F}\``],
+      // Both rules in one note: the odd fence, then the pair left.
+      [`a\n\n${F}\`\n${F}\n${F}\`\n\nend`, "a\n\n\nend"],
+    ];
+
+    it("a code block that is closed reads back to the character, at once and a second later", async () => {
+      // 23 of these forms were written 20 times each as a first note and 10
+      // times each over a note, and read at once, after 1 s and after 5 s:
+      // 2,070 reads of 2,070 to the character.
+      const ids: string[] = [];
+      for (const [i, text] of KEPT.entries()) {
+        const id = await make(`note-fence-kept-${i}`);
+        await api.notes.set(brainId, id, text);
+        ids.push(id);
+        expect(await read(id, text), text).toBe(text);
+        expect(noteLinesDropped(text), text).toEqual([]);
+      }
+      await settle(1000);
+      for (const [i, text] of KEPT.entries()) {
+        expect(await api.notes.get(brainId, ids[i]!), text).toBe(text);
+      }
+      // Written again as it was read, it is the same again.
+      const again = ids[5]!;
+      await api.notes.set(brainId, again, await api.notes.get(brainId, again));
+      await settle(300);
+      expect(await api.notes.get(brainId, again)).toBe(KEPT[5]);
+    }, 60_000);
+
+    it("with an odd number of lines that begin with three backticks the last one is deleted, whole", async () => {
+      for (const [i, [sent, stored]] of UNPAIRED.entries()) {
+        const id = await make(`note-fence-odd-${i}`);
+        await api.notes.set(brainId, id, sent);
+        expect(await read(id, stored), sent).toBe(stored);
+        expect(noteAsStored(sent), sent).toBe(stored);
+        expect(noteLinesDropped(sent).map((d) => d.why), sent).toEqual(["unpaired"]);
+      }
+    }, 60_000);
+
+    it("a block with nothing between its two fences is deleted, both lines", async () => {
+      for (const [i, [sent, stored]] of EMPTY.entries()) {
+        const id = await make(`note-fence-empty-${i}`);
+        await api.notes.set(brainId, id, sent);
+        expect(await read(id, stored), sent).toBe(stored);
+        expect(noteAsStored(sent), sent).toBe(stored);
+      }
+    }, 60_000);
+
+    it("a text that comes to nothing leaves no note, and takes away the one that was there", async () => {
+      for (const [i, sent] of [F, `${F}js\n${F}`, `${F}\n${F}\n${F}`].entries()) {
+        expect(noteAsStored(sent), sent).toBe("");
+        const id = await make(`note-fence-nothing-${i}`);
+        await api.notes.set(brainId, id, sent);
+        await settle(400);
+        expect(await api.notes.exists(brainId, id), sent).toBe(false);
+        expect(await api.attachments.ofThought(brainId, id), sent).toEqual([]);
+
+        // Over a note: the read is the catch-all 403 for a moment after the
+        // note's attachment goes (L3), and then the answer for no note.
+        await api.notes.set(brainId, id, "a note that is there");
+        expect(await read(id, "a note that is there")).toBe("a note that is there");
+        await api.notes.set(brainId, id, sent);
+        const after = await eventually(
+          () => api.notes.getRaw(brainId, id).catch(() => null),
+          (note) => note !== null && note.markdown === "",
+          { timeoutMs: 10_000, stepMs: 50 },
+        );
+        expect(after?.modificationDateTime, sent).toBe("0001-01-01T00:00:00");
+        await settle(400);
+        expect(await api.attachments.ofThought(brainId, id), sent).toEqual([]);
+      }
+    }, 60_000);
+
+    it("line ends come back as \\n, nothing else is touched, and the stored file is the text that is read", async () => {
+      const samples: ReadonlyArray<readonly [string, string]> = [
+        ["a\r\nb\r\n\r\nc\r\n", "a\nb\n\nc\n"],
+        // Kept: a carriage return alone, blank lines and blanks at either
+        // end, tabs, a no-break space, a byte order mark, a zero width space,
+        // the Unicode line separators, a decomposed letter and raw HTML.
+        ["a\rb\r\rc\r", "a\rb\r\rc\r"],
+        ["\n\n\na\n\n\n", "\n\n\na\n\n\n"],
+        ["   a   \nb\t\n\t\tc  ", "   a   \nb\t\n\t\tc  "],
+        ["\ufeffa\u00a0b\u200bc\u2028d\u2029e\u0085f", "\ufeffa\u00a0b\u200bc\u2028d\u2029e\u0085f"],
+        ["e\u0301 a <b>bold</b> &amp; c", "e\u0301 a <b>bold</b> &amp; c"],
+        // A fence after a carriage return alone is not at the start of a line.
+        [`a\r${F}\rcode`, `a\r${F}\rcode`],
+      ];
+      for (const [i, [sent, stored]] of samples.entries()) {
+        const id = await make(`note-as-stored-${i}`);
+        await api.notes.set(brainId, id, sent);
+        expect(await read(id, stored), JSON.stringify(sent)).toBe(stored);
+        expect(noteAsStored(sent), JSON.stringify(sent)).toBe(stored);
+      }
+
+      // The file behind the note is `Notes.md`: a byte order mark and the
+      // Markdown, with the fence that had no partner already gone from it.
+      const id = await make("note-as-stored-file");
+      await api.notes.set(brainId, id, `привет\r\n\r\n${F}js\r\ncode();`);
+      expect(await read(id, "привет\n\ncode();")).toBe("привет\n\ncode();");
+      const [file] = await eventually(
+        () => api.attachments.ofThought(brainId, id),
+        (list) => list.length === 1,
+      );
+      expect([file?.isNotes, file?.location]).toEqual([true, "Notes.md"]);
+      const bytes = Buffer.from(await api.attachments.content(brainId, file!.id));
+      expect([...bytes.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+      expect(bytes.subarray(3).toString("utf8")).toBe("привет\n\ncode();");
+    }, 60_000);
+
+    it("a note of white space alone is stored, and reads as no note", async () => {
+      const id = await make("note-as-stored-blank");
+      await api.notes.set(brainId, id, "  \n ");
+      await settle(400);
+      const note = await api.notes.getRaw(brainId, id);
+      expect(note.markdown).toBe("");
+      expect(note.modificationDateTime).not.toBe("0001-01-01T00:00:00");
+      expect(await api.notes.exists(brainId, id)).toBe(false);
+      expect((await api.attachments.ofThought(brainId, id)).map((a) => a.isNotes)).toEqual([true]);
+    }, 30_000);
+
+    it("the bare append joins its text to the note's last line, and a block appended so loses its closing fence; notes.append() keeps it", async () => {
+      // 60 of 60 for the bare request, with the block after text and after a
+      // note that ends in a fence; none of 100 with a line end between, 40
+      // of them with the blank line `notes.append()` puts there.
+      const BLOCK = `${F}js\ncode = 1;\n${F}`;
+      for (const [i, [held, stored]] of (
+        [
+          ["intro", `intro${F}js\ncode = 1;`],
+          [`a\n\n${F}\nfirst\n${F}`, `a\n\n${F}\nfirst\n${F}${F}js\ncode = 1;`],
+        ] as const
+      ).entries()) {
+        const bare = await make(`note-append-bare-${i}`);
+        await api.notes.set(brainId, bare, held);
+        expect(await read(bare, held)).toBe(held);
+        await rawAppend(bare, BLOCK);
+        expect(await read(bare, stored), held).toBe(stored);
+        expect(noteAsStored(held + BLOCK), held).toBe(stored);
+
+        const kept = await make(`note-append-kept-${i}`);
+        await api.notes.set(brainId, kept, held);
+        expect(await read(kept, held)).toBe(held);
+        const whole = await api.notes.append(brainId, kept, BLOCK);
+        expect(whole, held).toBe(`${held}\n\n${BLOCK}`);
+        expect(await read(kept, whole), held).toBe(whole);
+        expect(noteLinesDropped(whole), held).toEqual([]);
+      }
+    }, 60_000);
+
+    it("an append is gone over as the whole note, not as the text added", async () => {
+      // Two halves that are no fence apart and one together: kept, though
+      // the text added has one fence. And a block that is closed, after a
+      // line it is joined to: its closing fence is the odd one of the note.
+      const halves = await make("note-append-halves");
+      await api.notes.set(brainId, halves, "intro\n``");
+      expect(await read(halves, "intro\n``")).toBe("intro\n``");
+      await rawAppend(halves, `\`\ncode\n${F}`);
+      expect(await read(halves, `intro\n${F}\ncode\n${F}`)).toBe(`intro\n${F}\ncode\n${F}`);
+
+      // An addition that is left open, through `notes.append()`: the line
+      // that goes is counted in the whole note.
+      const open = await make("note-append-open");
+      await api.notes.set(brainId, open, "intro");
+      expect(await read(open, "intro")).toBe("intro");
+      const whole = await api.notes.append(brainId, open, `${F}js\ncode();`);
+      expect(noteLinesDropped(whole)).toEqual([{ line: 3, text: `${F}js`, why: "unpaired" }]);
+      expect(await read(open, "intro\n\ncode();")).toBe("intro\n\ncode();");
+      expect(noteAsStored(whole)).toBe("intro\n\ncode();");
+    }, 30_000);
+
+    it("the HTML form has a closed block in a <pre> and the text after it outside; a fence that is not at the start of a line is ordinary text there", async () => {
+      // What the app's editor is given. The other way, from the editor back
+      // to Markdown, is not something the API shows.
+      const shown = async (name: string, markdown: string): Promise<string> => {
+        const id = await make(name);
+        await api.notes.set(brainId, id, markdown);
+        expect(await read(id, noteAsStored(markdown))).toBe(noteAsStored(markdown));
+        return form(id, "html");
+      };
+
+      const block = await shown("note-html-block", `before\n\n${F}js\nCODE = 1;\n${F}\n\nTAIL after`);
+      expect([inPre(block, "CODE"), inPre(block, "TAIL"), block.includes("TAIL")]).toEqual([true, false, true]);
+      // The language is not in it.
+      expect(block).not.toContain("js");
+
+      // Code indented by four spaces is a block there too, its indent kept
+      // inside it.
+      const indented = await shown("note-html-indented", "before\n\n    CODE = 1;\n\nTAIL after");
+      expect([inPre(indented, "    CODE"), inPre(indented, "TAIL")]).toEqual([true, false]);
+
+      // No block to TheBrain: a fence of tildes, an indented one, one in a
+      // list item and one in a quote.
+      for (const [i, markdown] of [
+        "before\n\n~~~\nCODE = 1;\n~~~\n\nTAIL after",
+        `before\n\n   ${F}\n   CODE = 1;\n   ${F}\n\nTAIL after`,
+        `- item\n\n  ${F}js\n  CODE = 1;\n  ${F}\n\nTAIL after`,
+        `> quoted\n>\n> ${F}js\n> CODE = 1;\n> ${F}\n\nTAIL after`,
+      ].entries()) {
+        const html = await shown(`note-html-none-${i}`, markdown);
+        expect([html.includes("CODE"), html.includes("<pre")], markdown).toEqual([true, false]);
+      }
+
+      // Text on the line of a closing fence is kept in the Markdown and is
+      // not in the HTML form at all.
+      const id = await make("note-html-joined");
+      await api.notes.set(brainId, id, `a\n\n${F}\nCODE\n${F}`);
+      expect(await read(id, `a\n\n${F}\nCODE\n${F}`)).toBe(`a\n\n${F}\nCODE\n${F}`);
+      await rawAppend(id, "TAIL more");
+      expect(await read(id, `a\n\n${F}\nCODE\n${F}TAIL more`)).toBe(`a\n\n${F}\nCODE\n${F}TAIL more`);
+      const joined = await form(id, "html");
+      expect([inPre(joined, "CODE"), joined.includes("TAIL")]).toEqual([true, false]);
+    }, 60_000);
+
+    it("a plan's note with a fence left open is the plan's text on the second run", async () => {
+      // Stored without the fence, it read as another text than the plan's:
+      // "kept: another text" for the note the first run had written.
+      const root = await make("note-fence-plan-root");
+      const OPEN = `intro\n\n${F}js\ncode();`;
+      const plan = {
+        thoughts: [{ tempId: "x", name: `${PREFIX}note-fence-plan`, parent: root, note: OPEN }],
+      };
+      const first = await ingest(api, brainId, plan);
+      for (const c of first.created) created.push(c.thoughtId);
+      const made = first.created[0]!.thoughtId;
+      expect(first.notesWrittenFor).toEqual(["x"]);
+      expect(await read(made, "intro\n\ncode();")).toBe("intro\n\ncode();");
+      // The second run looks for the thought in its parent's graph, a copy.
+      await eventually(
+        () => api.thoughts.getGraph(brainId, root),
+        (graph) => graph.children.some((c) => c.id === made),
+      );
+
+      const second = await ingest(api, brainId, plan);
+      for (const c of second.created) created.push(c.thoughtId);
+      expect([second.created, second.failures, second.notesWritten]).toEqual([[], [], 0]);
+      expect(second.notesKept).toEqual([{ tempId: "x", thoughtId: made, same: true }]);
     }, 30_000);
   });
 

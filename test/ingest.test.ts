@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { RecentWrites, TheBrainError, type TheBrainApi } from "../src/api/index.js";
+import { RecentWrites, TheBrainError, noteAsStored, type TheBrainApi } from "../src/api/index.js";
 import {
   IngestBehindError,
   IngestMissingError,
@@ -365,7 +365,8 @@ function fakeBrain(
         if (failWith.has(`note: ${markdown}`)) throw failWith.get(`note: ${markdown}`)!;
         noteWrites.push({ id, markdown });
         const t = thoughts.get(id);
-        if (t !== undefined) t.note = markdown;
+        // As the API keeps it: without a fence that has no partner (L5).
+        if (t !== undefined) t.note = noteAsStored(markdown);
         // As a create whose answer is lost: the note is written all the same.
         if (lostOn.has(`note: ${markdown}`)) {
           throw new TheBrainError("network", "request exceeded 30000 ms", {
@@ -918,6 +919,12 @@ describe("the note of a thought that was there", () => {
       [HUMAN, HUMAN],
       ["one\ntwo\n\nthree", "one\r\ntwo\r\n\r\nthree"],
       ["text", "  text\n"],
+      // A code block that is closed is kept to the character.
+      ["a\n\n```js\ncode();\n```\n\nend", "a\n\n```js\ncode();\n```\n\nend"],
+      // A fence with no partner is not kept, nor a block with nothing in it:
+      // the note the plan's text was stored as is the plan's text.
+      ["intro\n\ncode();", "intro\n\n```js\ncode();"],
+      ["a\n\n\nend", "a\n\n```\n```\n\nend"],
     ] as const) {
       const fake = brain(held);
       const outcome = await ingest(fake.api, BRAIN, plan(planned));
@@ -928,6 +935,29 @@ describe("the note of a thought that was there", () => {
       expect(fake.noteWrites, planned).toEqual([]);
       expect(fake.thoughts.get(THERE)?.note, planned).toBe(held);
     }
+
+    // The fence is not set aside: a block the plan closes is another text
+    // than the same lines with no block.
+    const fake = brain("intro\n\ncode();");
+    const outcome = await ingest(fake.api, BRAIN, plan("intro\n\n```js\ncode();\n```"));
+    expect(outcome.notesKept).toEqual([{ tempId: "held", thoughtId: THERE, same: false }]);
+  });
+
+  it("a plan's note that TheBrain did not keep whole is the plan's text on the next run", async () => {
+    // A note with a fence left open is stored without that line. Compared
+    // as it was sent, the second run read "kept: another text" for the note
+    // the first run had written, and asked for it to be appended.
+    const OPEN = "intro\n\n```js\ncode();";
+    const fake = brain(undefined);
+    const first = await ingest(fake.api, BRAIN, plan(OPEN));
+    expect(first.notesWrittenFor).toEqual(["held"]);
+    // Sent as it was given, and stored as TheBrain stores it.
+    expect(fake.noteWrites).toEqual([{ id: THERE, markdown: OPEN }]);
+    expect(fake.thoughts.get(THERE)?.note).toBe("intro\n\ncode();");
+
+    const second = await ingest(fake.api, BRAIN, plan(OPEN));
+    expect(second.notesKept).toEqual([{ tempId: "held", thoughtId: THERE, same: true }]);
+    expect(fake.noteWrites).toHaveLength(1);
   });
 
   it("a thought with no note is given the plan's, and the next run finds it there", async () => {
@@ -1026,20 +1056,23 @@ describe("the note of a thought that was there", () => {
   it("two plan items that are one thought: the first one's note is written, and the second finds it there", async () => {
     // Both used to be written at once, and which the thought kept was not
     // the plan's to say.
-    for (const [second, same] of [
-      ["another", false],
-      ["one", true],
+    for (const [first, second, same] of [
+      ["one", "another", false],
+      ["one", "one", true],
+      // The first one's note as it is stored, with its open fence gone.
+      ["one\n```js\ncode();", "one\n```js\ncode();", true],
+      ["one\n```js\ncode();", "one\ncode();", true],
     ] as const) {
       const fake = fakeBrain([{ id: ROOT, name: "root" }]);
       const outcome = await ingest(fake.api, BRAIN, {
         thoughts: [
-          { tempId: "x", name: "Same", parent: ROOT, note: "one" },
+          { tempId: "x", name: "Same", parent: ROOT, note: first },
           { tempId: "y", name: "Same", parent: ROOT, note: second },
         ],
       });
       const made = outcome.created[0]!.thoughtId;
 
-      expect(fake.noteWrites, second).toEqual([{ id: made, markdown: "one" }]);
+      expect(fake.noteWrites, second).toEqual([{ id: made, markdown: first }]);
       expect(outcome.notesWrittenFor, second).toEqual(["x"]);
       expect(outcome.notesKept, second).toEqual([{ tempId: "y", thoughtId: made, same }]);
       // Made here, so not read.

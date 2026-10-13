@@ -224,9 +224,13 @@ whole material.
 - Write so that six months later it makes sense **without the original**.
 - Numbers and measurements are mandatory — they are the most valuable part.
 - In your own words, not copy-paste. Copy-paste is not understood while reading.
-- **Do not use triple-backtick code fences** — TheBrain loses the closing fence
-  and swallows the rest of the note into the block. Indent code by four spaces
-  instead.
+- **Put code in a fenced block, and close it.** A line of three backticks
+  before the code and one after it, each at the very start of its line. A
+  fence that is indented, inside a list item or a quote, or made of tildes is
+  no code block to TheBrain. It deletes a ``` line that has no partner, with
+  whatever else is on that line: so close every block, and do not open a line
+  of prose with a triple-backtick span, for which one backtick is enough. The
+  write tools say when a note lost a line, and which.
 
 ## Links
 

@@ -725,7 +725,11 @@ it found, reads as it did, to the character.
 
 "The same text" sets aside line ends and the blanks around the text. A note
 reads back as it was written, 19 samples of Markdown out of 19, and a
-twentieth sent with `\r\n` came back with `\n` (contract test).
+twentieth sent with `\r\n` came back with `\n` (contract test). It also
+takes the plan's text as TheBrain would store it: a note with a code fence
+left open is stored without that line (§7, item 5), and compared as it was
+sent it read `kept: another text` on the run after the one that wrote it,
+with the advice to append the plan's text to it.
 
 **A note that could not be read is not written over.** A failed read is not
 the answer that there is no note, which is a 200 (*A read that fails inside a
@@ -973,7 +977,9 @@ create to learn whether it is one, and is skipped the same way.
 *The warning about code fences listed notes that were not written*, as notes
 that "will be corrupted": the note of a thought that failed, and a note whose
 own write failed. The outcome names the thoughts whose note was written, and
-the warning goes by that.
+the warning goes by that. Of those it now names only the notes TheBrain did
+not keep whole, each by identifier with the lines that went (§7, item 5): it
+used to name every note with a fenced block.
 
 *A `brainId` that is no brain was a failure a thought.* Every read ahead of
 the writes is refused for such a brain, and the plan with it, in the words
@@ -1418,9 +1424,44 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
    ProblemDetails, HTML, and an empty body. Normalised in the HTTP layer.
 4. **`notes/append` on a thought with no note is a silent no-op.** Read first,
    then write.
-5. **Markdown round-trip loses the closing ` ``` `**, swallowing the rest of the
-   note into the code block. The server warns; the skills tell agents to indent
-   code by four spaces instead.
+5. **A code block that is closed is kept; a fence with no partner is
+   deleted.** A note is stored as it was sent, but for `\r\n` and for the
+   lines of two rules, each with a 200. Of the lines that begin with three
+   backticks, whatever follows them there, the last is deleted when their
+   number is odd; and a pair of them with no line between, the second of them
+   bare, is deleted as a block with nothing in it. So a block left open
+   loses the fence that opened it, and a line of prose that opens with a
+   triple-backtick code span goes with its sentence. An append is gone over
+   as the whole note, and the bare request joins its text to the note's last
+   line: a closed block added so loses its closing fence, which
+   `notes.append()` prevents with the blank line it sends first.
+
+   This item used to say that a round trip loses the closing fence of a
+   block, and the tools warned of it under every note with one, with the
+   advice to indent code by four spaces. It came with the first commit, from
+   a build that was not written down, and had no contract test. Measured on
+   15.0.640, a closed block read back to the character 2,070 times of 2,070.
+   The warning was untrue of nearly every note it stood under: it cost its
+   words on each, taught a reader of results to pass over warnings, and its
+   advice changed how a person's notes look.
+
+   `noteAsStored()` is the rule, checked against 600 random notes of 600. A
+   tool now warns of a note that lost a line and of no other, names the line
+   by its number and by what it held, and says to write the note again. The
+   note is written as it was given. *Refusing it* was weighed: the text is a
+   200 that is not stored as asked, which is what this server refuses
+   elsewhere. But nothing is lost that the caller does not hold, the line is
+   quoted back, and a refusal in `brain_ingest` would reject fifteen notes
+   for one stray fence. *Mending it* ahead of the write, by closing the
+   block or by dropping the fence, would be a guess at what a line was meant
+   for (§3). *Reading the note back* to see what was kept costs a request on
+   every note written and meets the lag of a first note (§4); the rule costs
+   none. `ingest()` sets a plan's note against a thought's as it would be
+   stored, so a note that lost a line is "the same text" on the next run.
+
+   Not measured: what the app's editor writes when a person edits a note.
+   The API shows what the editor is given, the HTML form, and nothing of
+   what it saves (docs/api-map.md, *A note's Markdown*).
 6. **JSON Patch is not exposed.** Tools take flat fields and build the patch.
 7. **Writes are not immediately visible** — see the table below.
 8. **`SearchResultDto.brainId` comes back as zeros.** Use `sourceThought.brainId`.

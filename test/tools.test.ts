@@ -143,6 +143,23 @@ const graph = (activeThought: unknown) => ({
 
 const noNote = { modificationDateTime: "0001-01-01T00:00:00", markdown: "" };
 
+/**
+ * What a tool says of a note TheBrain did not keep whole, after the lines it
+ * names: the two rules by which a line goes, and what to do about it.
+ */
+const FENCE_RULE =
+  "TheBrain deletes the last line that begins with ``` when a note has an odd number of " +
+  "them, with whatever else is on that line, and a code block with nothing between its " +
+  "two ``` lines.";
+const WRITE_IT_AGAIN =
+  "with brain_get_thought, and write it again with brain_set_note with a ``` line before " +
+  "each code block and one after it, each at the start of its line, and no other line " +
+  "that begins with ```.";
+/** A note whose code block is left open: TheBrain deletes its third line. */
+const OPEN_FENCE = "intro\n\n```js\ncode();\n";
+const NOT_KEPT = (of = "this note"): string =>
+  `TheBrain did not keep line 3, "\`\`\`js", of ${of}. ${FENCE_RULE} Read the note ${WRITE_IT_AGAIN}`;
+
 /** What the API answers for the graph of an identifier nobody has, and for much else. */
 const GENERIC_403 =
   "To use the TheBrain API, make requests to /api (e.g. /api/brains). " +
@@ -6101,7 +6118,7 @@ describe("a call that fails after it has written", () => {
       const result = await call("brain_create_thought", {
         brainId: BRAIN,
         name: "RAG",
-        note: "```\ncode\n```\n",
+        note: OPEN_FENCE,
         tagIds: [TAG],
       });
 
@@ -6116,9 +6133,7 @@ describe("a call that fails after it has written", () => {
           `- tag ${TAG}: ${failed500(`POST /api/links/${BRAIN}`)}`,
           "",
           "## Warning",
-          "- this note contains a fenced code block — TheBrain drops the closing ``` on save " +
-            "and the rest of the text gets swallowed into the block. Prefer indenting code by " +
-            "four spaces",
+          `- ${NOT_KEPT()}`,
           "",
           "## Next",
           `${IN_PART}. ${EXISTS}tags with brain_tag.`,
@@ -6246,16 +6261,33 @@ describe("a call that fails after it has written", () => {
           "- note written",
           "- tags attached: 2",
           "",
-          "## Warning",
-          "- this note contains a fenced code block — TheBrain drops the closing ``` on save " +
-            "and the rest of the text gets swallowed into the block. Prefer indenting code by " +
-            "four spaces",
-          "",
           "## Next",
           "The identifier above works immediately. Searching for this thought by name only " +
             "succeeds after a few seconds, so refer to it by identifier.",
         ].join("\n"),
       );
+    });
+
+    it("a note with a code block that is closed has no warning, and one TheBrain did not keep whole says which line", async () => {
+      // Every note with a fenced block used to be warned about, as one whose
+      // closing fence TheBrain drops. It keeps a closed block to the
+      // character, and deletes a fence that has no partner.
+      const DONE = `## Done\n- created thought "RAG" — ${THOUGHT}\n- note written\n\n`;
+      const NEXT =
+        "## Next\nThe identifier above works immediately. Searching for this thought by " +
+        "name only succeeds after a few seconds, so refer to it by identifier.";
+      const create = async (note: string) => {
+        const { call } = await connect(routes());
+        return call("brain_create_thought", { brainId: BRAIN, name: "RAG", note });
+      };
+
+      for (const kept of ["before\n\n```js\ncode();\n```\n\nafter", "~~~\ncode\n~~~", "plain"]) {
+        expect(await create(kept), kept).toEqual({ isError: false, text: `${DONE}${NEXT}` });
+      }
+      expect(await create(OPEN_FENCE)).toEqual({
+        isError: false,
+        text: `${DONE}## Warning\n- ${NOT_KEPT()}\n\n${NEXT}`,
+      });
     });
   });
 
@@ -6862,9 +6894,11 @@ describe("what brain_ingest says of a batch written in part", () => {
   const TAG = "ffffffff-0000-4000-8000-000000000006";
   const HELD = "eeeeeeee-0000-4000-8000-000000000005";
   const FENCED = "```\ncode\n```\n";
-  const WARNING = (names: string) =>
-    "## Warning\nTheBrain drops the closing ``` on save, so notes with fenced code blocks " +
-    `will be corrupted: ${names}. Prefer indenting code by four spaces.`;
+  /** The warning for notes TheBrain did not keep whole, one line a note. */
+  const WARNING = (...notes: string[]) =>
+    `## Warning\nTheBrain did not keep every line of ${notes.length === 1 ? "a note" : "these notes"}:\n` +
+    `${notes.map((n) => `- ${n}`).join("\n")}\n${FENCE_RULE} ` +
+    `Read ${notes.length === 1 ? "it" : "each"} ${WRITE_IT_AGAIN}`;
   type Create = { name: string; sourceThoughtId?: string };
   /** The identifier a thought of each name is created with. */
   const ID: Record<string, string> = {
@@ -6934,14 +6968,14 @@ describe("what brain_ingest says of a batch written in part", () => {
     const result = await call("brain_ingest", {
       brainId: BRAIN,
       thoughts: [
-        { tempId: "kept", name: "Kept", parent: PARENT, note: FENCED },
-        { tempId: "lost", name: "Lost", parent: PARENT, note: FENCED },
-        { tempId: "gone", name: "Gone", parent: DOOMED, note: FENCED },
+        { tempId: "kept", name: "Kept", parent: PARENT, note: OPEN_FENCE },
+        { tempId: "lost", name: "Lost", parent: PARENT, note: OPEN_FENCE },
+        { tempId: "gone", name: "Gone", parent: DOOMED, note: OPEN_FENCE },
       ],
     });
 
     expect(result.isError).toBe(true);
-    expect(result.text).toContain(`${WARNING("Kept")}\n`);
+    expect(result.text).toContain(`${WARNING(`"Kept" (${ID["Kept"]}): line 3, "\`\`\`js"`)}\n\n## Next\n`);
     expect(result.text).toContain(
       [
         "## Failed",
@@ -6952,11 +6986,11 @@ describe("what brain_ingest says of a batch written in part", () => {
     );
   });
 
-  it("with no fenced note written there is no such warning, and written whole it reads as it did", async () => {
+  it("with no such note written there is no warning, and written whole it names each note by identifier", async () => {
     const none = await connect(routes([["POST /api/notes/", boom]]));
     const failed = await none.call("brain_ingest", {
       brainId: BRAIN,
-      thoughts: [{ tempId: "lost", name: "Lost", parent: PARENT, note: FENCED }],
+      thoughts: [{ tempId: "lost", name: "Lost", parent: PARENT, note: OPEN_FENCE }],
     });
     expect(failed.isError).toBe(true);
     expect(failed.text).not.toContain("## Warning");
@@ -6965,15 +6999,43 @@ describe("what brain_ingest says of a batch written in part", () => {
     const result = await whole.call("brain_ingest", {
       brainId: BRAIN,
       thoughts: [
-        { tempId: "kept", name: "Kept", parent: PARENT, note: FENCED },
-        { tempId: "lost", name: "Lost", parent: PARENT, note: FENCED },
+        { tempId: "kept", name: "Kept", parent: PARENT, note: OPEN_FENCE },
+        { tempId: "lost", name: "Lost", parent: PARENT, note: "a\n```\n```\nb" },
         { tempId: "plain", name: "Plain", parent: PARENT, note: "prose" },
+        { tempId: "same", name: "Same", parent: PARENT, note: FENCED },
       ],
     });
     expect(result.isError).toBe(false);
     expect(result.text).toContain(
-      `- notes written: 3\n- tags attached: 0\n\n${WARNING("Kept, Lost")}\n\n## Next\n`,
+      "- notes written: 4\n- tags attached: 0\n\n" +
+        WARNING(
+          `"Kept" (${ID["Kept"]}): line 3, "\`\`\`js"`,
+          `"Lost" (${ID["Lost"]}): lines 2 and 3, a code block with nothing in it`,
+        ) +
+        "\n\n## Next\n",
     );
+  });
+
+  it("a note whose code blocks are closed is not warned about: the batch reads as one with no code in it", async () => {
+    // Every note with a fenced block used to stand under "Warning" as one
+    // that "will be corrupted", with the advice to indent code instead.
+    // TheBrain keeps a closed block to the character.
+    const batch = async (note: string) => {
+      const { call } = await connect(routes());
+      return call("brain_ingest", {
+        brainId: BRAIN,
+        thoughts: [
+          { tempId: "kept", name: "Kept", parent: PARENT, note },
+          { tempId: "lost", name: "Lost", parent: PARENT, note: `before\n\n${note}\nafter` },
+        ],
+      });
+    };
+    const plain = await batch("prose\n");
+    expect(plain.isError).toBe(false);
+    expect(plain.text).not.toContain("## Warning");
+    for (const fenced of [FENCED, "```js\nconst a = 1;\n```\n\n~~~\ntilde\n~~~\n"]) {
+      expect(await batch(fenced), fenced).toEqual(plain);
+    }
   });
 
   it("a note, a tag and an alias that fail name their thought by identifier", async () => {
@@ -7385,14 +7447,56 @@ describe("a read that fails inside a tool is not an answer that nothing is there
       });
       expect(requests(over.calls)).toEqual([NOTE, `POST /api/notes/${BRAIN}/${THOUGHT}/update`]);
 
+      // A code block that is closed is kept to the character, and used to
+      // be warned about as one whose closing fence TheBrain drops.
       const fresh = await set([["GET /api/notes/", () => noNote]], { markdown: "```\ncode\n```\n" });
-      expect(fresh.result).toEqual({
-        isError: false,
-        text:
-          "## Done\nnote created\n\n## Warning\nthis note contains a fenced code block — " +
-          "TheBrain drops the closing ``` on save and the rest of the text gets swallowed " +
-          "into the block. Prefer indenting code by four spaces",
-      });
+      expect(fresh.result).toEqual({ isError: false, text: "## Done\nnote created" });
+    });
+
+    it("says which lines TheBrain did not keep, and only of a note that lost one", async () => {
+      const REPLACED = "## Done\nnote replaced; the previous text (18 characters) is gone";
+      const warned = (lines: string, more = ""): string =>
+        `${REPLACED}\n\n## Warning\nTheBrain did not keep ${lines}, of this note. ` +
+        `${FENCE_RULE}${more} Read the note ${WRITE_IT_AGAIN}`;
+
+      for (const kept of [
+        "before\n\n```js\ncode();\n```\n\nafter",
+        "```\none\n```\n\n````md\n```js\nnested\n```\n````",
+        "a ```span``` and an indented fence:\n\n    ```\n    code",
+        "~~~\ncode\n~~~",
+      ]) {
+        expect((await set([], { markdown: kept })).result, kept).toEqual({
+          isError: false,
+          text: REPLACED,
+        });
+      }
+
+      for (const [markdown, lines, more] of [
+        // A block left open loses the fence that opened it.
+        [OPEN_FENCE, 'line 3, "```js"'],
+        // A line that opens with a code span goes with its sentence.
+        ["a\n\n```x``` is inline code\n\nend", 'line 3, "```x``` is inline code"'],
+        [`a\n\n\`\`\`${"x".repeat(70)}\n\nend`, `line 3, "\`\`\`${"x".repeat(57)}…"`],
+        ["a\n\n```\n```\n\nend", "lines 3 and 4, a code block with nothing in it"],
+        // A longer fence around a bare one is that to TheBrain: its first two lines.
+        ["````md\n```\nnested\n```\n````", "lines 1 and 2, a code block with nothing in it"],
+        [
+          "x\n```\n```\ny\n```tail",
+          'lines 2 and 3, a code block with nothing in it; line 5, "```tail"',
+        ],
+        // With `\r\n` the lines are the same lines.
+        ["intro\r\n\r\n```js\r\ncode();", 'line 3, "```js"'],
+        [
+          "```js\n```",
+          "lines 1 and 2, a code block with nothing in it",
+          " Nothing else was in the note, so the thought reads as having none.",
+        ],
+      ] as const) {
+        const { result, calls } = await set([], { markdown });
+        expect(result, markdown).toEqual({ isError: false, text: warned(lines, more) });
+        // The note is written as it was given: nothing is refused or mended.
+        expect(requests(calls), markdown).toEqual([NOTE, `POST /api/notes/${BRAIN}/${THOUGHT}/update`]);
+      }
     });
   });
 
@@ -7482,6 +7586,37 @@ describe("a read that fails inside a tool is not an answer that nothing is there
       expect(result).toEqual({ isError: false, text: "## Done\ntext appended to the note" });
       expect(requests(calls)).toEqual([NOTE, `POST /api/notes/${BRAIN}/${THOUGHT}/append`]);
       expect(sent("POST")).toEqual([{ markdown: "\n\nAppended." }]);
+    });
+
+    it("says which lines of the whole note TheBrain did not keep, and nothing of a block that is closed", async () => {
+      const APPENDED = "## Done\ntext appended to the note";
+      const warned = (lines: string): string =>
+        `${APPENDED}\n\n## Warning\nTheBrain did not keep ${lines}, of the note with this ` +
+        `text added. ${FENCE_RULE} Read the note ${WRITE_IT_AGAIN}`;
+      const BLOCK = "```sh\nls\n```";
+
+      // A closed block, added to a note and written as a first note: it used
+      // to be warned about either way.
+      for (const note of [held, noNote, { ...held, markdown: "a\n\n```\nfirst\n```" }]) {
+        const { result } = await append([["GET /api/notes/", () => note]], { markdown: BLOCK });
+        expect(result, note.markdown).toEqual({ isError: false, text: APPENDED });
+      }
+
+      // The lines are counted in the note as it is with the text added:
+      // "The original note.", the separator's blank line, then the addition.
+      const open = await append([], { markdown: "```js\ncode();" });
+      expect(open.result).toEqual({ isError: false, text: warned('line 3, "```js"') });
+      expect(open.sent("POST")).toEqual([{ markdown: "\n\n```js\ncode();" }]);
+
+      // TheBrain goes over the whole note. Where the note holds a fence with
+      // no partner, a block that is closed loses the fence that closes it.
+      const stray = { ...held, markdown: "begin\n\n```\nleft open" };
+      const closed = await append([["GET /api/notes/", () => stray]], { markdown: BLOCK });
+      expect(closed.result).toEqual({ isError: false, text: warned('line 8, "```"') });
+
+      // With no note the text is the whole note.
+      const first = await append([["GET /api/notes/", () => noNote]], { markdown: "x\n```" });
+      expect(first.result).toEqual({ isError: false, text: warned('line 2, "```"') });
     });
   });
 

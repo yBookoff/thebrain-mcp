@@ -78,6 +78,6 @@ export {
   type CreateLinkInput,
   type UpdateLinkInput,
 } from "./resources/links.js";
-export { warnIfFencedCode } from "./resources/notes.js";
+export { noteAsStored, noteLinesDropped, type DroppedLine } from "./resources/notes.js";
 export { urlKey } from "./resources/attachments.js";
 export type { SearchHit } from "./resources/search.js";

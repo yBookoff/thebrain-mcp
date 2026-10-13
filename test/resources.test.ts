@@ -11,10 +11,11 @@ import {
   logTime,
   nameRefusal,
   normalizeAliases,
+  noteAsStored,
+  noteLinesDropped,
   replayThoughtIds,
   thoughtNameAsStored,
   urlKey,
-  warnIfFencedCode,
 } from "../src/api/index.js";
 import {
   Relation,
@@ -1004,6 +1005,22 @@ describe("notes", () => {
     expect(posts[0]!.body).toEqual({ markdown: "text" });
   });
 
+  it("append resolves to the whole text it left the note with", async () => {
+    // TheBrain goes over the whole note when it deletes a fence, so a caller
+    // that says what was not kept needs all of it, not the addition.
+    for (const [held, added, whole] of [
+      [noNote, "text", "text"],
+      [withNote, "continued", "beginning\n\ncontinued"],
+      [{ ...withNote, markdown: "beginning\n\n" }, "next", "beginning\n\nnext"],
+    ] as const) {
+      const { api } = apiWith([
+        ["GET /api/notes", () => held],
+        ["POST /api/notes", () => 200],
+      ]);
+      await expect(api.notes.append(BRAIN, THOUGHT, added)).resolves.toBe(whole);
+    }
+  });
+
   it("append on an existing note inserts a separator", async () => {
     const { api, calls } = apiWith([
       ["GET /api/notes", () => withNote],
@@ -1033,13 +1050,129 @@ describe("notes", () => {
   });
 });
 
-describe("markdown fenced-code warning", () => {
-  it("stays quiet on ordinary text", () => {
-    expect(warnIfFencedCode("just text\n\nand more")).toBeNull();
+/**
+ * What TheBrain 15.0.640 keeps of a note it is given, as `noteAsStored()` and
+ * `noteLinesDropped()` say it. Every pair here was sent to the live API and
+ * read back (contract test: "a note's Markdown as it is stored").
+ */
+describe("a note's Markdown as TheBrain keeps it", () => {
+  const F = "```";
+
+  it("a note with no fence, and one whose blocks are each closed, is kept to the character", () => {
+    // The warning the tools gave was for every one of these.
+    for (const text of [
+      "just text\n\nand more",
+      `before\n\n${F}\ncode\n${F}`,
+      `before\n\n${F}js\ncode\n${F}\n`,
+      `before\n${F}\ncode\n${F}\nafter`,
+      `one\n\n${F}js\na\n${F}\n\ntwo\n\n${F}sh\nb\n${F}\n\nend`,
+      `${F}\ncode\n${F}`,
+      `${F}py\ndef f():\n\n    return 1\n\t# tab\n\n${F}\n\nafter`,
+      `${F}${F}\ncode\n${F}${F}`,
+      `${F}\`md\n${F}js\ncode\n${F}\n${F}\`\n\nafter`,
+      `${F}\none\n${F}\n${F}\ntwo\n${F}`,
+      `a ${F}inline${F} b and a lone ${F} too`,
+      "~~~\ncode\n~~~",
+      `- item\n\n  ${F}js\n  code\n  ${F}\n\n> ${F}\n> quoted\n> ${F}`,
+    ]) {
+      expect(noteLinesDropped(text), text).toEqual([]);
+      expect(noteAsStored(text), text).toBe(text);
+    }
   });
 
-  it("warns about a triple backtick", () => {
-    expect(warnIfFencedCode("text\n```js\nconst a = 1\n```\n")).toMatch(/closing/);
+  it("with an odd number of lines that begin with a fence, the last one goes, whole", () => {
+    for (const [sent, stored] of [
+      // A block left open loses the fence that opened it.
+      [`before\n\n${F}js\ncode();\n\nafter`, "before\n\ncode();\n\nafter"],
+      [`before\n\n${F}`, "before\n"],
+      [`before\n\n${F}\n`, "before\n\n"],
+      [`${F}js\ncode\nmore`, "code\nmore"],
+      // Of three it is the third, whichever block it was meant for.
+      [`a\n\n${F}\none\n${F}\n\nb\n\n${F}\ntwo\n\nend`, `a\n\n${F}\none\n${F}\n\nb\n\ntwo\n\nend`],
+      [`${F}\n1\n${F}\n2\n${F}\n3\n${F}\n4\n${F}\n5`, `${F}\n1\n${F}\n2\n${F}\n3\n${F}\n4\n5`],
+      // A block whose first fence is not at the start of its line loses the
+      // fence that closes it: what a block appended with no separator is.
+      [`intro${F}js\ncode\n${F}`, `intro${F}js\ncode`],
+      [`intro ${F}js\ncode\n${F}\n\nend`, `intro ${F}js\ncode\n\nend`],
+      [`\ufeff${F}\ncode\n${F}\n\nend`, `\ufeff${F}\ncode\n\nend`],
+      // Whatever follows the backticks goes with them: a sentence too.
+      [`a\n\n${F}x${F} is inline code\n\nend`, "a\n\n\nend"],
+      [`a\n\n${F}some words here\ncode\n\nend`, "a\n\ncode\n\nend"],
+      [`a\n\n${F}${F}\ncode\n\nend`, "a\n\ncode\n\nend"],
+      // A fence of tildes is no fence, so the one of backticks inside is alone.
+      [`a\n\n~~~\n${F}\n~~~\n\nend`, "a\n\n~~~\n~~~\n\nend"],
+    ] as const) {
+      expect(noteAsStored(sent), sent).toBe(stored);
+      expect(noteLinesDropped(sent).map((d) => d.why), sent).toEqual(["unpaired"]);
+    }
+  });
+
+  it("a block with nothing in it goes, both of its lines", () => {
+    for (const [sent, stored] of [
+      [`a\n\n${F}\n${F}\n\nend`, "a\n\n\nend"],
+      [`a\n\n${F}js\n${F}\n\nend`, "a\n\n\nend"],
+      [`a\n\n${F}  \n${F}\n\nend`, "a\n\n\nend"],
+      [`a\n\n${F}\n${F}`, "a\n"],
+      [`a\n${F}\n${F}\nb`, "a\nb"],
+      [`${F}\n${F}`, ""],
+      [`a\n\n${F}\ncode\n${F}\n\nb\n\n${F}\n${F}\n\nend`, `a\n\n${F}\ncode\n${F}\n\nb\n\n\nend`],
+      [`${F}\n${F}\nx\n${F}\n${F}`, "x"],
+      // The fences pair up in order, so the pair is the last two here.
+      [`${F}\n${F}js\n${F}\n${F}`, `${F}\n${F}js`],
+      [`${F}\nx\n${F}js\n${F}\n${F}\n\nend`, `${F}\nx\n${F}js\n\nend`],
+    ] as const) {
+      expect(noteAsStored(sent), sent).toBe(stored);
+      expect(new Set(noteLinesDropped(sent).map((d) => d.why)), sent).toEqual(new Set(["empty"]));
+    }
+    // Not a block with nothing in it: a line between the two, a closing
+    // fence that is more than three backticks, and two blocks back to back.
+    for (const kept of [
+      `a\n\n${F}\n\n${F}\n\nend`,
+      `a\n\n${F}\n   \n${F}\n\nend`,
+      `a\n${F}\n${F}  \nend`,
+      `a\n\n${F}\n${F}js\n\nend`,
+      `a\n\n${F}${F}\n${F}${F}\n\nend`,
+      `${F}\none\n${F}\n${F}\ntwo\n${F}`,
+    ]) {
+      expect(noteAsStored(kept), kept).toBe(kept);
+    }
+  });
+
+  it("both rules can take lines of one note, the odd fence first", () => {
+    expect(noteAsStored(`a\n\n${F}${F}\n${F}\n${F}${F}\n\nend`)).toBe("a\n\n\nend");
+    expect(noteAsStored(`${F}\n${F}\n${F}`)).toBe("");
+    expect(noteLinesDropped(`x\n${F}\n${F}\ny\n${F}tail`)).toEqual([
+      { line: 2, text: F, why: "empty" },
+      { line: 3, text: F, why: "empty" },
+      { line: 5, text: `${F}tail`, why: "unpaired" },
+    ]);
+  });
+
+  it("only three backticks at the very start of a line are a fence", () => {
+    for (const kept of [
+      `a\n\n ${F}\ncode\n\nend`,
+      `a\n\n    ${F}\ncode\n\nend`,
+      `a\n\n\t${F}\ncode\n\nend`,
+      `a\n\n> ${F}\n> code\n\nend`,
+      `a\n\n- ${F}\n  code\n\nend`,
+      "a\n\n~~~\ncode\n\nend",
+      "a\n\n``\ncode\n\nend",
+      // After a carriage return alone a fence is not at the start of a line.
+      `a\r${F}\rcode`,
+    ]) {
+      expect(noteAsStored(kept), kept).toBe(kept);
+    }
+  });
+
+  it("line ends: \\r\\n is \\n, and nothing else is touched", () => {
+    expect(noteAsStored("a\r\nb\r\n\r\nc\r\n")).toBe("a\nb\n\nc\n");
+    expect(noteAsStored(`a\r\n\r\n${F}js\r\ncode\r\n\r\nend\r\n`)).toBe("a\n\ncode\n\nend\n");
+    expect(noteLinesDropped(`a\r\n\r\n${F}js\r\ncode`)).toEqual([
+      { line: 3, text: `${F}js`, why: "unpaired" },
+    ]);
+    for (const kept of ["a\rb\r\rc\r", "\n\n\na\n\n\n", "  a   \nb\t\n", "\ufeffa\u00a0b\u200b", "   \n  "]) {
+      expect(noteAsStored(kept), JSON.stringify(kept)).toBe(kept);
+    }
   });
 });
 

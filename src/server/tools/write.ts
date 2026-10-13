@@ -17,8 +17,9 @@ import {
   mayHaveLanded,
   nameRefusal,
   normalizeAliases,
+  noteAsStored,
+  noteLinesDropped,
   thoughtNameAsStored,
-  warnIfFencedCode,
   type AliasOutcome,
   type ApiErrorKind,
   type UpdateThoughtInput,
@@ -180,7 +181,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
           what: "note",
           run: async () => {
             await ctx.api.notes.set(bid, thoughtId, note);
-            const warning = warnIfFencedCode(note);
+            const warning = notKeptWarning(note);
             if (warning !== null) warnings.push(warning);
             return ["note written"];
           },
@@ -389,7 +390,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
           ]),
         );
       }
-      const warning = warnIfFencedCode(markdown);
+      const warning = notKeptWarning(markdown);
       return ok(
         join([
           section(
@@ -418,8 +419,11 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       },
     },
     guard(async ({ brainId: bid, thoughtId, markdown }) => {
+      // The whole note as it was sent: TheBrain goes over all of it, so a
+      // line it deletes need not be one of the lines added.
+      let whole: string;
       try {
-        await ctx.api.notes.append(bid, thoughtId, markdown);
+        whole = await ctx.api.notes.append(bid, thoughtId, markdown);
       } catch (error) {
         // `append` reads the note and then writes once, and the two fail
         // apart. Both used to be the request's error alone, and after a
@@ -449,7 +453,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
             `failed: ${sentence(describeError(error))} This call can be sent again as it is.`,
         );
       }
-      const warning = warnIfFencedCode(markdown);
+      const warning = notKeptWarning(whole, "the note with this text added");
       return ok(
         join([
           section("Done", "text appended to the note"),
@@ -873,6 +877,64 @@ function afterNoAnswer(
     (rest.length > 0
       ? ` Nothing else of the call was written: if the thought is there, write ${rest.join(" and ")}.`
       : "")
+  );
+}
+
+/**
+ * The two rules by which TheBrain deletes a line of a note it is given
+ * (`noteLinesDropped()`), and what to do about a note that lost one.
+ */
+export const FENCE_RULE =
+  "TheBrain deletes the last line that begins with ``` when a note has an odd number of " +
+  "them, with whatever else is on that line, and a code block with nothing between its " +
+  "two ``` lines.";
+export const AFTER_A_LINE_LOST =
+  "with brain_get_thought, and write it again with brain_set_note with a ``` line before " +
+  "each code block and one after it, each at the start of its line, and no other line " +
+  "that begins with ```.";
+
+/**
+ * Which lines of a note TheBrain did not keep, as a result names them, or
+ * null for a note it kept whole: any note whose code blocks are each closed.
+ * A line is given by its number in the text as sent and by what it held,
+ * since a line that opens with a code span goes with its sentence.
+ */
+export function linesNotKept(markdown: string): string | null {
+  const dropped = noteLinesDropped(markdown);
+  const parts: string[] = [];
+  for (let i = 0; i < dropped.length; i += 1) {
+    const { line, text, why } = dropped[i]!;
+    if (why === "empty") {
+      // The two fences of one block, which are lines next to each other.
+      parts.push(`lines ${line} and ${line + 1}, a code block with nothing in it`);
+      i += 1;
+    } else {
+      const shown = text.length > 60 ? `${text.slice(0, 60)}…` : text;
+      parts.push(`line ${line}, ${JSON.stringify(shown)}`);
+    }
+  }
+  return parts.length === 0 ? null : parts.join("; ");
+}
+
+/**
+ * The warning of a tool that wrote one note, or null when TheBrain kept all
+ * of it. `of` is the text the line numbers count in.
+ *
+ * It used to be given for every note with a fenced block, as a note whose
+ * closing fence TheBrain drops. A block that is closed reads back to the
+ * character (contract test), so that warning was untrue of nearly every note
+ * it stood under, and its advice to indent code changed how a note looks.
+ */
+function notKeptWarning(markdown: string, of = "this note"): string | null {
+  const lines = linesNotKept(markdown);
+  if (lines === null) return null;
+  const nothing =
+    noteAsStored(markdown).trim() === ""
+      ? " Nothing else was in the note, so the thought reads as having none."
+      : "";
+  return (
+    `TheBrain did not keep ${lines}, of ${of}. ${FENCE_RULE}${nothing} ` +
+    `Read the note ${AFTER_A_LINE_LOST}`
   );
 }
 

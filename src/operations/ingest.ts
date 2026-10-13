@@ -73,6 +73,7 @@ import {
   mayHaveLanded,
   nameRefusal,
   normalizeAliases,
+  noteAsStored,
   thoughtNameAsStored,
   type CleanGraph,
   type TheBrainApi,
@@ -871,7 +872,8 @@ export async function ingest(
           continue;
         }
         await api.notes.set(brainId, id, t.note!);
-        held = t.note!;
+        // As it is stored, which is what the next item of this thought finds.
+        held = noteAsStored(t.note!);
         outcome.notesWritten += 1;
         outcome.notesWrittenFor.push(t.tempId);
       } catch (error) {
@@ -1105,12 +1107,14 @@ async function readNeighbours(
 
 /**
  * Whether the note a thought has is the text a plan has for it. A note reads
- * back as it was written but for its line ends, which come back as `\n`
- * (contract test), so those and the blanks around the text are set aside.
+ * back as it was written but for its line ends, which come back as `\n`, and
+ * for a fence TheBrain deletes (`noteAsStored()`, contract test). So the
+ * plan's text is taken as it would be stored, and the blanks around both
+ * are set aside. A plan's note with a fence left open used to read as
+ * another text than the note the plan itself had written.
  */
 function sameText(held: string, planned: string): boolean {
-  const plain = (text: string): string => text.replaceAll("\r\n", "\n").trim();
-  return plain(held) === plain(planned);
+  return held.replaceAll("\r\n", "\n").trim() === noteAsStored(planned).trim();
 }
 
 /**
