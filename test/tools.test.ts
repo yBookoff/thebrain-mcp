@@ -337,6 +337,59 @@ describe("a thought's kind in what the read tools print", () => {
         "## Jumps",
       ]);
     });
+
+    // What is above a thought by a link that is no parent's: the API lists it
+    // among the parents as well (docs/api-map.md, L40).
+    const SECOND = "cdcdcdcd-0000-4000-8000-00000000000c";
+    /** The link from `above` down to THOUGHT, as a graph lists it. */
+    const from = (above: string, meaning: number) => ({
+      id: `${above.slice(0, -1)}9`,
+      thoughtIdA: above,
+      thoughtIdB: THOUGHT,
+      relation: 1,
+      meaning,
+      name: null,
+    });
+
+    it("a tag on a tag is one of its tags, and not a parent", async () => {
+      // A link of meaning 7. The upper tag stood under Parents, marked a tag.
+      const text = await view({
+        ...graph(at(THOUGHT, "gotcha", 4)),
+        parents: [at(TAG, "measured", 4)],
+        tags: [at(TAG, "measured", 4)],
+        links: [from(TAG, 7)],
+      });
+      expect(text).toBe(`# gotcha\n${THOUGHT} [tag]\n\n## Tags\nmeasured`);
+    });
+
+    it("a type with a type has it as its type, and not as a parent", async () => {
+      // A link of meaning 3.
+      const text = await view({
+        ...graph(at(THOUGHT, "Design pattern", 2, { typeId: TYPE })),
+        type,
+        parents: [type],
+        links: [from(TYPE, 3)],
+      });
+      expect(text).toBe(`# Design pattern\n${THOUGHT} [type]\n\n## Type\nPattern — ${TYPE}`);
+    });
+
+    it("a thought with two types lists both under Types, the one typeId names first, and neither as a parent", async () => {
+      // The second used to stand under Parents, marked a type, and the API's
+      // own `type`, printed under Type, was now and then that one.
+      const second = at(SECOND, "Method", 2);
+      const text = await view({
+        ...graph(thought("RAG", { typeId: TYPE })),
+        type: second,
+        parents: [second, type, at(PARENT, "Retrieval")],
+        links: [from(SECOND, 2), from(TYPE, 2), from(PARENT, 1)],
+      });
+      expect(text).toBe(
+        `# RAG\n${THOUGHT}\n\n## Types\n- Pattern — ${TYPE}\n- Method — ${SECOND}\n` +
+          "TheBrain links this thought under both. typeId null in brain_update_thought removes " +
+          "both, and a typeId set while both are there replaces one of them at most: to keep " +
+          `one, remove both, then set it.\n\n## Parents\n- Retrieval — ${PARENT}`,
+      );
+    });
   });
 
   describe("brain_search", () => {
@@ -569,6 +622,41 @@ describe("a thought's kind in what the read tools print", () => {
           `- Embeddings — ${OTHER}  (via RAG)\n` +
           `- gotcha — ${TAG} [tag]  (via RAG)\n\n` +
           "## Totals\nthoughts 4, links 3",
+      );
+    });
+
+    it("a tag on a tag and a second type are no ancestors", async () => {
+      // Each is above by a link that is no parent's, and the API lists it
+      // among the parents: a walk went up to it as to a parent.
+      const SECOND = "cdcdcdcd-0000-4000-8000-00000000000c";
+      const from = (above: string, meaning: number) => ({
+        id: `${above.slice(0, -1)}9`,
+        thoughtIdA: above,
+        thoughtIdB: THOUGHT,
+        relation: 1,
+        meaning,
+        name: null,
+      });
+      expect(
+        await walk({
+          ...graph(at(THOUGHT, "gotcha", 4)),
+          parents: [tag],
+          tags: [tag],
+          links: [from(TAG, 7)],
+        }),
+      ).toBe("# Neighbourhood of: gotcha [tag]\n\n## Totals\nthoughts 1, links 0");
+      const second = at(SECOND, "Method", 2);
+      expect(
+        await walk({
+          ...graph(thought("RAG", { typeId: TYPE })),
+          type: second,
+          parents: [second, type, plain],
+          links: [from(SECOND, 2), from(TYPE, 2), from(OTHER, 1)],
+        }),
+      ).toBe(
+        "# Neighbourhood of: RAG\n\n" +
+          `## Hop 1\n- Embeddings — ${OTHER}  (via RAG)\n\n` +
+          "## Totals\nthoughts 2, links 1",
       );
     });
 
@@ -1291,7 +1379,17 @@ describe("brain_update_thought", () => {
   /** A thought of type PARENT; deleting the link between them takes the type away. */
   const typedRoutes = (link: { meaning: number }): Route[] => {
     let typeId: string | null = PARENT;
+    const type = thought("Pattern", { id: PARENT, kind: 2 });
     return [
+      [
+        "GET /graph",
+        () => ({
+          ...graph(thought("RAG", { typeId })),
+          ...(typeId === null ? {} : { type, parents: [type] }),
+          links:
+            typeId === null ? [] : [{ id: LINK, thoughtIdA: PARENT, thoughtIdB: THOUGHT, ...link }],
+        }),
+      ],
       ["GET /api/thoughts/", () => thought("RAG", { typeId })],
       ["PATCH /api/thoughts/", () => 200],
       ["GET /api/links/", () => ({ id: LINK, thoughtIdA: PARENT, thoughtIdB: THOUGHT, ...link })],
@@ -1342,6 +1440,79 @@ describe("brain_update_thought", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("null takes a type's type away: the link that carries it has meaning 3", async () => {
+    // It was taken for a link that is not the type's. The call waited two
+    // seconds and answered that the type was still in place, and it was.
+    const { call, calls } = await connect(typedRoutes({ meaning: 3 }));
+    const result = await call("brain_update_thought", {
+      brainId: BRAIN,
+      thoughtId: THOUGHT,
+      typeId: null,
+    });
+    expect(result).toEqual({ isError: false, text: "## Done\n- typeId = null" });
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.path)).toEqual([
+      `/api/links/${BRAIN}/${LINK}`,
+    ]);
+  });
+
+  it("null takes both types of a thought with two away, and leaves its parent", async () => {
+    // Only the one typeId names went, and the call answered "Done" with the
+    // other still its type: deleting either link reads back as typeId null.
+    const SECOND = "cdcdcdcd-0000-4000-8000-00000000000c";
+    const ABOVE = "efefefef-0000-4000-8000-00000000000e";
+    const second = thought("Method", { id: SECOND, kind: 2 });
+    const first = thought("Pattern", { id: PARENT, kind: 2 });
+    const above = thought("Retrieval", { id: ABOVE });
+    const links = new Map(
+      [PARENT, SECOND, ABOVE].map((end, i) => [
+        end,
+        {
+          id: `${LINK.slice(0, -1)}${i}`,
+          thoughtIdA: end,
+          thoughtIdB: THOUGHT,
+          relation: 1,
+          meaning: end === ABOVE ? 1 : 2,
+        },
+      ]),
+    );
+    let typeId: string | null = PARENT;
+    const { call, calls } = await connect([
+      [
+        "GET /graph",
+        () => ({
+          ...graph(thought("RAG", { typeId })),
+          type: links.has(SECOND) ? second : links.has(PARENT) ? first : null,
+          parents: [second, first, above].filter((t) => links.has(t.id)),
+          links: [...links.values()],
+        }),
+      ],
+      ["GET /api/thoughts/", () => thought("RAG", { typeId })],
+      [
+        "DELETE /api/links/",
+        (url) => {
+          for (const [end, link] of links) if (url.pathname.endsWith(link.id)) links.delete(end);
+          typeId = null;
+          return 200;
+        },
+      ],
+      [
+        "GET /api/links/",
+        (url) => {
+          const [a = "", b = ""] = url.pathname.split("/").slice(-2);
+          return links.get(a) ?? links.get(b) ?? 404;
+        },
+      ],
+    ]);
+    const result = await call("brain_update_thought", {
+      brainId: BRAIN,
+      thoughtId: THOUGHT,
+      typeId: null,
+    });
+    expect(result).toEqual({ isError: false, text: "## Done\n- typeId = null" });
+    expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(2);
+    expect([...links.keys()]).toEqual([ABOVE]);
   });
 
   it("says that null clears on every argument where it does", async () => {

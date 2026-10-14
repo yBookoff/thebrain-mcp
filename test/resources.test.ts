@@ -21,9 +21,11 @@ import {
   Relation,
   aliasesOf,
   type AttachmentDto,
+  type LinkDto,
   type ModificationLogDto,
   type ThoughtDto,
 } from "../src/api/types.js";
+import { neighbourIds } from "../src/semantic/indexer.js";
 
 const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
 const THOUGHT = "bbbbbbbb-0000-4000-8000-000000000002";
@@ -94,6 +96,21 @@ const thought = (id: string, name: string, extra: Partial<ThoughtDto> = {}): Tho
   ...extra,
 });
 
+/** A graph as the API sends it, with nothing in it but what is given. Links are taken as given. */
+const graphOf = (activeThought: ThoughtDto, extra: Record<string, unknown> = {}) => ({
+  activeThought,
+  parents: [],
+  children: [],
+  jumps: [],
+  siblings: [],
+  tags: [],
+  type: null,
+  links: [],
+  attachments: [],
+  ...extra,
+});
+const TYPE_THOUGHT = thought(TYPE, "Constraint", { kind: 2 });
+
 describe("thought graph", () => {
   it("strips the type out of parents — the API returns it twice", async () => {
     const { api } = apiWith([
@@ -139,6 +156,99 @@ describe("thought graph", () => {
     expect(g.parents).toEqual([]);
     expect(g.children).toEqual([]);
     expect(g.tags).toEqual([]);
+    expect(g.otherTypes).toEqual([]);
+  });
+
+  // What is above a thought by a link that is no parent's. The API lists it
+  // among the parents as well, measured on 15.0.640 (docs/api-map.md, L40).
+  const UPPER = "abababab-0000-4000-8000-00000000000a";
+  const OTHER_TYPE = "cdcdcdcd-0000-4000-8000-00000000000c";
+  const ABOVE = "efefefef-0000-4000-8000-00000000000e";
+  /** The link from `above` down to THOUGHT, as a graph lists it. */
+  const from = (above: string, meaning: number): LinkDto =>
+    ({
+      id: `link-${above}`,
+      thoughtIdA: above,
+      thoughtIdB: THOUGHT,
+      relation: 1,
+      meaning,
+      name: null,
+    }) as unknown as LinkDto;
+  const ids = (list: readonly { id: string }[]): string[] => list.map((t) => t.id);
+
+  it("a tag a tag carries is among its tags, and not among its parents", async () => {
+    // A link of meaning 7: the lower tag's graph has the upper one in both.
+    const upper = thought(UPPER, "measured", { kind: 4 });
+    const { api } = apiWith([
+      [
+        "/graph",
+        () =>
+          graphOf(thought(THOUGHT, "gotcha", { kind: 4 }), {
+            parents: [upper],
+            tags: [upper],
+            links: [from(UPPER, 7)],
+          }),
+      ],
+    ]);
+    const g = await api.thoughts.getGraph(BRAIN, THOUGHT);
+    expect(g.parents).toEqual([]);
+    expect(ids(g.tags)).toEqual([UPPER]);
+    expect(neighbourIds(g)).toEqual([UPPER]);
+  });
+
+  it("the type of a type is its type, and not its parent", async () => {
+    // A link of meaning 3, where a thought's type has 2.
+    const { api } = apiWith([
+      [
+        "/graph",
+        () =>
+          graphOf(thought(THOUGHT, "Pattern", { kind: 2, typeId: TYPE }), {
+            type: TYPE_THOUGHT,
+            parents: [TYPE_THOUGHT],
+            links: [from(TYPE, 3)],
+          }),
+      ],
+    ]);
+    const g = await api.thoughts.getGraph(BRAIN, THOUGHT);
+    expect(g.parents).toEqual([]);
+    expect(g.type?.id).toBe(TYPE);
+    expect(g.otherTypes).toEqual([]);
+  });
+
+  it("of two types, the one typeId names is the type and the other is beside it; neither is a parent", async () => {
+    // A thought created under one type with another for its typeId. The API
+    // lists both among the parents, and its own `type` named the one typeId
+    // does not 17 times of 25.
+    const other = thought(OTHER_TYPE, "Pattern", { kind: 2 });
+    const above = thought(ABOVE, "API constraints");
+    const { api } = apiWith([
+      [
+        "/graph",
+        () =>
+          graphOf(thought(THOUGHT, "Prefix-only search", { typeId: TYPE }), {
+            type: other,
+            parents: [other, TYPE_THOUGHT, above],
+            links: [from(OTHER_TYPE, 2), from(TYPE, 2), from(ABOVE, 1)],
+          }),
+      ],
+    ]);
+    const g = await api.thoughts.getGraph(BRAIN, THOUGHT);
+    expect(g.type?.id).toBe(TYPE);
+    expect(ids(g.otherTypes)).toEqual([OTHER_TYPE]);
+    expect(ids(g.parents)).toEqual([ABOVE]);
+    // The indexer's walk reaches the second type all the same: it used to by the parents.
+    expect(neighbourIds(g).sort()).toEqual([ABOVE, OTHER_TYPE, TYPE].sort());
+  });
+
+  it("the link decides, not the kind: a thought above by an ordinary link is a parent", async () => {
+    const tag = thought(UPPER, "measured", { kind: 4 });
+    const { api } = apiWith([
+      [
+        "/graph",
+        () => graphOf(thought(THOUGHT, "RAG"), { parents: [tag], links: [from(UPPER, 1)] }),
+      ],
+    ]);
+    expect(ids((await api.thoughts.getGraph(BRAIN, THOUGHT)).parents)).toEqual([UPPER]);
   });
 });
 
@@ -354,7 +464,16 @@ describe("removing a type", () => {
     const { staleReads = 0, meaning = 2, linked = true } = options;
     let typeId: string | null = TYPE;
     let stale = 0;
+    const link = () => ({ id: LINK, thoughtIdA: TYPE, thoughtIdB: THOUGHT, relation: 1, meaning });
     return apiWith([
+      [
+        "/graph",
+        () =>
+          graphOf(thought(THOUGHT, "typed", { typeId }), {
+            ...(typeId === null ? {} : { type: TYPE_THOUGHT, parents: [TYPE_THOUGHT] }),
+            ...(linked && typeId !== null ? { links: [link()] } : {}),
+          }),
+      ],
       [
         "/api/thoughts/",
         () => {
@@ -364,13 +483,7 @@ describe("removing a type", () => {
         },
       ],
       ["PATCH /api/thoughts/", () => 200],
-      [
-        "/api/links/",
-        () =>
-          linked && typeId !== null
-            ? { id: LINK, thoughtIdA: TYPE, thoughtIdB: THOUGHT, relation: 1, meaning }
-            : 404,
-      ],
+      ["/api/links/", () => (linked && typeId !== null ? link() : 404)],
       [
         "DELETE /api/links/",
         () => {
@@ -406,13 +519,18 @@ describe("removing a type", () => {
     const { api, calls } = typed({ staleReads: 3 });
     await expect(api.thoughts.removeType(BRAIN, THOUGHT)).resolves.toBe(true);
     // One read to learn the type, three stale ones, and the one that agrees.
-    expect(sent(calls, "GET").filter((path) => path.includes("/api/thoughts/"))).toHaveLength(5);
+    const reads = sent(calls, "GET").filter((path) => path === `/api/thoughts/${BRAIN}/${THOUGHT}`);
+    expect(reads).toHaveLength(5);
   });
 
   it("a thought with no type is left alone", async () => {
-    const { api, calls } = apiWith([["/api/thoughts/", () => thought(THOUGHT, "plain")]]);
+    const { api, calls } = apiWith([
+      ["/graph", () => graphOf(thought(THOUGHT, "plain"))],
+      ["/api/thoughts/", () => thought(THOUGHT, "plain")],
+    ]);
     await expect(api.thoughts.removeType(BRAIN, THOUGHT)).resolves.toBe(false);
-    expect(calls).toHaveLength(1);
+    // The thought, and its graph for a type `typeId` does not name.
+    expect(calls.map((c) => c.method)).toEqual(["GET", "GET"]);
   });
 
   it("throws when the type is still there after its link was deleted", async () => {
@@ -457,6 +575,95 @@ describe("removing a type", () => {
     await expect(api.thoughts.removeType(BRAIN, THOUGHT)).resolves.toBe(false);
     expect(sent(calls, "DELETE")).toHaveLength(1);
   });
+
+  it("a type's type is taken away as well: its link has meaning 3", async () => {
+    // It was taken for a link that is not the type's: nothing was deleted,
+    // and after two seconds the type was still in place.
+    const { api, calls } = typed({ meaning: 3 });
+    await expect(api.thoughts.removeType(BRAIN, THOUGHT)).resolves.toBe(true);
+    expect(sent(calls, "DELETE")).toEqual([`/api/links/${BRAIN}/${LINK}`]);
+  });
+
+  it("a link of meaning 3 with the thought at its head is not the type's, and stays", async () => {
+    // There the thought is the type of the other: the link is the other's.
+    const { api, calls } = apiWith([
+      [
+        "/api/links/",
+        () => ({ id: LINK, thoughtIdA: THOUGHT, thoughtIdB: TYPE, relation: 1, meaning: 3 }),
+      ],
+    ]);
+    await expect(api.links.detachType(BRAIN, THOUGHT, TYPE)).resolves.toBe(false);
+    expect(sent(calls, "DELETE")).toEqual([]);
+  });
+
+  /**
+   * A thought created under OTHER with TYPE for its typeId: a type's link
+   * from each, and an ordinary parent beside them. Deleting either type's
+   * link reads back as `typeId: null`, as measured, while the other stays.
+   */
+  const twoTypes = (options: { typeId?: string | null } = {}) => {
+    const OTHER = "cdcdcdcd-0000-4000-8000-00000000000c";
+    const ABOVE = "efefefef-0000-4000-8000-00000000000e";
+    const other = thought(OTHER, "Pattern", { kind: 2 });
+    const above = thought(ABOVE, "API constraints");
+    let typeId = options.typeId === undefined ? TYPE : options.typeId;
+    const down = (id: string, above: string, meaning: number) =>
+      [above, { id, thoughtIdA: above, thoughtIdB: THOUGHT, relation: 1, meaning }] as const;
+    const links = new Map([
+      down(LINK, TYPE, 2),
+      down(`${LINK.slice(0, -1)}6`, OTHER, 2),
+      down(`${LINK.slice(0, -1)}7`, ABOVE, 1),
+    ]);
+    // A type removed before this left OTHER's link and `typeId: null`.
+    if (typeId === null) links.delete(TYPE);
+    const made = apiWith([
+      [
+        "/graph",
+        () =>
+          graphOf(thought(THOUGHT, "typed", { typeId }), {
+            // The API's own `type` names the one typeId does not.
+            type: links.has(OTHER) ? other : links.has(TYPE) ? TYPE_THOUGHT : null,
+            parents: [other, TYPE_THOUGHT, above].filter((t) => links.has(t.id)),
+            links: [...links.values()],
+          }),
+      ],
+      ["/api/thoughts/", () => thought(THOUGHT, "typed", { typeId })],
+      [
+        "DELETE /api/links/",
+        (url) => {
+          const id = url.pathname.split("/").pop();
+          for (const [end, link] of links) if (link.id === id) links.delete(end);
+          typeId = null;
+          return 200;
+        },
+      ],
+      [
+        "/api/links/",
+        (url) => {
+          const [first = "", second = ""] = url.pathname.split("/").slice(-2);
+          return links.get(first) ?? links.get(second) ?? 404;
+        },
+      ],
+    ]);
+    return { ...made, links, OTHER, ABOVE };
+  };
+
+  it("both types of a thought with two go, and nothing else", async () => {
+    // Only the one typeId names used to go: the thought read `typeId: null`,
+    // and the other was still its type in the graph and in TheBrain.
+    const { api, calls, links, ABOVE } = twoTypes();
+    await expect(api.thoughts.removeType(BRAIN, THOUGHT)).resolves.toBe(true);
+    expect(sent(calls, "DELETE")).toHaveLength(2);
+    expect([...links.keys()]).toEqual([ABOVE]);
+  });
+
+  it("a type the graph still has once typeId reads null goes too", async () => {
+    // What a removal of one of two types left behind.
+    const { api, calls, links, ABOVE } = twoTypes({ typeId: null });
+    await expect(api.thoughts.removeType(BRAIN, THOUGHT)).resolves.toBe(true);
+    expect(sent(calls, "DELETE")).toHaveLength(1);
+    expect([...links.keys()]).toEqual([ABOVE]);
+  });
 });
 
 describe("a typeId that is not a type", () => {
@@ -478,7 +685,24 @@ describe("a typeId that is not a type", () => {
     };
     let typeId: string | null = null;
     let stale = 0;
+    const link = (type: string) => ({
+      id: LINK,
+      thoughtIdA: type,
+      thoughtIdB: THOUGHT,
+      relation: 1,
+      meaning: 2,
+    });
     return apiWith([
+      [
+        "/graph",
+        () =>
+          graphOf(
+            thought(THOUGHT, "written to", { typeId }),
+            typeId === null
+              ? {}
+              : { type: others[typeId]!, parents: [others[typeId]!], links: [link(typeId)] },
+          ),
+      ],
       [
         "/api/thoughts/",
         (url) => {
@@ -506,13 +730,7 @@ describe("a typeId that is not a type", () => {
         },
       ],
       ["POST /api/thoughts/", () => ({ id: THOUGHT })],
-      [
-        "/api/links/",
-        () =>
-          typeId === null
-            ? 404
-            : { id: LINK, thoughtIdA: typeId, thoughtIdB: THOUGHT, relation: 1, meaning: 2 },
-      ],
+      ["/api/links/", () => (typeId === null ? 404 : link(typeId))],
       ["DELETE /api/links/", () => ((typeId = null), 200)],
     ]);
   };

@@ -22,7 +22,7 @@ import {
   ThoughtKind,
 } from "../types.js";
 import { requireKind } from "./kind.js";
-import type { LinksResource } from "./links.js";
+import { isStructuralLink, isTypeLink, type LinksResource } from "./links.js";
 
 export interface CreateThoughtInput {
   name: string;
@@ -130,18 +130,32 @@ export interface AliasOutcome {
 }
 
 /**
- * Graph with the type filtered out of parents: the API returns it in both
- * `type` and `parents`. All lists are normalised — the API sends `null`
- * instead of empty arrays.
+ * Graph with what is no parent taken out of `parents`. The API lists there
+ * every thought above this one, whatever the link: the thought's type, the
+ * tag a tag carries, and the second type of a thought made with two. Each
+ * also has a list of its own here. All lists are normalised — the API sends
+ * `null` instead of empty arrays.
  */
 export interface CleanGraph {
   thought: ThoughtDto;
+  /** The thoughts above this one by an ordinary link. */
   parents: ThoughtDto[];
   children: ThoughtDto[];
   jumps: ThoughtDto[];
   siblings: ThoughtDto[];
+  /** On a tag, the tag it carries as well: the API lists that one in both. */
   tags: ThoughtDto[];
+  /**
+   * The type `typeId` names. The API's own `type` names either of two types
+   * a thought can be linked under, and not by `typeId`.
+   */
   type: ThoughtDto | null;
+  /**
+   * Any other type the thought is linked under. A thought created under one
+   * type with another for its `typeId` has a link from each (docs/api-map.md,
+   * L40). Empty but for such a thought.
+   */
+  otherTypes: ThoughtDto[];
   links: LinkDto[];
   attachments: AttachmentDto[];
 }
@@ -171,9 +185,17 @@ export class ThoughtsResource {
   /**
    * One hop of the graph around a thought.
    *
-   * The API returns the thought's type twice — in `type` and among `parents`.
-   * It is removed from parents here, otherwise types leak into the tree as
-   * ordinary ancestors.
+   * The API lists among `parents` every thought above this one, by whatever
+   * link: the thought's type, which is in `type` as well; on a tag, a tag it
+   * carries, which is in `tags` as well; and the second type of a thought
+   * created under one type with another for its `typeId`, which is nowhere
+   * else. A parent here is the upper end of an ordinary link, by the link the
+   * two share in the graph's own `links`, and the rest are taken out:
+   * otherwise types and tags leak into the tree as ordinary ancestors, and
+   * the read tools call them parents. A thought above with no link listed is
+   * kept unless it is the type, as every one but the type was before.
+   *
+   * `type` is the one `typeId` names, where the API's names the other of two.
    */
   async getGraph(
     brainId: string,
@@ -186,16 +208,42 @@ export class ThoughtsResource {
       `/api/thoughts/${brainId}/${thoughtId}/graph`,
       { query: { includeSiblings: options.includeSiblings ?? false } },
     );
-    const typeId = raw.activeThought.typeId;
+    const thought = raw.activeThought;
+    const typeId = thought.typeId;
+    const links = raw.links ?? [];
+    const above = raw.parents ?? [];
+    // Two thoughts share one link, whichever end is named first.
+    const linkWith = (id: string): LinkDto | undefined =>
+      links.find(
+        (l) =>
+          (l.thoughtIdA === id && l.thoughtIdB === thought.id) ||
+          (l.thoughtIdA === thought.id && l.thoughtIdB === id),
+      );
+    const isParent = (p: ThoughtDto): boolean => {
+      const link = linkWith(p.id);
+      return link === undefined ? p.id !== typeId : isStructuralLink(link);
+    };
+    const isTypeAbove = (p: ThoughtDto): boolean => {
+      const link = linkWith(p.id);
+      return link === undefined ? p.id === typeId : isTypeLink(link);
+    };
+    // The API's `type` first, then any other a type's link joins to this one.
+    const named = raw.type ?? null;
+    const types: ThoughtDto[] = [];
+    for (const t of [...(named === null ? [] : [named]), ...above.filter(isTypeAbove)]) {
+      if (!types.some((known) => known.id === t.id)) types.push(t);
+    }
+    const type = types.find((t) => t.id === typeId) ?? named;
     return {
-      thought: raw.activeThought,
-      parents: (raw.parents ?? []).filter((p) => p.id !== typeId),
+      thought,
+      parents: above.filter(isParent),
       children: raw.children ?? [],
       jumps: raw.jumps ?? [],
       siblings: raw.siblings ?? [],
       tags: raw.tags ?? [],
-      type: raw.type,
-      links: raw.links ?? [],
+      type,
+      otherTypes: types.filter((t) => t.id !== type?.id),
+      links,
       attachments: raw.attachments ?? [],
     };
   }
@@ -566,12 +614,27 @@ export class ThoughtsResource {
    * The first read is trusted, though, and a type takes up to 0.2 s to read
    * back: one set a moment ago is not seen here, and stays. `update` waits for
    * the type it sets, so that one is seen.
+   *
+   * Every type the thought is linked under goes, and the graph is read for
+   * them. A thought created under one type with another for its `typeId` has
+   * a link from each, and deleting either reads back as `typeId: null` while
+   * the other stays its type in the graph and in TheBrain: the second one
+   * passed for removed. No patch takes one of the two away (docs/api-map.md,
+   * L40). Only a type's link from the type is deleted (`detachType`).
    */
   async removeType(brainId: string, thoughtId: string): Promise<boolean> {
     const { typeId } = await this.get(brainId, thoughtId);
-    if (!typeId) return false;
+    const graph = await this.getGraph(brainId, thoughtId);
+    const types: string[] = [];
+    for (const id of [typeId, graph.type?.id, ...graph.otherTypes.map((t) => t.id)]) {
+      if (id && !types.some((known) => known.toLowerCase() === id.toLowerCase())) types.push(id);
+    }
+    if (types.length === 0) return false;
 
-    const detached = await this.links.detachType(brainId, thoughtId, typeId);
+    let detached = false;
+    for (const id of types) {
+      if (await this.links.detachType(brainId, thoughtId, id)) detached = true;
+    }
     // Also when there was no link to delete: this read may be a stale one that
     // follows an earlier removal.
     if (await this.#readsBack(brainId, thoughtId, (t) => !t.typeId)) return detached;

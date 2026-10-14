@@ -50,6 +50,12 @@ export const LinkMeaning = {
   Normal: 1,
   /** Type attachment. Created when a thought's `typeId` is set. */
   Type: 2,
+  /**
+   * A type set on a type: what the same requests make when the thought is a
+   * type too, and what a typed thought's link becomes when it is turned into
+   * one. The type is at `thoughtIdA`. The log calls it `TypeOf`.
+   */
+  SubType: 3,
   /** Tag attachment. Created by `relation: Parent` towards a `kind: Tag` thought. */
   Tag: 5,
   /**

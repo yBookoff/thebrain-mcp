@@ -805,12 +805,16 @@ export function linkEndIds(log: ModificationLogDto): string[] {
  * own right. A tag's graph lists the thoughts it marks as children, and a type's
  * graph lists its instances the same way, so following them reaches thoughts
  * whose only connection is a shared tag or type. Both are contract-tested.
+ *
+ * A second type is one of them too: `getGraph` takes it out of the parents,
+ * where the walk used to reach it.
  */
 export function neighbourIds(graph: CleanGraph): string[] {
   const ids = [...graph.parents, ...graph.children, ...graph.jumps, ...graph.tags].map(
     (t) => t.id,
   );
   if (graph.type !== null) ids.push(graph.type.id);
+  ids.push(...graph.otherTypes.map((t) => t.id));
   return ids;
 }
 

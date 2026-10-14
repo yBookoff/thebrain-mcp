@@ -322,7 +322,9 @@ export class LinksResource {
    * when there is no such link.
    *
    * `PATCH /typeId` cannot do this, see `ThoughtsResource.removeType`. A link
-   * between the two that is not the type link is left alone.
+   * between the two that is not the type link is left alone: a type's, of
+   * either meaning, with the type at its head. The type of a type is a link
+   * of meaning 3, not 2, and was left alone too, with the type in place.
    */
   async detachType(
     brainId: string,
@@ -330,7 +332,9 @@ export class LinksResource {
     typeThoughtId: string,
   ): Promise<boolean> {
     const link = await this.between(brainId, typeThoughtId, thoughtId);
-    if (link === null || !isTypeLink(link)) return false;
+    if (link === null || !isTypeLink(link) || !sameId(link.thoughtIdA, typeThoughtId)) {
+      return false;
+    }
     await this.#remove(brainId, link.id);
     return true;
   }
@@ -344,9 +348,12 @@ export function isTagLink(link: LinkDto): boolean {
   return link.meaning === LinkMeaning.Tag || link.meaning === LinkMeaning.SubTag;
 }
 
-/** A type attachment: arrives in the graph alongside parent links. */
+/**
+ * A type attachment: a type on a thought, or on another type. `thoughtIdA`
+ * is the type. Arrives in the graph alongside parent links.
+ */
 export function isTypeLink(link: LinkDto): boolean {
-  return link.meaning === LinkMeaning.Type;
+  return link.meaning === LinkMeaning.Type || link.meaning === LinkMeaning.SubType;
 }
 
 /** An ordinary link — the kind worth showing as graph structure. */

@@ -307,6 +307,85 @@ and `resources/thoughts.ts` reads a kind through it, so with the function in
 `thoughts.ts` the two imported each other. A test walks the imports under
 `src/` and fails on a module that is loaded by way of itself.
 
+### What stands above a type or a tag
+
+A type can have a type, and a tag can carry a tag: a link of meaning 3 and
+one of meaning 7 (§7, item 25). And a thought created under one type with
+another for its `typeId` has two types, which the tools cannot make any more
+(§7, item 18) and a brain made before can hold. In each the graph lists what
+is above among the parents. Three things followed from that.
+
+**`typeId: null` failed, or said more than it did.** On a type's type it
+waited out the read-back and answered that the link was not found, with the
+type in place: `detachType()` knew meaning 2 alone. On a thought with two
+types it deleted the link `typeId` named and answered "Done": the thought
+read `typeId: null` and kept the other type, in its graph and in TheBrain.
+Now `isTypeLink()` takes 3, and `removeType()` reads the graph beside the
+thought and deletes the link of every type the thought is linked under, each
+only when it is a type's link with the type at its head. Two other answers
+for two types were weighed. *Removing the one `typeId` names and saying the
+other is there*: the thought is left with a type that reads as none, and
+nothing takes the second away, since `typeId: null` again finds `typeId`
+null and no patch does it (`docs/api-map.md`, L40). *Refusing, with a
+sentence that says what is there*: the same thought, as it is, with nothing
+the tools can do about it. The call asks for no type, and both links are the
+type's: deleting them is what was asked, and deletes nothing that is not the
+thought's type. The cost is the read of the graph, five requests where
+`typeId: null` took four.
+
+**What is above is not called a parent.** `getGraph()` filtered the type
+alone out of the parents, by `typeId`. The tag a tag carries stood there, and
+under "Tags" as well, marked `[tag]`, and `brain_traverse` walked to it as to
+a parent; the second type stood there marked `[type]`. That is what the tools
+say a type and a tag never are (§7, items 18 and 21), and a model that took
+it for a parent would link under it and be refused. A parent is now the upper
+end of an ordinary link, by the link the two share in the graph's own
+`links`, where the API lists it for every thought above (contract tests). A
+thought above with no link listed is kept unless it is the type, as before.
+Filtering by kind would say the same of every graph measured, and was not
+taken: the link is what the API says the two are to each other, and a kind
+says it only by inference. The tag a tag carries is in `tags`, as a tag on a
+thought is. A second type is in `otherTypes`, and `type` is the one `typeId`
+names: the graph's own `type` named either of two, the type of the higher
+identifier on the first read and one or the other after, changing from read
+to read (L40). `neighbourIds()` follows `otherTypes`, so the indexer's walk
+reaches what it reached through the parents, and a thought of two types is
+indexed with the same type from read to read.
+
+**What `brain_get_thought` prints.** A tag on a tag, where "Parents" followed:
+
+```
+# gotcha
+922104f9-3793-4964-a091-7ebdc791a632 [tag]
+
+## Tags
+measured
+```
+
+A type with a type prints its type under "Type", as it did. A thought with
+two types, `typeId`'s first:
+
+```
+## Types
+- Pattern — 9e00b6a1-52c3-4f0e-9a7d-0c8f3e1d2b45
+- Method — 35e1c2d4-7a8b-4c9d-8e0f-1a2b3c4d5e6f
+TheBrain links this thought under both. typeId null in brain_update_thought removes both, and a typeId set while both are there replaces one of them at most: to keep one, remove both, then set it.
+```
+
+The line is there because the obvious next call goes wrong: set to the other
+of the two, `typeId` is a 200 that changes nothing, and the tool answers two
+seconds later that the type has not read back; set to a third, one of the two
+stays beside it (L40). It costs 193 characters on a thought of two types; a
+tag on a tag is 68 shorter, and every other result is what it was, to the
+character. `tools/list` did not change.
+
+**Not done.** A type set on a thought of two types is still one patch: the
+tool answers "Done" with the type set and one of the old two still there. A
+type set on a tag is a 200 that sets nothing, and the tool answers after two
+seconds that it has not read back yet. Neither reports a removal that did not
+happen. Telling either apart costs a read of the thought ahead of the patch,
+and is a decision of its own.
+
 ### What changed, and to which thought
 
 `brain_recent_changes` printed names and no identifiers, and read the name of
@@ -1633,7 +1712,9 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
 7. **Writes are not immediately visible** — see the table below.
 8. **`SearchResultDto.brainId` comes back as zeros.** Use `sourceThought.brainId`.
 9. **A thought's type appears both as `type` and as a parent** in `/graph`
-   responses. Filter it, or types pollute every traversal.
+   responses. Filter it, or types pollute every traversal. So do the tag a tag
+   carries and the second type of a thought made with two, and `getGraph()`
+   keeps a parent only for an ordinary link (item 25).
 10. **A note is an attachment.** It shows up in `graph.attachments` with
     `isNotes: true`, and its log events are keyed by that attachment rather than
     by the thought.
@@ -1650,11 +1731,13 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     `attachUrl` also compares the thought's own attachments, host case aside.
 14. **`null` clears nothing through `replace`.** A label and a colour are
     cleared with `remove`. A type is not cleared by any patch: `replace /typeId`
-    with null answers 200 and leaves the type where it was, so `thoughts.update()`
-    deletes the link from the type instead, and reads the thought back before it
-    calls the type removed. A link's name and colour go the same way, and on a
-    name `replace` with null is another 200 that changes nothing. A link's
-    thickness cannot be cleared, and reads back a hundred times what was written.
+    with null answers 200 and leaves the type where it was, so
+    `thoughts.update()` deletes the link from the type instead, and reads the
+    thought back before it calls the type removed. Every type's link goes, a
+    type's type of meaning 3 and both of two types among them (item 25). A
+    link's name and colour go the same way, and on a name `replace` with null is
+    another 200 that changes nothing. A link's thickness cannot be cleared, and
+    reads back a hundred times what was written.
 15. **`typeId` takes any thought, with a 200.** It is a link from whatever it
     names: a type becomes the type, a tag is attached, an ordinary thought
     becomes one more parent, and the last two leave the type as it was. So
@@ -1823,6 +1906,22 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     at its ends decide. So `brain_create_type_or_tag` sends a name and a kind
     alone, one call at a time in a brain, and tells a tag it made from one it
     was answered with by the log (§4, *A type or a tag, made*).
+25. **A type on a type is a link of meaning 3, a tag on a tag one of 7, and
+    a thought can have two types.** A type set on a type, by a patch, a link
+    or a kind change, is a link the log calls `TypeOf`, and `detachType()`
+    took it for a link that is not the type's: `typeId: null` waited two
+    seconds and failed with the type in place. A thought created under one
+    type with another for its `typeId` has a type's link from each; deleting
+    either reads back as no `typeId`, the other staying its type, and no patch
+    takes one away. `typeId: null` deleted the one `typeId` named and answered
+    "Done". And the graph lists the upper end of each among the lower one's
+    parents: the type of a type, which `typeId` filtered, the tag a tag
+    carries, which is in `tags` as well, and the second type, which is nowhere
+    else and which the graph's `type` names now and then in place of the first.
+    `isTypeLink()` takes meaning 3, `removeType()` deletes every type's link
+    the thought has, and `getGraph()` keeps a parent only for an ordinary link,
+    with a second type in `otherTypes` (§4, *What stands above a type or a
+    tag*; `docs/api-map.md`, L40).
 
 ### Write visibility
 
@@ -1878,16 +1977,17 @@ the target thought.
 | Create a tag | `POST /api/thoughts` with `kind: 4` and a name. Under the name of a tag that is there it answers with that tag (§7, item 24) |
 | Attach | `POST /api/links`, `thoughtIdA` = thought, `thoughtIdB` = tag, **`relation: 2`**. The server rewrites it to `relation=1, meaning=5` |
 | Detach | `DELETE /api/links/{brainId}/{linkId}` |
-| Read | `graph.tags` — a tag does **not** pollute `parents` |
+| Read | `graph.tags` — a tag does **not** pollute `parents`, but the tag a tag carries does (§7, item 25) |
 | List | `GET /api/thoughts/{brainId}/tags` (400 if empty, see #1) |
 
 `relation: 2` against an ordinary thought (`kind=1`) produces an ordinary parent.
 It is the target's `kind=4` that flips the behaviour. Against a type the same
 request sets the thought's type, and between two tags it makes a link of
 meaning **7**, which puts the upper tag among the lower one's tags and its
-parents. `attachTag()` therefore reads the target and refuses anything but a
-tag, and `detachTag()` deletes a link only when it is the tag's: meaning 5 or
-7, from the tag (§7, item 17). And `links.create()` refuses a tag above, so
+parents; `getGraph()` takes it out of the parents (§7, item 25).
+`attachTag()` therefore reads the target and refuses anything but a tag, and
+`detachTag()` deletes a link only when it is the tag's: meaning 5 or 7, from
+the tag (§7, item 17). And `links.create()` refuses a tag above, so
 that a tag is attached by the call that asks for one and by no other (§7,
 item 21).
 

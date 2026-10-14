@@ -3980,6 +3980,8 @@ suite("resource layer against the live API", () => {
     const graphOf = (id: string, ok: (g: CleanGraph) => boolean): Promise<CleanGraph> =>
       eventually(() => api.thoughts.getGraph(brainId, id), ok);
     const ids = (thoughts: readonly ThoughtDto[]): string[] => thoughts.map((t) => t.id);
+    const read = (id: string, ok: (t: ThoughtDto) => boolean): Promise<ThoughtDto> =>
+      eventually(() => api.thoughts.get(brainId, id), ok);
     /** A link as the API takes it: `links.create` refuses a type above. */
     const rawLink = (
       thoughtIdA: string,
@@ -4128,10 +4130,10 @@ suite("resource layer against the live API", () => {
       }
     });
 
-    it("a thought created under one type with another for its typeId carries both, and its graph can name the wrong one", async () => {
+    it("a thought created under one type with another for its typeId carries both, and the API's graph can name the wrong one", async () => {
       const older = await make("both-types-older", ThoughtKind.Type);
       const newer = await make("both-types-newer", ThoughtKind.Type);
-      const graphTypes: Array<string | undefined> = [];
+      const [, higher] = [older, newer].sort();
 
       for (const [under, typeId] of [
         [older, newer],
@@ -4140,19 +4142,30 @@ suite("resource layer against the live API", () => {
         const id = await rawUnder("both-types", { sourceThoughtId: under, typeId });
         // `typeId` is the one the request called so, from the first read on.
         expect((await api.thoughts.get(brainId, id)).typeId).toBe(typeId);
-        const graph = await graphOf(id, (g) => g.links.length === 2);
-        expect(graph.links.map((l) => [l.thoughtIdA, l.meaning]).sort()).toEqual(
+        // The first read of a graph never read is live, and names the type of
+        // the higher identifier whichever is `typeId`: 32 times of 32. Later
+        // reads, from the copy, named either, and changed from read to read.
+        const raw = await eventually(
+          () => api.client.get<ThoughtGraphDto>(`/api/thoughts/${brainId}/${id}/graph`),
+          (g) => (g.links ?? []).length === 2,
+        );
+        expect(raw.type?.id).toBe(higher);
+        expect((raw.links ?? []).map((l) => [l.thoughtIdA, l.meaning]).sort()).toEqual(
           [
             [under, LinkMeaning.Type],
             [typeId, LinkMeaning.Type],
           ].sort(),
         );
-        // The other type is left among the parents: only `typeId` is filtered.
-        expect(ids(graph.parents)).toEqual([under]);
-        graphTypes.push(graph.type?.id);
+        // The API lists both among the parents. `getGraph` lists neither: the
+        // type is the one `typeId` names, and the other is beside it.
+        expect(ids(raw.parents ?? []).sort()).toEqual([under, typeId].sort());
+        const graph = await api.thoughts.getGraph(brainId, id);
+        expect(graph.parents).toEqual([]);
+        expect(graph.type?.id).toBe(typeId);
+        expect(ids(graph.otherTypes)).toEqual([under]);
 
-        // Taking the type away, as `removeType` does, leaves the other one's
-        // link and a thought that reads as having no type.
+        // Deleting the link from `typeId`, the one way a type goes, leaves
+        // the other one's link and a thought that reads as having no type.
         expect(await api.links.detachType(brainId, id, typeId)).toBe(true);
         const bare = await eventually(
           () => api.thoughts.get(brainId, id),
@@ -4160,12 +4173,72 @@ suite("resource layer against the live API", () => {
         );
         expect(bare.typeId).toBeNull();
         expect(isTypeLink((await api.links.between(brainId, under, id))!)).toBe(true);
+        const left = await graphOf(id, (g) => g.links.length === 1);
+        expect(left.type?.id).toBe(under);
+
+        // So `removeType` deletes every type's link the thought has.
+        await api.thoughts.update(brainId, id, { typeId: null });
+        expect(await api.links.between(brainId, under, id)).toBeNull();
+        expect((await graphOf(id, (g) => g.type === null)).type).toBeNull();
+      }
+    }, 30_000);
+
+    it("of two types, deleting either link reads back as no typeId; a patch leaves two links, and only a create makes them", async () => {
+      const typeLinks = async (id: string, types: readonly string[]): Promise<string[]> => {
+        const found: string[] = [];
+        for (const t of types) {
+          const link = await api.links.between(brainId, t, id);
+          if (link?.meaning === LinkMeaning.Type) found.push(t);
+        }
+        return found;
+      };
+      const [first, second, third] = [
+        await make("two-types-1", ThoughtKind.Type),
+        await make("two-types-2", ThoughtKind.Type),
+        await make("two-types-3", ThoughtKind.Type),
+      ];
+      const both = () => rawUnder("two-types", { sourceThoughtId: first, typeId: second });
+
+      // Either link deleted: `typeId` reads null, and the other link stays.
+      for (const gone of [second, first]) {
+        const id = await both();
+        await read(id, (t) => t.typeId === second);
+        await api.client.delete(
+          `/api/links/${brainId}/${(await api.links.between(brainId, gone, id))!.id}`,
+        );
+        expect((await read(id, (t) => t.typeId === null)).typeId).toBeNull();
+        const kept = [first, second].filter((t) => t !== gone);
+        expect(await typeLinks(id, [first, second])).toEqual(kept);
       }
 
-      // `graph.type` named the same type both times, so once it was not the
-      // thought's `typeId`.
-      expect(graphTypes[0]).toBe(graphTypes[1]);
-      expect([older, newer]).toContain(graphTypes[0]);
+      // A patch to the other of the two changes nothing.
+      const patched = await both();
+      await read(patched, (t) => t.typeId === second);
+      await api.client.patch(`/api/thoughts/${brainId}/${patched}`, {
+        jsonPatch: [{ op: "replace", path: "/typeId", value: first }],
+      });
+      await settle(600);
+      expect((await api.thoughts.get(brainId, patched)).typeId).toBe(second);
+      expect(await typeLinks(patched, [first, second])).toEqual([first, second]);
+
+      // To a third, the third comes in and one of the two goes.
+      await api.client.patch(`/api/thoughts/${brainId}/${patched}`, {
+        jsonPatch: [{ op: "replace", path: "/typeId", value: third }],
+      });
+      expect((await read(patched, (t) => t.typeId === third)).typeId).toBe(third);
+      await settle(600);
+      const after = await typeLinks(patched, [first, second, third]);
+      expect(after).toHaveLength(2);
+      expect(after).toContain(third);
+
+      // A thought made under one type and then given another has one link.
+      const moved = await rawUnder("one-type-then-another", { sourceThoughtId: first });
+      await api.client.patch(`/api/thoughts/${brainId}/${moved}`, {
+        jsonPatch: [{ op: "replace", path: "/typeId", value: second }],
+      });
+      expect((await read(moved, (t) => t.typeId === second)).typeId).toBe(second);
+      await settle(600);
+      expect(await typeLinks(moved, [first, second])).toEqual([second]);
     }, 30_000);
 
     it("a tag linked under a type is a 200 with an identifier of zeros, and no link is made", async () => {
@@ -4182,6 +4255,187 @@ suite("resource layer against the live API", () => {
       expect(await api.links.between(brainId, tagId, typeId)).toBeNull();
       expect((await api.thoughts.get(brainId, tagId)).typeId).toBeNull();
     });
+  });
+
+  /**
+   * A type on a type, a tag on a tag, and a type and a tag on each other: the
+   * link each makes, what each end's graph lists, and what takes it apart.
+   * Measured on 15.0.640 (docs/api-map.md, L40), 5 of 5 for each way of
+   * making one. Raw where the client refuses the request now.
+   */
+  describe("a type on a type, a tag on a tag, and the two on each other", () => {
+    const stamp = `pair${Date.now()}`;
+    const ids = (thoughts: readonly ThoughtDto[]): string[] => thoughts.map((t) => t.id);
+    const rawGraph = (id: string): Promise<ThoughtGraphDto> =>
+      api.client.get<ThoughtGraphDto>(`/api/thoughts/${brainId}/${id}/graph`);
+    const rawLink = (thoughtIdA: string, thoughtIdB: string, relation: number) =>
+      api.client.post<{ id: string }>(`/api/links/${brainId}`, {
+        json: { thoughtIdA, thoughtIdB, relation },
+      });
+    const patchTypeId = (id: string, typeId: string) =>
+      api.client.patch(`/api/thoughts/${brainId}/${id}`, {
+        jsonPatch: [{ op: "replace", path: "/typeId", value: typeId }],
+      });
+    /** A link as [the end at its head, relation, meaning], once there is one. */
+    const linkOf = async (a: string, b: string): Promise<unknown[]> => {
+      const link = await eventually(
+        () => api.links.between(brainId, a, b),
+        (found) => found !== null,
+        { timeoutMs: 3000 },
+      );
+      return [link?.thoughtIdA, link?.relation, link?.meaning];
+    };
+
+    it("a type set on a type is a link of meaning 3, by a patch, a link from either end or a kind change, and typeId null takes it away", async () => {
+      const ways: Array<[string, (lower: string, upper: string) => Promise<unknown>]> = [
+        ["patch", (lower, upper) => patchTypeId(lower, upper)],
+        ["child link from the upper", (lower, upper) => rawLink(upper, lower, Relation.Child)],
+        ["parent link from the lower", (lower, upper) => rawLink(lower, upper, Relation.Parent)],
+      ];
+      for (const [way, write] of ways) {
+        const upper = await make(`${stamp}-tup`, ThoughtKind.Type);
+        const lower = await make(`${stamp}-tlow`, ThoughtKind.Type);
+        await write(lower, upper);
+        expect(await linkOf(lower, upper), way).toEqual([
+          upper,
+          Relation.Child,
+          LinkMeaning.SubType,
+        ]);
+        const typed = await eventually(
+          () => api.thoughts.get(brainId, lower),
+          (t) => t.typeId === upper,
+        );
+        expect(typed.typeId, way).toBe(upper);
+
+        // The lower one's graph has it for its type and among its parents,
+        // and the upper one's lists the lower among its children.
+        const raw = await eventually(
+          () => rawGraph(lower),
+          (g) => g.type !== null,
+        );
+        expect([raw.type?.id, ids(raw.parents ?? [])], way).toEqual([upper, [upper]]);
+        const above = await eventually(
+          () => rawGraph(upper),
+          (g) => (g.children ?? []).length > 0,
+        );
+        expect(ids(above.children ?? []), way).toEqual([lower]);
+        const graph = await api.thoughts.getGraph(brainId, lower);
+        expect([graph.type?.id, graph.parents, graph.otherTypes], way).toEqual([upper, [], []]);
+
+        // It was left alone, as a link that is not the type's.
+        await api.thoughts.update(brainId, lower, { typeId: null });
+        expect((await api.thoughts.get(brainId, lower)).typeId, way).toBeNull();
+        expect(await api.links.between(brainId, upper, lower), way).toBeNull();
+      }
+
+      // A type set over a type's type replaces it, as for any thought.
+      const first = await make(`${stamp}-tup-first`, ThoughtKind.Type);
+      const second = await make(`${stamp}-tup-second`, ThoughtKind.Type);
+      const retyped = await make(`${stamp}-tlow-retyped`, ThoughtKind.Type);
+      await patchTypeId(retyped, first);
+      await eventually(
+        () => api.thoughts.get(brainId, retyped),
+        (t) => t.typeId === first,
+      );
+      await patchTypeId(retyped, second);
+      await eventually(
+        () => api.thoughts.get(brainId, retyped),
+        (t) => t.typeId === second,
+      );
+      expect(await linkOf(retyped, second)).toEqual([second, Relation.Child, LinkMeaning.SubType]);
+      expect(await api.links.between(brainId, first, retyped)).toBeNull();
+
+      // An ordinary thought of a type, turned into a type: its link turns too.
+      const upper = await make(`${stamp}-tup-kind`, ThoughtKind.Type);
+      const lower = await api.thoughts.create(brainId, {
+        name: `${PREFIX}${stamp}-turned`,
+        typeId: upper,
+      });
+      created.push(lower);
+      expect(await linkOf(lower, upper)).toEqual([upper, Relation.Child, LinkMeaning.Type]);
+      await api.thoughts.update(brainId, lower, { kind: ThoughtKind.Type });
+      const turned = await eventually(
+        () => api.links.between(brainId, lower, upper),
+        (found) => found?.meaning === LinkMeaning.SubType,
+      );
+      expect(turned?.meaning).toBe(LinkMeaning.SubType);
+      await api.thoughts.update(brainId, lower, { typeId: null });
+      expect(await api.links.between(brainId, upper, lower)).toBeNull();
+    }, 60_000);
+
+    it("a tag on a tag is a link of meaning 7 whichever request makes it, with the upper end the request's", async () => {
+      // The request that attaches a tag and a child link from the upper one
+      // are L23's. Here: a patch of typeId naming a tag, and a child link
+      // named from the other end, which puts that end above.
+      const upper = await make(`${stamp}-gup`, ThoughtKind.Tag);
+      const lower = await make(`${stamp}-glow`, ThoughtKind.Tag);
+      await patchTypeId(lower, upper);
+      expect(await linkOf(lower, upper)).toEqual([upper, Relation.Child, LinkMeaning.SubTag]);
+      expect((await api.thoughts.get(brainId, lower)).typeId).toBeNull();
+      const raw = await eventually(
+        () => rawGraph(lower),
+        (g) => (g.tags ?? []).length > 0,
+      );
+      expect([ids(raw.tags ?? []), ids(raw.parents ?? [])]).toEqual([[upper], [upper]]);
+      expect(await api.links.detachTag(brainId, lower, upper)).toBe(true);
+      await settle(600);
+
+      await rawLink(lower, upper, Relation.Child);
+      expect(await linkOf(lower, upper)).toEqual([lower, Relation.Child, LinkMeaning.SubTag]);
+      const flipped = await eventually(
+        () => rawGraph(upper),
+        (g) => (g.tags ?? []).length > 0,
+      );
+      expect([ids(flipped.tags ?? []), ids(flipped.parents ?? [])]).toEqual([[lower], [lower]]);
+      const graph = await api.thoughts.getGraph(brainId, upper);
+      expect([ids(graph.tags), graph.parents]).toEqual([[lower], []]);
+
+      // And a parent link from the one meant to be lower puts the other above.
+      expect(await api.links.detachTag(brainId, upper, lower)).toBe(true);
+      await settle(600);
+      await rawLink(upper, lower, Relation.Parent);
+      expect(await linkOf(lower, upper)).toEqual([lower, Relation.Child, LinkMeaning.SubTag]);
+    }, 30_000);
+
+    it("a tag on a type is an attached tag, in the type's tags alone; a type on a tag is nothing", async () => {
+      const ways: Array<[string, (type: string, tag: string) => Promise<unknown>]> = [
+        ["the request that attaches a tag", (type, tag) => rawLink(type, tag, Relation.Parent)],
+        ["a child link from the tag", (type, tag) => rawLink(tag, type, Relation.Child)],
+        ["a patch of typeId", (type, tag) => patchTypeId(type, tag)],
+      ];
+      for (const [i, [way, write]] of ways.entries()) {
+        const type = await make(`${stamp}-t-tagged`, ThoughtKind.Type);
+        // A name of its own each time: a tag made under the name of one
+        // that is there is that one (L39).
+        const tag = await make(`${stamp}-g-on-type-${i}`, ThoughtKind.Tag);
+        await write(type, tag);
+        expect(await linkOf(type, tag), way).toEqual([tag, Relation.Child, LinkMeaning.Tag]);
+        const raw = await eventually(
+          () => rawGraph(type),
+          (g) => (g.tags ?? []).length > 0,
+        );
+        expect([ids(raw.tags ?? []), ids(raw.parents ?? []), raw.type], way).toEqual([
+          [tag],
+          [],
+          null,
+        ]);
+        // Deleted, it leaves the type as it was.
+        expect(await api.links.detachTag(brainId, type, tag), way).toBe(true);
+        const bare = await eventually(
+          () => rawGraph(type),
+          (g) => (g.tags ?? []).length === 0,
+        );
+        expect([bare.tags ?? [], bare.parents ?? [], bare.links ?? []], way).toEqual([[], [], []]);
+      }
+
+      // A type for a tag's typeId: a 200 that sets nothing and links nothing.
+      const tag = await make(`${stamp}-g-typed`, ThoughtKind.Tag);
+      const type = await make(`${stamp}-t-on-tag`, ThoughtKind.Type);
+      await patchTypeId(tag, type);
+      await settle(600);
+      expect((await api.thoughts.get(brainId, tag)).typeId).toBeNull();
+      expect(await api.links.between(brainId, tag, type)).toBeNull();
+    }, 30_000);
   });
 
   /**
@@ -6024,14 +6278,18 @@ suite("resource layer against the live API", () => {
       }
     });
 
-    it("a tag attached to a tag is a link of meaning 7, and stands among the tag's parents as well as its tags", async () => {
+    it("a tag attached to a tag is a link of meaning 7, and the API lists it among the tag's parents as well as its tags", async () => {
       const upper = await make("nt-upper-tag", ThoughtKind.Tag);
       const lower = await make("nt-lower-tag", ThoughtKind.Tag);
 
       const linkId = await api.links.attachTag(brainId, lower, upper);
       const graph = await graphOf(lower, (g) => ids(g.tags).includes(upper));
       expect(ids(graph.tags)).toEqual([upper]);
-      expect(ids(graph.parents)).toEqual([upper]);
+      // `getGraph` takes it out of the parents: a parent is the upper end of
+      // an ordinary link.
+      expect(graph.parents).toEqual([]);
+      const raw = await api.client.get<ThoughtGraphDto>(`/api/thoughts/${brainId}/${lower}/graph`);
+      expect(ids(raw.parents ?? [])).toEqual([upper]);
       const above = await graphOf(upper, (g) => ids(g.children).includes(lower));
       expect(ids(above.children)).toEqual([lower]);
       const link = await api.links.between(brainId, lower, upper);

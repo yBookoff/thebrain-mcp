@@ -3501,10 +3501,12 @@ describe("what joins two thoughts already, set against the link asked for", () =
         link(B, 1, 2),
         `to is the type of from, ${over} parent-child with from above was not added in its place`,
       ],
+      // A type set on a type: it read as a link of another kind.
+      ["jump", link(A, 1, 3), `from is the type of to, ${over} jump was not added in its place`],
       [
         "jump",
-        link(A, 1, 3),
-        "the two are joined by a link of another kind (meaning 3), " +
+        link(A, 1, 9),
+        "the two are joined by a link of another kind (meaning 9), " +
           `${over} jump was not added in its place`,
       ],
     ] as const) {

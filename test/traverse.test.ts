@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { TheBrainError, type CleanGraph, type TheBrainApi } from "../src/api/index.js";
+import { TheBrainApi, TheBrainError, type CleanGraph } from "../src/api/index.js";
 import { traverse } from "../src/operations/traverse.js";
 
 const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
@@ -119,5 +119,72 @@ describe("a graph that fails to read during a walk", () => {
 
     expect(result.unread).toEqual([]);
     expect(result.nodes.map((n) => n.id)).toContain("a1");
+  });
+});
+
+describe("what is above a thought by a link that is no parent's", () => {
+  // A graph as the live API sends it: an upper tag (meaning 7), a type's
+  // type (3) and the second type of a thought made with two (2) stand among
+  // the parents as well (docs/api-map.md, L40). Through the real `getGraph`.
+  const ID = (n: number): string => `0000000${n}-0000-4000-8000-00000000000${n}`;
+  const [LOWER, UPPER, TYPE, SECOND, ABOVE] = [1, 2, 3, 4, 5].map(ID) as [
+    string,
+    string,
+    string,
+    string,
+    string,
+  ];
+  const at = (id: string, name: string, kind: number, typeId: string | null = null) => ({
+    id,
+    brainId: BRAIN,
+    name,
+    kind,
+    typeId,
+  });
+  const from = (above: string, below: string, meaning: number) => ({
+    id: `${above.slice(0, -2)}9${above.slice(-1)}`,
+    thoughtIdA: above,
+    thoughtIdB: below,
+    relation: 1,
+    meaning,
+    name: null,
+  });
+  const graphs: Record<string, unknown> = {
+    // A tag on a tag, under an ordinary thought as well.
+    [LOWER]: {
+      activeThought: at(LOWER, "gotcha", 4),
+      parents: [at(UPPER, "measured", 4), at(ABOVE, "Notes", 1)],
+      tags: [at(UPPER, "measured", 4)],
+      links: [from(UPPER, LOWER, 7), from(ABOVE, LOWER, 1)],
+    },
+    // A thought of two types.
+    [ABOVE]: {
+      activeThought: at(ABOVE, "Notes", 1, TYPE),
+      parents: [at(SECOND, "Method", 2), at(TYPE, "Pattern", 2)],
+      type: at(SECOND, "Method", 2),
+      links: [from(SECOND, ABOVE, 2), from(TYPE, ABOVE, 2), from(ABOVE, LOWER, 1)],
+      children: [at(LOWER, "gotcha", 4)],
+    },
+  };
+  const api = new TheBrainApi({
+    apiKey: "k",
+    fetchImpl: (async (input: Parameters<typeof fetch>[0]) => {
+      const id = /\/([^/]+)\/graph$/.exec(new URL(String(input)).pathname)?.[1] ?? "";
+      return new Response(JSON.stringify(graphs[id]), {
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch,
+  });
+
+  it("is not walked to as a parent: only the ordinary parent is", async () => {
+    const result = await traverse(api, BRAIN, LOWER, { depth: 2 });
+    expect(result.nodes.map((n) => [n.id, n.depth])).toEqual([
+      [LOWER, 0],
+      [ABOVE, 1],
+    ]);
+    expect(result.edges.map((e) => [e.from, e.to, e.kind])).toEqual([
+      [LOWER, ABOVE, "parent"],
+      [ABOVE, LOWER, "child"],
+    ]);
   });
 });

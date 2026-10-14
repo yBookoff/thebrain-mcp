@@ -292,6 +292,18 @@ function kept<T>(read: Promise<T>): Promise<Read<T>> {
 }
 
 /**
+ * What `brain_get_thought` says under the types of a thought with two. A
+ * patch of `typeId` leaves two links: asked for the other of the two it
+ * changes nothing, and asked for a third, one of the two goes and the third
+ * comes in its place (docs/api-map.md, L40). Deleting the links is what
+ * takes either away, and `removeType` deletes both.
+ */
+const TWO_TYPES =
+  "TheBrain links this thought under both. typeId null in brain_update_thought removes " +
+  "both, and a typeId set while both are there replaces one of them at most: to keep " +
+  "one, remove both, then set it.";
+
+/**
  * What `brain_get_thought` prints where the note goes when the note's read
  * failed. No section at all is what a thought with no note prints, and the
  * model acts on that with a write that erases the note.
@@ -614,6 +626,13 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
         list: ReadonlyArray<{ name: string | null; id: string; kind: number }>,
       ): string[] => list.map((t) => `${shownName(t.name)} — ${t.id}${kindMark(t.kind)}`);
 
+      // With its identifier: that is what a typeId takes. A thought made
+      // under one type with another for its typeId has two, and the second
+      // stood among the parents.
+      const types = [...(graph.type === null ? [] : [graph.type]), ...graph.otherTypes];
+      const typeLine = (t: { name: string | null; id: string }): string =>
+        `${shownName(t.name)} — ${t.id}`;
+
       // A thought printed without its note is an error, so that it is not
       // read as the thought in full: the rest is there, and the note is not.
       return ("error" in note ? fail : ok)(
@@ -621,10 +640,11 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
           `# ${shownName(graph.thought.name)}\n${graph.thought.id}${kindMark(graph.thought.kind)}`,
           // One per line: an alias may hold a comma, and the list gets edited by value.
           section("Aliases", bullet(aliasesOf(graph.thought))),
-          // With its identifier: that is what a typeId takes.
-          graph.type
-            ? section("Type", `${shownName(graph.type.name)} — ${graph.type.id}`)
-            : null,
+          types.length > 1
+            ? section("Types", `${bullet(types.map(typeLine))}\n${TWO_TYPES}`)
+            : types.length === 1
+              ? section("Type", typeLine(types[0]!))
+              : null,
           graph.tags.length > 0
             ? section("Tags", graph.tags.map((t) => shownName(t.name)).join(", "))
             : null,

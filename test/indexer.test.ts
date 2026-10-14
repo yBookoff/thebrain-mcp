@@ -246,6 +246,7 @@ function fakeApi(
               : t.typeName
                 ? { id: `type-${t.typeName}`, name: t.typeName, kind: 2 }
                 : null,
+          otherTypes: [],
           tags: (t.tags ?? []).map((tag) =>
             thoughts.has(tag) ? ref(tag) : { id: `tag-${tag}`, name: tag, kind: 4 },
           ),
