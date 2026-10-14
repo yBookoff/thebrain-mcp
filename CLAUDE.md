@@ -338,6 +338,14 @@ silent wrong behaviour rather than a loud failure:
   erases (`brain_set_note`, `brain_delete_thought`), and name what was not
   read when the tool only shows it ("Note not read", "Not read", "Listing not
   read").
+- **The catch-all 403 to a write is not a refusal to trust.** Under
+  concurrent writes TheBrain now and then answers a create with "To use the
+  TheBrain API…" and makes the thought all the same (4 of 4, L45).
+  `mayHaveLanded()` takes that 403 to anything but a `GET` for a write that
+  may have landed, as it takes a timeout and an answer whose body broke off
+  after its status: never send it again, and say why through `landedWhy()`.
+  Every write refusal measured in those words is refused before sending; keep
+  any new one there, or it will read as "may have landed".
 - **A note write with no answer may have landed, and an append sent again
   lands twice.** Both note tools say so under "Next" when `mayHaveLanded()`.
 - **For a moment after a note changes, its thought's `graph` is wrong about
