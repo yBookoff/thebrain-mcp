@@ -192,6 +192,18 @@ silent wrong behaviour rather than a loud failure:
   throws `not_a_tag`, and `detachTag()` deletes only the tag's own link. A
   caller that writes something before the tag calls `links.requireTag()` ahead
   of that write.
+- **A tag is made once a name, and a create does not say which it did.**
+  `POST /api/thoughts` with `kind: 4` under the name of a tag that is there
+  makes nothing and answers with that tag's `{id}`; names are matched with
+  letter case, characters that do not show and the form of a character set
+  aside (L39). A type is made again under any name. A label, aliases or a
+  source sent with it are written onto the tag that is there, and two creates
+  of one new tag name at once are two tags as often as not. Make a type or a
+  tag through `thoughts.createTypeOrTag()`: a name and a kind alone, one call
+  at a time in a brain, and `created` from the log — the newest entry read
+  before the create, the thought's own `101` after it. `/types` and `/tags`
+  are a copy, up to 0.42 s behind a create: never decide by them what was just
+  made.
 - **In the log a tag is only a link.** Attaching one logs nothing against the
   thought: the link's `101` has the tag in `extraAId` and the thought in
   `extraBId`, the same as an ordinary parent link's. Renaming a tag or a type
