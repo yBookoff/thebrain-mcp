@@ -202,9 +202,9 @@ that one too, and skip without it: no test reads another brain.
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — how the server is built and why: layer
   boundaries, the mechanism/policy split, error philosophy, the semantic layer,
-  and the measurements behind each decision.
+  and the reasons behind each decision.
 - [`docs/api-map.md`](docs/api-map.md) — the local API's behaviour, including the
-  undocumented parts, verified against a live instance.
+  undocumented parts, verified against a live instance, with the measurements.
 - [`docs/stack-evaluation.md`](docs/stack-evaluation.md) — why TypeScript, with
   numbers.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to work on this.
