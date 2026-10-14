@@ -225,11 +225,11 @@ silent wrong behaviour rather than a loud failure:
   host case set aside. That list is a copy refreshed about every 0.1 s, up to
   0.2 s behind a write, and the first attach's own read makes it: the other
   spelling sent straight after was attached twice 18 times in 20. So
-  `client.written` keeps for ten seconds the URLs this process attached, as
-  sent, `attachUrl()` asks `by-location`, which is live, for each spelling of
-  the address it attached to the thought (0 of 20). The list is taken only as a
-  source of spellings: each is asked of `by-location` before "Already there",
-  since a list read right after a delete still showed the attachment 6 of 6.
+  `attachUrl()` asks `by-location` for the spelling given, then waits out what
+  is left of 0.5 s since this process's last write (`afterCopyLag()`) before it
+  reads the list. The list is taken only as a source of spellings: each is
+  asked of `by-location` before "Already there", since a list read right after
+  a delete still showed the attachment 6 of 6.
   Compare a `sourceId` with a caller's thought id regardless of case: the API
   takes capitals and answers in lower case. Not guarded: another process or the
   app attaching another spelling while the list is behind.
@@ -306,9 +306,10 @@ silent wrong behaviour rather than a loud failure:
   thought is the same name under the same relation to the same thought; one
   of that name under another relation fails with its identifier, neither
   reused nor made again. A graph that has been read is answered from a copy,
-  0.2 s behind a create as a rule and past 0.3 s now and then, so `ingest()`
-  returns once the graphs list
-  what it made and counts what they still lack after 2 s in `unlisted`. A
+  0.2 s behind a create as a rule and 364 ms at the worst measured, so
+  `ingest()` first looks 0.5 s after this process's last write, and returns
+  once the graphs list what it made, counting what they still lack at the end
+  of its wait in `unlisted`. A
   read of that graph that fails fails the thought, never "nothing there". A
   thought with no parent is still made by every run, and a `relation` with no
   parent is refused before any write.
@@ -375,13 +376,11 @@ silent wrong behaviour rather than a loud failure:
   time.** The single-thought tools return at once. The copy has a new thought
   within 0.2 s as a rule; with the app slow to answer it was first seen 364 ms
   after the create's answer. `ingest()` waits out what is left of
-  `COPY_LAG_MS` since `client.sinceLastWrite()` before its first look, and
-  then reads the graph until it shows what `client.written` (`RecentWrites`)
-  kept of this process's creates, links and renames; a thought fails with
-  `IngestBehindError` when it never does. Anything new that decides by a
-  graph needs both. A new write whose mark on a graph has been measured
-  records it in `client.written`; one that takes a thought or a link away
-  calls `forget()` or `unlinked()`.
+  `COPY_LAG_MS`, 0.5 s, since `client.sinceLastWrite()` before its first look
+  (`afterCopyLag()`), and then takes the graph at its word. Anything new that
+  decides by a graph read straight after a write of this process waits the
+  same way. A copy further behind than that, or behind a write made in the
+  app or by another process, is not guarded.
 - **Two thoughts of one name in one list of a graph are in no order to rely
   on.** They change places from read to read. `ingest()` fails a plan thought
   with two candidates and names both.
