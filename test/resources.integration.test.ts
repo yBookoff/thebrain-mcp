@@ -16,6 +16,10 @@
  *     npx vitest run test/resources.integration.test.ts
  *
  * Missing either variable skips the suite.
+ *
+ * The tests of what TheBrain does under load the server is not built for,
+ * bursts of writes sent at once, run only with `THEBRAIN_LOAD_TESTS=1` as
+ * well.
  */
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -47,7 +51,6 @@ import {
   linksOfPair,
   logEntryKey,
   logTime,
-  mayHaveLanded,
   nameRefusal,
   noteAsStored,
   noteLinesDropped,
@@ -92,6 +95,8 @@ import { linkedIn, roundsApart, sweepFrom, sweepTargets } from "./sweep.js";
 const apiKey = process.env["THEBRAIN_API_KEY"];
 const testBrainId = process.env["THEBRAIN_TEST_BRAIN_ID"];
 const suite = apiKey && testBrainId ? describe : describe.skip;
+/** Whether the tests under load run too: bursts of writes, outside the envelope the server is built for. */
+const LOAD_TESTS = process.env["THEBRAIN_LOAD_TESTS"] === "1";
 const PREFIX = "zz-it-";
 
 /** Above this count the brain is treated as real work and left untouched. */
@@ -107,11 +112,16 @@ const MAX_THOUGHTS_IN_TEST_BRAIN = 500;
  */
 const settle = (ms = 1200): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-/** Waits until a condition holds, instead of sleeping a fixed amount. */
+/**
+ * Waits until a condition holds, instead of sleeping a fixed amount. Five
+ * seconds by default: a read is behind a write by 0.1 to 0.4 s, and after a
+ * batch of some 200 writes by a few seconds at the most. TheBrain's search,
+ * about five seconds behind, is given a bound of its own where it is waited for.
+ */
 async function eventually<T>(
   probe: () => Promise<T>,
   ok: (value: T) => boolean,
-  { timeoutMs = 12_000, stepMs = 150 } = {},
+  { timeoutMs = 5_000, stepMs = 150 } = {},
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let last = await probe();
@@ -142,14 +152,11 @@ const WHITE_SPACE = [
 ].map((cp) => String.fromCodePoint(cp));
 
 /**
- * A test that gives no bound of its own has a minute, not vitest's five
- * seconds. A read-back here is polled for 12 to 20 s, since with the app
- * busy a write has read back 1 to 30 s late (ARCHITECTURE.md §7, "Write
- * visibility"), and five seconds cut that short: the aliases test that
- * polls five writes in a row timed out at 5,000 ms in a full run and
- * passed alone.
+ * A test that gives no bound of its own has twenty seconds, not vitest's
+ * five: a test polls several read-backs in a row, each of which may take
+ * up to `eventually()`'s five seconds before it fails.
  */
-const DEFAULT_TEST_MS = 60_000;
+const DEFAULT_TEST_MS = 20_000;
 
 suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () => {
   let api: TheBrainApi;
@@ -161,42 +168,6 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
     created.push(id);
     return id;
   };
-
-  /**
-   * A create that is one of many sent at once, or null when it was answered
-   * with the API's catch-all 403.
-   *
-   * With the app busy, one create in a burst is now and then answered so:
-   * one in 100 in three bursts of five while four writers were at work in
-   * another brain, and in none of three bursts with the app to itself. The
-   * thought is made all the same: the log had a `101` for every request of
-   * each of those bursts, the refused one included (4 of 4). So the client
-   * takes that 403 to a write for one that may have been carried out
-   * (`mayHaveLanded()`, docs/api-map.md, L45), and this asks it so: a client
-   * that took it for a refusal again fails here. A test that needs a burst
-   * is about what the burst leaves, and used to go red on it whenever a
-   * second session was at work. So it is counted and said aloud here, and
-   * the thought, which nothing has the identifier of, is left to the sweep
-   * after the run. Any other failure is thrown as it came.
-   */
-  let unanswered = 0;
-  const makeInBurst = async (name: string): Promise<string | null> => {
-    try {
-      return await make(name);
-    } catch (error) {
-      if (!(error instanceof TheBrainError) || error.kind !== "forbidden") throw error;
-      if (!mayHaveLanded(error)) throw error;
-      unanswered += 1;
-      console.warn(
-        `[burst] the create of ${PREFIX}${name} was answered with the catch-all 403: ` +
-          `${error.status} ${JSON.stringify(error.body)}`,
-      );
-      return null;
-    }
-  };
-  /** Thoughts created at once: the identifiers of those whose create was answered. */
-  const makeAtOnce = async (names: readonly string[]): Promise<string[]> =>
-    (await Promise.all(names.map(makeInBurst))).filter((id) => id !== null);
 
   /**
    * A minute before this run made its first request. Every entry a test
@@ -299,8 +270,8 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
    *
    * By identifier, from the log, and not by name. A test renames a thought
    * to `ZZ-IT-…`, and makes names and types of characters that do not show,
-   * none of which a prefix finds; and a create answered with the catch-all
-   * 403 in a burst makes its thought with no identifier given back (4 of 4).
+   * none of which a prefix finds; and a create whose answer is lost makes
+   * its thought with no identifier given back, as one test does on purpose.
    * All of it is in the log, and in a throwaway brain everything made while
    * a run is on is the run's.
    */
@@ -406,12 +377,12 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
     // these tests at a real working brain, they refuse to touch it.
     //
     // `statistics.thoughts` was right at the first read after every write
-    // measured: 19 creates, 19 deletes, eight bursts of 30 and of 100, and
-    // eight sweeps of 100 to 350 deleted one after another, which is what
-    // the run before this one ends with. It is asked again for five seconds
-    // all the same before the run is refused. Two other counts of the same
-    // answer are seconds behind a write (L41), and what waiting costs is
-    // five seconds for a brain that is over the limit and stays over it.
+    // measured: 19 creates, 19 deletes, and eight sweeps of 100 to 350
+    // deleted one after another, which is what the run before this one ends
+    // with. It is asked again for five seconds all the same before the run
+    // is refused. Two other counts of the same answer are behind a write
+    // (L41), and what waiting costs is five seconds for a brain that is over
+    // the limit and stays over it.
     const stats = await eventually(
       () => api.brains.statistics(brainId),
       (s) => s.thoughts <= MAX_THOUGHTS_IN_TEST_BRAIN,
@@ -846,7 +817,7 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
         g.siblings.length === 1 &&
         g.tags[0]?.label === "a tag's caption" &&
         g.type?.name === `${typeName} renamed`,
-      { timeoutMs: 20_000, stepMs: 250 },
+      { stepMs: 250 },
     );
     expect(graph.thought.label).toBe("its caption");
     expect(labels(graph.parents)).toEqual({ [parentId]: null });
@@ -858,26 +829,25 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
     const above = await eventually(
       () => api.thoughts.getGraph(brainId, parentId),
       (g) => g.children.length === 2,
-      { timeoutMs: 20_000, stepMs: 250 },
+      { stepMs: 250 },
     );
     expect(labels(above.children)).toEqual({
       [id]: "its caption",
       [siblingId]: "a sibling's caption",
     });
 
-    // The lists of the brain's vocabulary, a copy behind a write (L39), and
-    // further behind with another session at work in TheBrain: in one full
-    // run beside it, /types did not list the type within 12 s.
+    // The lists of the brain's vocabulary, a copy behind a write by up to
+    // 0.42 s (L39).
     const types = await eventually(
       () => api.thoughts.listTypes(brainId),
       (list) => list.some((t) => t.id === typeId && t.name === `${typeName} renamed`),
-      { timeoutMs: 20_000, stepMs: 250 },
+      { stepMs: 250 },
     );
     expect(types.find((t) => t.id === typeId)?.label).toBe(typeName);
     const tags = await eventually(
       () => api.thoughts.listTags(brainId),
       (list) => list.some((t) => t.id === tagId && t.label !== null),
-      { timeoutMs: 20_000, stepMs: 250 },
+      { stepMs: 250 },
     );
     expect(tags.find((t) => t.id === tagId)?.label).toBe("a tag's caption");
   }, 90_000);
@@ -2719,11 +2689,11 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
     const late = (l: ModificationLogDto): boolean =>
       compareLogTime(l.modificationDateTime, l.creationDateTime) > 0;
     let logs = await newest();
-    // A run may have logged none yet. Three hundred creates gave three.
+    // A run may have logged none yet. Three hundred creates gave three. They
+    // are made one after another, as a batch makes them.
     for (let round = 0; !logs.some(late) && round < 10; round++) {
-      const ids = new Set(
-        await makeAtOnce(Array.from({ length: 100 }, (_, i) => `log-late-${round}-${i}`)),
-      );
+      const ids = new Set<string>();
+      for (let i = 0; i < 100; i++) ids.add(await make(`log-late-${round}-${i}`));
       logs = await eventually(
         newest,
         (entries) => entries.filter((l) => ids.has(l.sourceId)).length >= ids.size,
@@ -2783,57 +2753,108 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
     }
   };
 
-  it("concurrent writes share timestamps, and paging keeps every tied entry once", async () => {
-    // Only concurrency produces them: a single request that logs several
-    // entries (a cascade delete, a first note) stamps each one apart. Measured
-    // over repeated bursts of concurrent creates: 30 at once shared a timestamp
-    // in about half the bursts, 100 at once in 57 bursts of 59, 4 times at the
-    // median and 11 at the most. That is with the app to itself. With four
-    // writers at work in another brain a burst shared one 2 times in 5, and
-    // three rounds, which is what this had, came up empty in a run beside
-    // another session's. Hence the eight, of which a quiet app needs one.
-    const BURST = 100;
-    const ROUNDS = 8;
-    // Of the last round alone, so that what is paged below is one burst
-    // however many it took.
-    let since = "";
-    let tied = false;
-    for (let round = 0; round < ROUNDS && !tied; round++) {
-      since = new Date().toISOString();
-      const before = unanswered;
-      const made = await makeAtOnce(Array.from({ length: BURST }, (_, i) => `log-tie-${round}-${i}`));
-      // A create that got the 403 is logged as well, and may be a moment
-      // behind its answer: nothing below may be written between two reads.
-      if (unanswered > before) await settle(1000);
-      const burst = await eventually(
-        () => api.brains.modifications(brainId, { maxLogs: 10_000, since }),
-        (entries) => entries.length >= made.length,
-      );
-      const times = burst.map(logTime);
-      tied = new Set(times).size < times.length;
-    }
-    expect(tied, `no two creates of ${BURST} sent at once shared a timestamp, ${ROUNDS} times`).toBe(
-      true,
-    );
+  /**
+   * What TheBrain does under load the server is not built for: bursts of
+   * writes sent at once. Run with `THEBRAIN_LOAD_TESTS=1`.
+   */
+  describe.runIf(LOAD_TESTS)("under load (THEBRAIN_LOAD_TESTS=1)", () => {
+    /**
+     * A create that is one of many sent at once, or null when it was
+     * answered with the API's catch-all 403.
+     *
+     * With the app busy, one create in a burst is now and then answered so:
+     * one in 100 in three bursts of five while four writers were at work in
+     * another brain, and in none of three bursts with the app to itself. The
+     * thought is made all the same: the log had a `101` for every request of
+     * each of those bursts, the refused one included (4 of 4; docs/api-map.md,
+     * L45). A test that needs a burst is about what the burst leaves, and
+     * used to go red on that answer whenever a second session was at work.
+     * So it is counted and said aloud here, and the thought, which nothing
+     * has the identifier of, is left to the sweep after the run. The answer
+     * is told by its status and the router's words alone, whatever the
+     * client makes of it. Any other failure is thrown as it came.
+     */
+    let unanswered = 0;
+    const isCatchAll403 = (error: unknown): error is TheBrainError =>
+      error instanceof TheBrainError &&
+      error.status === 403 &&
+      error.message.trim().startsWith("To use the TheBrain API, make requests to /api");
+    const makeInBurst = async (name: string): Promise<string | null> => {
+      try {
+        return await make(name);
+      } catch (error) {
+        if (!isCatchAll403(error)) throw error;
+        unanswered += 1;
+        console.warn(
+          `[burst] the create of ${PREFIX}${name} was answered with the catch-all 403: ` +
+            `${error.status} ${JSON.stringify(error.body)}`,
+        );
+        return null;
+      }
+    };
+    /** Thoughts created at once: the identifiers of those whose create was answered. */
+    const makeAtOnce = async (names: readonly string[]): Promise<string[]> =>
+      (await Promise.all(names.map(makeInBurst))).filter((id) => id !== null);
 
-    // A page of two is bound to split a tie, and often to be filled by one: a
-    // pager that dropped the entries stamped at its boundary lost one in each
-    // of 32 such bursts read back from the log.
-    sameEntries(
-      await api.brains.allModifications(brainId, { since, pageSize: 2 }),
-      await api.brains.modifications(brainId, { maxLogs: 10_000, since }),
-    );
-    // The same for the newest thousand entries, whatever wrote them, at
-    // another page size. This was the whole log, and a test brain's log only
-    // grows: at 52,000 entries it took 2,291 requests and 34 s, and past
-    // 100,000 the one request it was compared with would have come back short.
+    it("concurrent writes share timestamps, and paging keeps every tied entry once", async () => {
+      // Only concurrency produces them: a single request that logs several
+      // entries (a cascade delete, a first note) stamps each one apart.
+      // Measured over repeated bursts of concurrent creates: 30 at once
+      // shared a timestamp in about half the bursts, 100 at once in 57 bursts
+      // of 59, 4 times at the median and 11 at the most. That is with the app
+      // to itself. With four writers at work in another brain a burst shared
+      // one 2 times in 5, and three rounds, which is what this had, came up
+      // empty in a run beside another session's. Hence the eight, of which a
+      // quiet app needs one.
+      const BURST = 100;
+      const ROUNDS = 8;
+      // Of the last round alone, so that what is paged below is one burst
+      // however many it took.
+      let since = "";
+      let tied = false;
+      for (let round = 0; round < ROUNDS && !tied; round++) {
+        since = new Date().toISOString();
+        const before = unanswered;
+        const made = await makeAtOnce(
+          Array.from({ length: BURST }, (_, i) => `log-tie-${round}-${i}`),
+        );
+        // A create that got the 403 is logged as well, and may be a moment
+        // behind its answer: nothing below may be written between two reads.
+        if (unanswered > before) await settle(1000);
+        const burst = await eventually(
+          () => api.brains.modifications(brainId, { maxLogs: 10_000, since }),
+          (entries) => entries.length >= made.length,
+        );
+        const times = burst.map(logTime);
+        tied = new Set(times).size < times.length;
+      }
+      expect(
+        tied,
+        `no two creates of ${BURST} sent at once shared a timestamp, ${ROUNDS} times`,
+      ).toBe(true);
+
+      // A page of two is bound to split a tie, and often to be filled by one:
+      // a pager that dropped the entries stamped at its boundary lost one in
+      // each of 32 such bursts read back from the log.
+      sameEntries(
+        await api.brains.allModifications(brainId, { since, pageSize: 2 }),
+        await api.brains.modifications(brainId, { maxLogs: 10_000, since }),
+      );
+    }, 120_000);
+  });
+
+  it("paging the newest thousand entries of the log keeps every one once, newest first", async () => {
+    // Whatever wrote them, at a page size of its own. This was the whole log,
+    // and a test brain's log only grows: at 52,000 entries it took 2,291
+    // requests and 34 s, and past 100,000 the one request it was compared
+    // with would have come back short.
     const recent = await newestLogs(1_000);
     const from = logTime(recent.at(-1)!);
     sameEntries(
       await api.brains.allModifications(brainId, { since: from, pageSize: 25 }),
       await api.brains.modifications(brainId, { maxLogs: 10_000, since: from }),
     );
-  }, 120_000);
+  });
 
   it("a page that ends on an entry filed after its creation keeps the one filed beside it", async (ctx) => {
     // What the first pager lost. It took a page's oldest creationDateTime as
@@ -3121,19 +3142,6 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
       expect(await rawCreate({ name, kind: Normal })).not.toBe(thought);
     });
 
-    it("two creates of one new tag name sent at once are now and then two tags", async () => {
-      let rounds = 0;
-      let split = 0;
-      for (; rounds < 8 && split === 0; rounds += 1) {
-        const name = named(`at-once-${rounds}`);
-        const ids = await Promise.all([1, 2, 3, 4].map(() => rawCreate({ name, kind: Tag })));
-        if (new Set(ids).size > 1) split += 1;
-      }
-      // Measured: two at once made two tags 5 times of 10, four at once more
-      // than one 9 times of 10.
-      expect(split).toBe(1);
-    });
-
     it("createTypeOrTag tells a tag it made from one it was answered with, one call at a time", async () => {
       const name = named("told");
       const made = await api.thoughts.createTypeOrTag(brainId, { name, kind: Tag });
@@ -3350,9 +3358,9 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
     }
 
     // Statistics counts a thought at the first read after it is made or
-    // deleted, and types from a copy that is seconds behind after a burst
-    // of writes (*statistics counts…*, below): so it is asked until it
-    // agrees, and the test fails when it never does.
+    // deleted, and types from a copy that is behind (*statistics counts…*,
+    // below): so it is asked until it agrees, and the test fails when it
+    // never does.
     const counted = (s: { thoughts: number; thoughtTypes: number }): number[] => [
       Math.round(s.thoughts),
       Math.round(s.thoughtTypes),
@@ -3360,22 +3368,20 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
     const stats = await eventually(
       () => api.brains.statistics(brainId),
       (s) => counted(s).join() === [normal, types].join(),
-      { timeoutMs: 20_000, stepMs: 250 },
+      { stepMs: 250 },
     );
     expect(counted(stats)).toEqual([normal, types]);
   }, 120_000);
 
   it("statistics counts a thought, a link, a note and a web link at the first read after the write, and types and tags from a copy that is behind", async () => {
     // Measured on TheBrain 15.0.640, 2026-10-13. `thoughts` was right at the
-    // first read after 19 creates and 19 deletes one at a time, after eight
-    // bursts of 30 and of 100 creates sent at once, and after eight sweeps
-    // of 100 to 350 deletes; `links`, `notes` and `webLinks` 10 times of 10
-    // each. `thoughtTypes` and `tags` are another matter: after one type or
-    // tag made or deleted the first read was wrong 38 times in 52 and right
-    // 0.04 to 0.9 s later; a type and a tag made straight after a burst of
-    // 100 creates were counted 2.8 to 6.6 s later (5 of 5), and deleted at
-    // the end of a sweep they were still counted at the first read 4 times
-    // in 5, for up to 2.2 s.
+    // first read after 19 creates and 19 deletes one at a time, and after
+    // eight sweeps of 100 to 350 deletes; `links`, `notes` and `webLinks` 10
+    // times of 10 each. `thoughtTypes` and `tags` are another matter: after
+    // one type or tag made or deleted the first read was wrong 38 times in
+    // 52 and right 0.04 to 0.9 s later, and deleted at the end of a sweep
+    // they were still counted at the first read 4 times in 5, for up to
+    // 2.2 s.
     type Counts = { thoughts: number; links: number; notes: number; webLinks: number };
     const now = async (): Promise<Counts> => {
       const { thoughts, links, notes, webLinks } = await api.brains.statistics(brainId);
@@ -3422,7 +3428,7 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
     expect(await now()).toEqual(full);
     const both = [was[0]! + 1, was[1]! + 1];
     expect(
-      await eventually(kinds, (k) => k.join() === both.join(), { timeoutMs: 20_000, stepMs: 100 }),
+      await eventually(kinds, (k) => k.join() === both.join(), { stepMs: 100 }),
     ).toEqual(both);
 
     // Deleted, each is gone from its count at the first read as well.
@@ -3440,7 +3446,7 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
     await settle(350);
     await api.thoughts.delete(brainId, tagId);
     expect(
-      await eventually(kinds, (k) => k.join() === was.join(), { timeoutMs: 20_000, stepMs: 100 }),
+      await eventually(kinds, (k) => k.join() === was.join(), { stepMs: 100 }),
     ).toEqual(was);
   }, 90_000);
 
@@ -4120,32 +4126,6 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
       ).toBeGreaterThanOrEqual(0);
     }, 60_000);
 
-    it("straight after a burst of writes a type takes several times longer to read back", async () => {
-      // Writes queue up. Measured, for the first patch after thoughts created
-      // six at a time, as ingest creates them: 0.6–0.8 s after 150, and after
-      // thoughts created with a type, which is two writes each, 2.6 s after
-      // 300 and 5.3 s after 600. On a quiet brain it is 0.1 s. The wait inside
-      // `update` gives up after 2 s, and says why it may have.
-      const typeId = await make("burst-type", ThoughtKind.Type);
-      const id = await make("burst-patched");
-      let next = 0;
-      await Promise.all(
-        Array.from({ length: 6 }, async () => {
-          while (next < 150) await makeInBurst(`burst-${next++}`);
-        }),
-      );
-
-      expect(await patchType(id, typeId)).toBeNull();
-      const started = Date.now();
-      const seen = await eventually(
-        () => typeOf(id),
-        (t) => t === typeId,
-        { stepMs: 20 },
-      );
-      expect(seen).toBe(typeId);
-      expect(Date.now() - started).toBeGreaterThan(300);
-    }, 30_000);
-
     it("a thought created with a type reads back with it on the first read", async () => {
       // Measured over 340 creations, 180 of them six at a time: not one first
       // read came back without the type. So `create` does not wait.
@@ -4264,9 +4244,9 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
     /**
      * What the brain holds, by the counts a stray write would move: each is
      * right at the first read after a write. Not the counts of types and
-     * tags, which stood here too: they come from a copy that is seconds
-     * behind after a burst of writes, and nothing sent below makes either
-     * (*statistics counts…*, above).
+     * tags, which stood here too: they come from a copy that is behind a
+     * write, and nothing sent below makes either (*statistics counts…*,
+     * above).
      */
     const counts = async (): Promise<number[]> => {
       const s = await api.brains.statistics(brainId);
@@ -4775,8 +4755,8 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
     /**
      * Runs `look` until it has looked between two refreshes of the search's
      * index. It returns false when the index caught up before it was done,
-     * which a write queued behind another test's burst can bring about, and
-     * is then run again, on a thought of its own.
+     * as it does when a refresh falls within the look, and is then run
+     * again, on a thought of its own.
      */
     const betweenRefreshes = async (look: (attempt: number) => Promise<boolean>): Promise<void> => {
       for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -4817,7 +4797,6 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
         await api.thoughts.delete(brainId, id);
         // The thought itself reads for a moment more: 30 to 206 ms, 80 times of 80.
         const gone = await eventually(() => reads(id), (r) => !r.startsWith("there"), {
-          timeoutMs: 20_000,
           stepMs: 10,
         });
         expect(gone).toBe("not_found");
@@ -4924,7 +4903,7 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
         const renamed = await eventually(
           () => api.thoughts.get(brainId, id),
           (t) => t.name === PREFIX + now.name && t.label === now.caption,
-          { timeoutMs: 20_000, stepMs: 10 },
+          { stepMs: 10 },
         );
         expect(renamed).toMatchObject({ name: PREFIX + now.name, label: now.caption });
 
@@ -4997,7 +4976,6 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
 
         await api.thoughts.delete(brainId, newer);
         const gone = await eventually(() => reads(newer), (r) => !r.startsWith("there"), {
-          timeoutMs: 20_000,
           stepMs: 10,
         });
         expect(gone).toBe("not_found");
@@ -5036,7 +5014,7 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
       await caughtUp(store);
 
       await api.thoughts.delete(brainId, id);
-      await eventually(() => reads(id), (r) => r === "not_found", { timeoutMs: 20_000, stepMs: 10 });
+      await eventually(() => reads(id), (r) => r === "not_found", { stepMs: 10 });
 
       // The index knows nothing of the delete, and every row scores the same
       // here: the row is among the hits, and the read of its thought is a 404.
@@ -7348,7 +7326,7 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
         const after = await eventually(
           () => api.notes.getRaw(brainId, id).catch(() => null),
           (note) => note !== null && note.markdown === "",
-          { timeoutMs: 10_000, stepMs: 50 },
+          { stepMs: 50 },
         );
         expect(after?.modificationDateTime, sent).toBe("0001-01-01T00:00:00");
         await settle(400);
@@ -8511,8 +8489,7 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
       await api.links.delete(brainId, id);
       // Measured at the first read 20 times of 20, 2 to 4 ms after the answer;
       // and the read by its identifier behind it, by 4 to 216 ms. Neither is
-      // asserted as a time: with the app busy a read has come back seconds
-      // behind a write (BRMCP-51), and these wait as long as any read-back.
+      // asserted as a time: these wait as long as any read-back.
       const lookup = await eventually(
         () => api.links.between(brainId, a, b),
         (l) => l === null,
@@ -8991,8 +8968,7 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
         const name = `lag ${i}`;
         await api.links.update(brainId, id, { name });
         if ((await api.links.get(brainId, id)).name !== name) old = i;
-        // Whatever that read said, the name is there before long. It took
-        // 4.7 s behind bursts of writes to another brain, and once more than 5.
+        // Whatever that read said, the name is there before long.
         expect((await read(id, (l) => l.name === name)).name).toBe(name);
       }
       expect(
@@ -9388,20 +9364,13 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
     const nameOf = async (id: string): Promise<string | null> =>
       (await api.thoughts.get(brainId, id)).name;
     /**
-     * How long a rename is given to read back. Measured on 2026-10-14: about
-     * 0.1 s with the app to itself, 102 ms at the most of 40, and 130 ms of
-     * 40 with another contract run at work in it. But a rename reads back
-     * behind whatever else the app was given to write: beside bursts of 300
-     * creates in another brain it took 1 to 30 s, longer with each burst, 24
-     * renames in four minutes, and the first after the bursts 13.7 s. One
-     * burst of 600 held a patch back 5.3 s (*a typeId that is not a type*).
-     * Three seconds were not enough once beside another session; polled, a
-     * longer bound costs nothing when the rename is quick.
+     * The thought's name once it reads `name`, or the last one it read. A
+     * rename read back in about 0.1 s, measured on 2026-10-14: 102 ms at the
+     * most of 40, and 130 ms of 40 with another contract run at work in the
+     * app. It is given `eventually()`'s five seconds.
      */
-    const RENAMED_MS = 20_000;
-    /** The thought's name once it reads `name`, or the last one it read. */
     const renamedTo = (id: string, name: string): Promise<string | null> =>
-      eventually(() => nameOf(id), (n) => n === name, { timeoutMs: RENAMED_MS, stepMs: 50 });
+      eventually(() => nameOf(id), (n) => n === name, { stepMs: 50 });
     /** The thought's own log entries, oldest first, as `101 "name"` or `103 "old"→"new"`. */
     const logged = async (id: string): Promise<string[]> =>
       (await api.thoughts.modifications(brainId, id, { includeRelated: false }))

@@ -33,6 +33,8 @@ required and is never inferred, and the suite refuses any brain holding more tha
 500 thoughts. Test thoughts are prefixed `zz-it-` and cleaned up afterwards,
 including leftovers from earlier crashed runs. The read-only tests that need a
 brain read that one too, and skip without it: no test reads another brain.
+`THEBRAIN_LOAD_TESTS=1` adds the write tests under load, bursts of writes sent at
+once, which the server is not built for and a run leaves out by default.
 
 ## What a change is expected to carry
 
