@@ -8223,11 +8223,13 @@ suite("resource layer against the live API", () => {
         outcome.created.forEach((c) => created.push(c.thoughtId));
         expect(outcome.failures, `run ${run}`).toEqual([]);
         expect(outcome.linksCreated, `run ${run}`).toBe(run === 1 ? 2 : 0);
-        // The pairs are written six at a time, so in no set order.
+        // The pairs are written six at a time, so in no set order. The pair
+        // named in capitals is the one named in lower case, and is given
+        // back as the API names it, in lower case (BRMCP-69).
         expect(
           outcome.linksNotAdded.map((l) => `${l.from} -> ${l.to}`).sort(),
           `run ${run}`,
-        ).toEqual([`${q.toUpperCase()} -> ${p.toUpperCase()}`, `b -> a`].sort());
+        ).toEqual([`${q} -> ${p}`, `b -> a`].sort());
         expect(outcome.linksNotAdded.find((l) => l.from === "b")!.note).toBe(
           "the plan has a link between the same two thoughts ahead of this one, a -> b, and " +
             'two thoughts share one link: this one was not sent, and its label "second" was ' +
