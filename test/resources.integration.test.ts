@@ -36,6 +36,7 @@ import {
   TheBrainApi,
   TheBrainError,
   ThoughtKind,
+  WRITTEN_KEPT_MS,
   aliasesOf,
   compareLogTime,
   isAttachmentOf,
@@ -67,6 +68,7 @@ import {
   subjectIds,
 } from "../src/operations/changes.js";
 import {
+  IngestBehindError,
   IngestMissingError,
   IngestValidationError,
   ingest,
@@ -139,7 +141,17 @@ const WHITE_SPACE = [
   0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
 ].map((cp) => String.fromCodePoint(cp));
 
-suite("resource layer against the live API", () => {
+/**
+ * A test that gives no bound of its own has a minute, not vitest's five
+ * seconds. A read-back here is polled for 12 to 20 s, since with the app
+ * busy a write has read back 1 to 30 s late (ARCHITECTURE.md §7, "Write
+ * visibility"), and five seconds cut that short: the aliases test that
+ * polls five writes in a row timed out at 5,000 ms in a full run and
+ * passed alone.
+ */
+const DEFAULT_TEST_MS = 60_000;
+
+suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () => {
   let api: TheBrainApi;
   let brainId: string;
   const created: string[] = [];
@@ -640,9 +652,11 @@ suite("resource layer against the live API", () => {
     const typeId = await make("Type", ThoughtKind.Type);
     const id = await make("typed");
     await api.thoughts.update(brainId, id, { typeId });
-    await settle();
 
-    const graph = await api.thoughts.getGraph(brainId, id);
+    const graph = await eventually(
+      () => api.thoughts.getGraph(brainId, id),
+      (g) => g.type?.id === typeId,
+    );
     expect(graph.type?.id).toBe(typeId);
     expect(graph.parents.map((p) => p.id)).not.toContain(typeId);
   });
@@ -652,16 +666,20 @@ suite("resource layer against the live API", () => {
     const id = await make("tagged");
 
     await api.links.attachTag(brainId, id, tagId);
-    await settle();
-    const withTag = await api.thoughts.getGraph(brainId, id);
+    const withTag = await eventually(
+      () => api.thoughts.getGraph(brainId, id),
+      (g) => g.tags.some((t) => t.id === tagId),
+    );
     expect(withTag.tags.map((t) => t.id)).toContain(tagId);
     // A tag must not be mixed in with ordinary parents.
     expect(withTag.parents.map((p) => p.id)).not.toContain(tagId);
 
     const removed = await api.links.detachTag(brainId, id, tagId);
     expect(removed).toBe(true);
-    await settle();
-    const without = await api.thoughts.getGraph(brainId, id);
+    const without = await eventually(
+      () => api.thoughts.getGraph(brainId, id),
+      (g) => !g.tags.some((t) => t.id === tagId),
+    );
     expect(without.tags.map((t) => t.id)).not.toContain(tagId);
   });
 
@@ -4466,7 +4484,7 @@ suite("resource layer against the live API", () => {
         } finally {
           // Only its attachment's deletion removes it: it hangs on no thought
           // the sweep after the suite could find.
-          const left = await eventually(hung, (list) => list.length > 0, { timeoutMs: 2000 });
+          const left = await eventually(hung, (list) => list.length > 0);
           for (const a of left) await api.attachments.delete(brainId, a.id);
         }
         // For a moment the read of a note whose attachment is gone is the
@@ -4799,7 +4817,7 @@ suite("resource layer against the live API", () => {
         await api.thoughts.delete(brainId, id);
         // The thought itself reads for a moment more: 30 to 206 ms, 80 times of 80.
         const gone = await eventually(() => reads(id), (r) => !r.startsWith("there"), {
-          timeoutMs: 5_000,
+          timeoutMs: 20_000,
           stepMs: 10,
         });
         expect(gone).toBe("not_found");
@@ -4906,7 +4924,7 @@ suite("resource layer against the live API", () => {
         const renamed = await eventually(
           () => api.thoughts.get(brainId, id),
           (t) => t.name === PREFIX + now.name && t.label === now.caption,
-          { timeoutMs: 5_000, stepMs: 10 },
+          { timeoutMs: 20_000, stepMs: 10 },
         );
         expect(renamed).toMatchObject({ name: PREFIX + now.name, label: now.caption });
 
@@ -4979,7 +4997,7 @@ suite("resource layer against the live API", () => {
 
         await api.thoughts.delete(brainId, newer);
         const gone = await eventually(() => reads(newer), (r) => !r.startsWith("there"), {
-          timeoutMs: 5_000,
+          timeoutMs: 20_000,
           stepMs: 10,
         });
         expect(gone).toBe("not_found");
@@ -5018,7 +5036,7 @@ suite("resource layer against the live API", () => {
       await caughtUp(store);
 
       await api.thoughts.delete(brainId, id);
-      await eventually(() => reads(id), (r) => r === "not_found", { timeoutMs: 5_000, stepMs: 10 });
+      await eventually(() => reads(id), (r) => r === "not_found", { timeoutMs: 20_000, stepMs: 10 });
 
       // The index knows nothing of the delete, and every row scores the same
       // here: the row is among the hits, and the read of its thought is a 404.
@@ -5398,7 +5416,6 @@ suite("resource layer against the live API", () => {
       const link = await eventually(
         () => api.links.between(brainId, a, b),
         (found) => found !== null,
-        { timeoutMs: 3000 },
       );
       return [link?.thoughtIdA, link?.relation, link?.meaning];
     };
@@ -6285,7 +6302,7 @@ suite("resource layer against the live API", () => {
                   () => false,
                 ),
                 (reads) => !reads,
-                { timeoutMs: 3000, stepMs: 25 },
+                { stepMs: 25 },
               );
             }
             return new Response(there.body, {
@@ -6836,9 +6853,10 @@ suite("resource layer against the live API", () => {
           // The copy the plan will be answered from, made straight before the write.
           await api.thoughts.getGraph(brainId, root);
           const made = await WRITES[how](root, name(`${how}-${i}`));
+          const writtenAt = Date.now();
           created.push(made);
 
-          const outcome = await ingest(api, brainId, {
+          const plan = {
             thoughts: [
               {
                 tempId: "x",
@@ -6847,7 +6865,29 @@ suite("resource layer against the live API", () => {
                 relation: how in RELATION_OF ? RELATION_OF[how as keyof typeof RELATION_OF] : "child",
               },
             ],
-          });
+          };
+          // A graph still behind the write when the wait inside `ingest()`
+          // runs out fails the thought with `IngestBehindError`, and nothing
+          // is made: the right answer, which says to send the thought again.
+          // A full run had one, a rename the graph did not show in 2,002 ms.
+          // So it is sent again, while the client still keeps the write: a
+          // call that ran past `WRITTEN_KEPT_MS` would find nothing kept to
+          // lack, take the graph at its word, and make the thought again.
+          const behindOnly = (o: Awaited<ReturnType<typeof ingest>>): boolean =>
+            o.created.length === 0 &&
+            o.reused.length === 0 &&
+            o.failures.length === 1 &&
+            o.failures[0]!.error instanceof IngestBehindError;
+          let started = Date.now();
+          let outcome = await ingest(api, brainId, plan);
+          // Another call as long as the last, with a second to spare, ends
+          // before the write is dropped.
+          const keptFor = (): number => writtenAt + WRITTEN_KEPT_MS - 1000 - Date.now();
+          while (behindOnly(outcome) && keptFor() > Date.now() - started) {
+            console.warn(`[behind] ${how} (${i}), sent again: ${outcome.failures[0]!.reason}`);
+            started = Date.now();
+            outcome = await ingest(api, brainId, plan);
+          }
           for (const c of outcome.created) created.push(c.thoughtId);
           // All three at once: a red run then says whether a thought was
           // made again or a read failed.
@@ -6863,7 +6903,7 @@ suite("resource layer against the live API", () => {
       } finally {
         clock.mockRestore();
       }
-    }, 30_000);
+    }, 120_000);
 
     it("the graphs come to show what the client keeps of a create, a link and a rename, on both sides", async () => {
       // `RecentWrites` holds a graph to these, and a graph that never came
@@ -6876,12 +6916,33 @@ suite("resource layer against the live API", () => {
         api.client.written
           .notShownBy(brainId, id, await api.thoughts.getGraph(brainId, id))
           .map((f) => (f.of === "listed" ? `${f.thoughtId} in ${f.list}` : `${f.thoughtId} named`));
-      const shown = async (...ids: string[]): Promise<string[][]> =>
-        eventually(
-          () => Promise.all(ids.map(lacking)),
-          (all) => all.every((none) => none.length === 0),
-          { timeoutMs: 5000, stepMs: 25 },
+      /**
+       * What the graphs of `ids` lack of the writes made since `since`, once
+       * they lack none. This waited 5 s, and a graph has been seconds behind
+       * a write with the app busy (BRMCP-51). It waits as long as the client
+       * keeps a write and no longer: past `WRITTEN_KEPT_MS` the client keeps
+       * none for a graph to lack, and one still behind would pass for one
+       * that caught up. So the read that lacked none must be within it.
+       */
+      const shown = async (since: number, ...ids: string[]): Promise<string[][]> => {
+        let readAt = 0;
+        const all = await eventually(
+          async () => {
+            const lacks = await Promise.all(ids.map(lacking));
+            readAt = Date.now();
+            return lacks;
+          },
+          (lacks) => lacks.every((none) => none.length === 0),
+          { timeoutMs: WRITTEN_KEPT_MS, stepMs: 25 },
         );
+        if (all.every((none) => none.length === 0)) {
+          expect(
+            readAt - since,
+            "the graphs were behind for as long as the client keeps a write",
+          ).toBeLessThan(WRITTEN_KEPT_MS);
+        }
+        return all;
+      };
 
       for (const relation of [Relation.Child, Relation.Parent, Relation.Jump]) {
         const root = await make(`sr-kept-root-${relation}`);
@@ -6890,6 +6951,7 @@ suite("resource layer against the live API", () => {
         await api.thoughts.getGraph(brainId, root);
         await api.thoughts.getGraph(brainId, loose);
 
+        const since = Date.now();
         const made = await api.thoughts.create(brainId, {
           name: `${PREFIX}sr-kept-made-${relation}`,
           sourceThoughtId: root,
@@ -6902,21 +6964,23 @@ suite("resource layer against the live API", () => {
         expect(api.client.written.notShownBy(brainId, made, EMPTY), String(relation)).toHaveLength(1);
         expect(api.client.written.notShownBy(brainId, loose, EMPTY), String(relation)).toHaveLength(1);
 
-        expect(await shown(root, made, loose), String(relation)).toEqual([[], [], []]);
+        expect(await shown(since, root, made, loose), String(relation)).toEqual([[], [], []]);
       }
 
       const root = await make("sr-kept-renamed-root");
+      const createdAt = Date.now();
       const child = await api.thoughts.create(brainId, {
         name: `${PREFIX}sr-kept-before`,
         sourceThoughtId: root,
       });
       created.push(child);
-      expect(await shown(root)).toEqual([[]]);
+      expect(await shown(createdAt, root)).toEqual([[]]);
+      const renamedAt = Date.now();
       await api.thoughts.update(brainId, child, { name: ` ${PREFIX}sr-kept\tafter\n` });
-      expect(await shown(root)).toEqual([[]]);
+      expect(await shown(renamedAt, root)).toEqual([[]]);
       const listed = (await api.thoughts.getGraph(brainId, root)).children.map((t) => t.name);
       expect(listed).toEqual([`${PREFIX}sr-kept after`]);
-    }, 30_000);
+    }, 90_000);
 
     it("a create whose answer is lost is found by the same plan sent at once", async () => {
       // A batch waits for the graphs to list what it made, and of this
@@ -6966,7 +7030,7 @@ suite("resource layer against the live API", () => {
       eventually(
         () => api.notes.get(brainId, id),
         (note) => note === text,
-        { timeoutMs: 2000, stepMs: 50 },
+        { stepMs: 50 },
       );
 
     it("a note reads back as it was written, but for its line ends, which come back as \\n", async () => {
@@ -7137,7 +7201,7 @@ suite("resource layer against the live API", () => {
       eventually(
         () => api.notes.get(brainId, id),
         (note) => note === text,
-        { timeoutMs: 2000, stepMs: 50 },
+        { stepMs: 50 },
       );
     /** The bare requests, with nothing of `NotesResource` around them. */
     const rawAppend = (id: string, markdown: string): Promise<unknown> =>
@@ -7888,10 +7952,7 @@ suite("resource layer against the live API", () => {
         await api.client.post(`/api/notes/${brainId}/${ZEROS}/update`, {
           json: { markdown: `${PREFIX}note for nobody` },
         });
-        const stored = await eventually(attachments, (list) => list.length > 0, {
-          timeoutMs: 3000,
-          stepMs: 50,
-        });
+        const stored = await eventually(attachments, (list) => list.length > 0, { stepMs: 50 });
         expect(stored.map((a) => a.isNotes)).toEqual([true]);
         // Not a lag: asked for a second, it is still the note of no thought.
         const read = await eventually(note, (n) => (n.markdown ?? "") !== "", {
@@ -7904,7 +7965,7 @@ suite("resource layer against the live API", () => {
           await api.client.delete(`/api/attachments/${brainId}/${a.id}`).catch(() => undefined);
         }
       }
-      await eventually(attachments, (list) => list.length === 0, { timeoutMs: 3000 });
+      await eventually(attachments, (list) => list.length === 0);
       expect(await attachments()).toEqual([]);
     }, 20_000);
 
@@ -7976,7 +8037,7 @@ suite("resource layer against the live API", () => {
       const entries = await eventually(
         () => newestLogs(300),
         (all) => ours(all).length >= atLeast,
-        { timeoutMs: 3000, stepMs: 100 },
+        { stepMs: 100 },
       );
       return ours(entries)
         .sort((x, y) => compareLogTime(logTime(x), logTime(y)))
@@ -8194,7 +8255,7 @@ suite("resource layer against the live API", () => {
       const left = await eventually(
         () => api.links.between(brainId, a, b),
         (l) => l !== null,
-        { timeoutMs: 3000, stepMs: 50 },
+        { stepMs: 50 },
       );
       expect(left?.id).toBe(ids[1]);
     }, 90_000);
@@ -8345,7 +8406,7 @@ suite("resource layer against the live API", () => {
       const entries = await eventually(
         () => newestLogs(300),
         (all) => ours(all).length >= atLeast,
-        { timeoutMs: 3000, stepMs: 100 },
+        { stepMs: 100 },
       );
       return ours(entries).sort((x, y) => compareLogTime(logTime(x), logTime(y)));
     };
@@ -8420,7 +8481,7 @@ suite("resource layer against the live API", () => {
             const after = await eventually(
               () => api.links.between(brainId, a, b),
               (l) => l?.relation === relation && l.thoughtIdA === upper,
-              { timeoutMs: 2000, stepMs: 20 },
+              { stepMs: 20 },
             );
             expect(after, cell).toMatchObject({
               id,
@@ -8442,24 +8503,26 @@ suite("resource layer against the live API", () => {
       }
     }, 120_000);
 
-    it("a link deleted is gone from the lookup at once and from its own read soon after; deleted again it is a 400, as an identifier no link has is; the log has a 102 with both ends and its name", async () => {
+    it("a link deleted is gone from the lookup and from its own read; deleted again it is a 400, as an identifier no link has is; the log has a 102 with both ends and its name", async () => {
       const { a, b } = await pair("deleted");
       const { id } = await post({ thoughtIdA: a, thoughtIdB: b, relation: 3, name: "gone" });
       expect((await api.links.between(brainId, a, b))?.id).toBe(id);
 
       await api.links.delete(brainId, id);
-      // Measured at the first read 20 times of 20, 2 to 4 ms after the answer.
+      // Measured at the first read 20 times of 20, 2 to 4 ms after the answer;
+      // and the read by its identifier behind it, by 4 to 216 ms. Neither is
+      // asserted as a time: with the app busy a read has come back seconds
+      // behind a write (BRMCP-51), and these wait as long as any read-back.
       const lookup = await eventually(
         () => api.links.between(brainId, a, b),
         (l) => l === null,
-        { timeoutMs: 1000, stepMs: 20 },
+        { stepMs: 20 },
       );
       expect(lookup).toBeNull();
-      // The read by its identifier is behind, by 4 to 216 ms.
       const read = await eventually(
         () => api.links.get(brainId, id).then(() => "there", (e: TheBrainError) => e.kind),
         (r) => r !== "there",
-        { timeoutMs: 3000, stepMs: 50 },
+        { stepMs: 50 },
       );
       expect(read).toBe("not_found");
 
@@ -8533,7 +8596,7 @@ suite("resource layer against the live API", () => {
       const [ab, ba] = await eventually(
         async () => [await api.links.between(brainId, a, b), await api.links.between(brainId, b, a)],
         ([x, y]) => x?.id === fromB.id && y?.id === fromB.id,
-        { timeoutMs: 1000, stepMs: 20 },
+        { stepMs: 20 },
       );
       expect([ab?.id, ba?.id]).toEqual([fromB.id, fromB.id]);
       expect(linksOfPair(a, b, graphs, ab!, ba!).map((l) => l.id)).toEqual([fromB.id]);
