@@ -895,7 +895,7 @@ read is answered from a copy, brought up to date about every 0.1 s (§7, item
 children again too: 5 of 6. So `ingest()` returns once the graph of every
 thought that was there before the batch lists what the batch made next to it,
 read or not by this batch: the copy may be from an earlier read. It asks last,
-after the notes and links, and gives up after 6 s. Then the outcome counts
+after the notes and links, and gives up after 3 s. Then the outcome counts
 what is still `unlisted`, and the result says to wait before sending the plan
 again. The wait is 60–150 ms on a batch of one thought and nothing measurable
 on one with notes and links: a plan of 20 thoughts and 10 links took 325–456
@@ -1381,35 +1381,26 @@ Nothing is deleted to tidy up after a failure. Deletion needs a human (§6).
 
 ### How long a batch waits, and for what
 
-**Six seconds, as a read-back.** The graphs a batch waits on at its end are
-answered from a copy that queues behind
-the same writes as a read of the thought (§7, *Write visibility*): one was
-2 s behind a rename in a full contract run, and one lacked a type for 10 s
-under another client's bursts. A batch of 200 thoughts with notes, tags and
-links is some 600 writes, and a read was 5.3 s behind 600 creates. So
-`LISTED` is `READ_BACK`'s six seconds, where two were short of the batch's
-own writes. It costs what the copy
-is behind and no more, and all six seconds only where a graph never shows
-the write. The pause between reads doubles each second, 25 ms to 400: 81
-reads in six seconds, as many as two at 25 ms.
+**Three seconds at the end.** The graphs a batch waits on at its end are
+answered from a copy, 0.1–0.4 s behind a write as a rule and 1–3 s after
+one batch of up to 200 thoughts (§7, *Write visibility*). So `LISTED` reads
+each graph every 100 ms, about as often as the copy is brought up to date,
+for three seconds at the most. It costs what the copy is behind and no more,
+and all three seconds only where a graph never shows the write.
 
 **Aliases accepted and not read back are said as that.** `ingest()` counted
 a list that did not read back as written, and the batch read as done. Now
 it is under "Aliases not read back", in `brain_update_thought`'s words
 (*Accepted, and not read back*): accepted, do not send again,
 `brain_get_thought` shows them once TheBrain catches up. The result is
-`isError`, and "Next" says that every write was accepted. The lists are
-written with no wait (`changeAliases(…, 0)`) and waited for together at the
-end, beside the wait for the graphs (`aliasesReadBack()`): a wait each, six
-at a time, was 34 waits of six seconds for 200 thoughts.
+`isError`, and "Next" says that every write was accepted. Each list is
+written through `changeAliases()`, six at a time, with its own wait
+(`READ_BACK`), which costs nothing where the list reads back.
 
 **The longest call.** By its waits, one `brain_ingest` call takes at most
-0.5 s by the clock before its first look, and six seconds at the end, for
-the graphs and the aliases together: 6.5 s and the requests' own time. One
-that follows no write of its process pays the last six seconds alone, and
-those only while TheBrain is behind. Before, the looks took 10 s at most and the end 2 s,
-but the aliases waited six seconds each, six at a time: 204 s for 200
-thoughts whose lists did not read back.
+0.5 s by the clock before its first look and 3 s for the graphs at the end,
+and the requests' own time; an alias list that does not read back adds its
+own 3 s.
 
 ### A call about one thought, written in part
 
@@ -1466,36 +1457,25 @@ under "Failed". A failed read has not shown the write, and no more: the wait
 goes on to its end, and the write is then told as accepted.
 
 **Accepted, and not read back.** A type set or removed and an alias list
-are waited for until a read of the thought shows them (`READ_BACK`), and
-reads queue behind writes, the app's own and any other client's: 0.1 s on
-a quiet app, 2.6 s after 300 creates, 5.3 s after 600, 1–30 s beside bursts
-kept up in another brain (§7, *Write visibility*). No bound is right always,
-so the wait is six seconds, past the 600, and a write it does not see is
-`not_read_back`: "TheBrain accepted …, and the thought did not read back
-with it within 6 s … Do not send it again". That is no write that may have
-landed, which says to look first: this one landed, and a look would show the
-old value. It stands under "Failed", or is the whole result, and never under
-"Done": aliases listed there read as a list to build on. It does not stop
-`brain_update_thought`, which goes on to the fields after it: no other field
-depends on the type, the alias edit waits on unread aliases alone, and the
-call used to stop there and tell the model to "fix the cause" of a lag and
-send the rest again. "Next" then says that the call ran to its end, and to
-send again only what a line under "Failed" says to. Two seconds were
-short of a burst of 300. Six cost nothing where the write reads back, and
-the pause between reads doubles each second, so a wait asks some 85 reads
-where two seconds asked 80.
+are waited for until a read of the thought shows them (`READ_BACK`): a read
+every 50 ms, for 3 s at the most. A read is 0.1–0.4 s behind a write as a
+rule, and 1–3 s after one batch of up to 200 thoughts (§7, *Write
+visibility*). A write the wait does not see is `not_read_back`: "TheBrain
+accepted …, and the thought did not read back with it within 3 s … Do not
+send it again". That is no write that may have landed, which says to look
+first: this one landed, and a look would show the old value. It stands under
+"Failed", or is the whole result, and never under "Done": aliases listed
+there read as a list to build on. It stops `brain_update_thought` as any
+failure does; the fields after it are under "Skipped", and "Next" says that
+they are safe to send.
 
 The danger is the next edit. The alias list and the removal of a type are a
-read, then a write, and a read from before the unread write builds over it:
-the second alias edit wrote the old list with its own alias, and a removal
-found no type and passed for done. So `ThoughtsResource` keeps, for a
-minute, each such write of its own that did not read back, and an alias edit
-or a type removal of that thought first waits for a read past it. When none
-comes the change is not sent, and its error says so. An alias list that is
-neither the one before nor the one written is someone else's edit, and is
-built on. Another process's writes are not known, and a write of the same
-field by someone else that brings the old value back is waited on for that
-minute.
+read, then a write, and one built on a read from before the unread write
+undoes it: the second alias edit wrote the old list with its own alias, and
+a removal found no type and passed for done. The aliases' line says so. The
+server does not hold such an edit back: a write that has not read back in
+3 s is out of the ordinary, and what it costs is an alias or a removal sent
+again.
 
 **A call stops at its first failure, where a batch goes on.** A batch's
 writes are in flight together, and what it leaves for a second call can be
@@ -1657,13 +1637,9 @@ read it with `brain_get_thought` before sending the plan again. "Not listed
 yet" is a statement about TheBrain, and stays for a graph that answered. The
 batch is no error for it: what the plan asked for is written.
 
-A graph that failed is asked again after twice the pause each time, up to
-0.4 s, and one that answered after `pauseAt()`: 10 reads of a failing
-graph in what were two seconds, where there were 76, and 20 in the six now.
-And the wait is the whole of it, for every graph at once. A read still
-unanswered when it is over is given up on and its thought listed as not read. The batch used
-to wait for the read itself: with the answer held back 10 s it took 10 s to
-return a result whose writes were done, and a request's own limit is 30 s.
+A graph that failed is asked again a step later, as one that answered, every
+100 ms to the end of the three seconds. A read the app does not answer is
+waited for to the request's own limit.
 
 **A failure that is about the call is explained as it was**: an identifier
 that is malformed, a `brainId` that is no brain, a key TheBrain rejects. The
@@ -2267,8 +2243,8 @@ in `thoughts.changeAliases()`.
 usually still returns the old list: measured over 82 writes, the new one showed
 up 50–100 ms later, 0.2 s at the most. Two edits in a row built on that stale
 read left only the second alias. `changeAliases` polls until the list it wrote
-is the list it reads, says so when six seconds were not enough, and holds the
-next edit back until it does (§4, *Accepted, and not read back*). It also
+is the list it reads, and says so when three seconds were not enough (§4,
+*Accepted, and not read back*). It also
 refuses a list that would pass 100: the API keeps the first hundred of a longer
 one and says nothing.
 
