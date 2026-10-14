@@ -160,7 +160,7 @@ describe("thought graph", () => {
   });
 
   // What is above a thought by a link that is no parent's. The API lists it
-  // among the parents as well, measured on 15.0.640 (docs/api-map.md, L40).
+  // among the parents as well, measured on 15.0.640 (docs/api-map.md, L44).
   const UPPER = "abababab-0000-4000-8000-00000000000a";
   const OTHER_TYPE = "cdcdcdcd-0000-4000-8000-00000000000c";
   const ABOVE = "efefefef-0000-4000-8000-00000000000e";

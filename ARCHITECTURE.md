@@ -326,7 +326,7 @@ only when it is a type's link with the type at its head. Two other answers
 for two types were weighed. *Removing the one `typeId` names and saying the
 other is there*: the thought is left with a type that reads as none, and
 nothing takes the second away, since `typeId: null` again finds `typeId`
-null and no patch does it (`docs/api-map.md`, L40). *Refusing, with a
+null and no patch does it (`docs/api-map.md`, L44). *Refusing, with a
 sentence that says what is there*: the same thought, as it is, with nothing
 the tools can do about it. The call asks for no type, and both links are the
 type's: deleting them is what was asked, and deletes nothing that is not the
@@ -348,7 +348,7 @@ says it only by inference. The tag a tag carries is in `tags`, as a tag on a
 thought is. A second type is in `otherTypes`, and `type` is the one `typeId`
 names: the graph's own `type` named either of two, the type of the higher
 identifier on the first read and one or the other after, changing from read
-to read (L40). `neighbourIds()` follows `otherTypes`, so the indexer's walk
+to read (L44). `neighbourIds()` follows `otherTypes`, so the indexer's walk
 reaches what it reached through the parents, and a thought of two types is
 indexed with the same type from read to read.
 
@@ -375,7 +375,7 @@ TheBrain links this thought under both. typeId null in brain_update_thought remo
 The line is there because the obvious next call goes wrong: set to the other
 of the two, `typeId` is a 200 that changes nothing, and the tool answers two
 seconds later that the type has not read back; set to a third, one of the two
-stays beside it (L40). It costs 193 characters on a thought of two types; a
+stays beside it (L44). It costs 193 characters on a thought of two types; a
 tag on a tag is 68 shorter, and every other result is what it was, to the
 character. `tools/list` did not change.
 
@@ -1921,7 +1921,7 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     `isTypeLink()` takes meaning 3, `removeType()` deletes every type's link
     the thought has, and `getGraph()` keeps a parent only for an ordinary link,
     with a second type in `otherTypes` (§4, *What stands above a type or a
-    tag*; `docs/api-map.md`, L40).
+    tag*; `docs/api-map.md`, L44).
 
 ### Write visibility
 

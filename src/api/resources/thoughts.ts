@@ -153,7 +153,7 @@ export interface CleanGraph {
   /**
    * Any other type the thought is linked under. A thought created under one
    * type with another for its `typeId` has a link from each (docs/api-map.md,
-   * L40). Empty but for such a thought.
+   * L44). Empty but for such a thought.
    */
   otherTypes: ThoughtDto[];
   links: LinkDto[];
@@ -620,7 +620,7 @@ export class ThoughtsResource {
    * a link from each, and deleting either reads back as `typeId: null` while
    * the other stays its type in the graph and in TheBrain: the second one
    * passed for removed. No patch takes one of the two away (docs/api-map.md,
-   * L40). Only a type's link from the type is deleted (`detachType`).
+   * L44). Only a type's link from the type is deleted (`detachType`).
    */
   async removeType(brainId: string, thoughtId: string): Promise<boolean> {
     const { typeId } = await this.get(brainId, thoughtId);

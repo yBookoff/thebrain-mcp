@@ -4260,7 +4260,7 @@ suite("resource layer against the live API", () => {
   /**
    * A type on a type, a tag on a tag, and a type and a tag on each other: the
    * link each makes, what each end's graph lists, and what takes it apart.
-   * Measured on 15.0.640 (docs/api-map.md, L40), 5 of 5 for each way of
+   * Measured on 15.0.640 (docs/api-map.md, L44), 5 of 5 for each way of
    * making one. Raw where the client refuses the request now.
    */
   describe("a type on a type, a tag on a tag, and the two on each other", () => {

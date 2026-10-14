@@ -339,7 +339,7 @@ describe("a thought's kind in what the read tools print", () => {
     });
 
     // What is above a thought by a link that is no parent's: the API lists it
-    // among the parents as well (docs/api-map.md, L40).
+    // among the parents as well (docs/api-map.md, L44).
     const SECOND = "cdcdcdcd-0000-4000-8000-00000000000c";
     /** The link from `above` down to THOUGHT, as a graph lists it. */
     const from = (above: string, meaning: number) => ({

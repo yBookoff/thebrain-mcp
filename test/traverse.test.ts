@@ -125,7 +125,7 @@ describe("a graph that fails to read during a walk", () => {
 describe("what is above a thought by a link that is no parent's", () => {
   // A graph as the live API sends it: an upper tag (meaning 7), a type's
   // type (3) and the second type of a thought made with two (2) stand among
-  // the parents as well (docs/api-map.md, L40). Through the real `getGraph`.
+  // the parents as well (docs/api-map.md, L44). Through the real `getGraph`.
   const ID = (n: number): string => `0000000${n}-0000-4000-8000-00000000000${n}`;
   const [LOWER, UPPER, TYPE, SECOND, ABOVE] = [1, 2, 3, 4, 5].map(ID) as [
     string,
