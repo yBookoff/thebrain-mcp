@@ -59,9 +59,18 @@ export class AttachmentsResource {
    * The check reads twice, because neither read is enough alone. `byLocation`
    * finds an attachment the moment it is created, but takes `Example.com` and
    * `example.com` for two addresses. The thought's own list can be compared
-   * with the host case set aside (`urlKey`), but shows a new attachment only
-   * about 0.1 s later. Lower-casing the host before the lookup would not do
-   * instead: the copy already stored may be the one in capitals.
+   * with the host case set aside (`urlKey`), but it is a copy: made when a
+   * thought's attachments are first read, so that read is live, and brought
+   * up to date about every 0.1 s after that. Behind, it lacked a new
+   * attachment for 7 to 214 ms (contract test; docs/api-map.md, L17).
+   * Lower-casing the host before the lookup would not do instead: the copy
+   * already stored may be the one in capitals.
+   *
+   * Nothing here waits for that copy, so no figure is relied on. Not guarded
+   * for the same reason: the same address in another host case, attached
+   * straight after the first, is found by neither read and attached a second
+   * time (17 of 20; 1 of 10 at 0.3 s). A repeat in the same spelling is
+   * caught at once.
    */
   async attachUrl(
     brainId: string,

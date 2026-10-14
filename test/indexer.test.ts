@@ -56,7 +56,14 @@ interface FakeThought {
   id: string;
   name: string;
   kind?: number;
-  label?: string;
+  /**
+   * Left out, a type reads with its name for a label and anything else with
+   * none, as the API has it for a thought nobody gave one (docs/api-map.md,
+   * L38). The API does not move that label when the type is renamed: a
+   * fixture for a renamed type says which name it had. `null` is a type
+   * whose label was removed.
+   */
+  label?: string | null;
   typeName?: string;
   /** A type that is a thought of this fake brain, so renaming it shows here. */
   typeId?: string;
@@ -185,6 +192,9 @@ function fakeApi(
     name: thoughts.get(id)?.name ?? null,
     kind: thoughts.get(id)?.kind ?? 1,
   });
+  /** The label a thought reads with: its own, or its name while it is a type that was given none. */
+  const labelOf = (t: FakeThought): string | null =>
+    t.label !== undefined ? t.label : (t.kind ?? 1) === 2 ? t.name : null;
   const api = {
     brains: {
       async get(brainId: string) {
@@ -211,7 +221,7 @@ function fakeApi(
             path: `/api/thoughts/${brainId}/${id}`,
           });
         }
-        return { id: t.id, name: t.name, kind: t.kind ?? 1, label: t.label ?? null };
+        return { id: t.id, name: t.name, kind: t.kind ?? 1, label: labelOf(t) };
       },
       async getGraph(brainId: string, id: string) {
         calls.graph += 1;
@@ -230,7 +240,7 @@ function fakeApi(
             id: t.id,
             name: t.name,
             kind: t.kind ?? 1,
-            label: t.label ?? null,
+            label: labelOf(t),
             ...(t.aliases !== undefined ? { aliases: t.aliases } : {}),
           },
           parents: (t.parents ?? []).map(ref),
@@ -912,9 +922,19 @@ describe("incremental sync", () => {
     });
 
     it.each([
-      { what: "tag", kind: 4, carry: { tags: ["x"] }, line: "tags: datasets" },
-      { what: "type", kind: 2, carry: { typeId: "x" }, line: "type: datasets" },
-    ])("renaming a $what re-embeds every thought that carries it", async ({ kind, carry, line }) => {
+      // A tag has no label unless it was given one, renamed or not.
+      { what: "tag", kind: 4, carry: { tags: ["x"] }, line: "tags: datasets", own: "datasets" },
+      // A type has the name it became a type under for a label, and the API
+      // leaves that where it was when the type is renamed (contract test;
+      // docs/api-map.md, L38): the old name is a line of its document.
+      {
+        what: "type",
+        kind: 2,
+        carry: { typeId: "x" },
+        line: "type: datasets",
+        own: "datasets\ndata",
+      },
+    ])("renaming a $what re-embeds every thought that carries it", async ({ kind, carry, line, own }) => {
       const thoughts = new Map<string, FakeThought>([
         ["x", { id: "x", name: "data", kind, children: ["a", "b"] }],
         ["a", { id: "a", name: "vector databases", ...carry }],
@@ -924,20 +944,65 @@ describe("incremental sync", () => {
       const { logs, calls, store, embedder, indexer } = await indexed(thoughts);
       const graphBefore = calls.graph;
       const embeddedBefore = embedder.documents.length;
+      // Before the rename the type's label is its name, and a tag has none.
+      expect(embedder.documents).toContain(kind === 2 ? "data\ndata" : "data");
 
-      thoughts.set("x", { id: "x", name: "datasets", kind, children: ["a", "b"] });
-      // The only entry: the log does not name the thoughts that carry it.
+      thoughts.set("x", {
+        id: "x",
+        name: "datasets",
+        kind,
+        children: ["a", "b"],
+        // As the API reads a type after a rename: under the name it had.
+        ...(kind === 2 ? { label: "data" } : {}),
+      });
+      // The only entry: the log does not name the thoughts that carry it,
+      // and has no 202 for the label, which did not change.
       logs.push(log("x", 103, LATER));
       const result = await indexer.sync(BRAIN);
 
       expect(result.indexed).toBe(3);
-      expect(embedder.documents.slice(embeddedBefore).sort()).toEqual([
-        "datasets",
-        `vector databases\n${line}`,
-        `warehouses\n${line}`,
-      ]);
+      expect(embedder.documents.slice(embeddedBefore).sort()).toEqual(
+        [own, `vector databases\n${line}`, `warehouses\n${line}`].sort(),
+      );
       // One request each, the renamed one included: its graph is reused.
       expect(calls.graphIds.slice(graphBefore).sort()).toEqual(["a", "b", "x"]);
+      store.close();
+    });
+
+    it("a renamed type keeps its old name in its document until the label is removed, and the 202 of that brings it up to date", async () => {
+      // The label is TheBrain's own, and its search finds the type by it:
+      // the document says what the API says, and `DOCUMENT_FORMAT` stays. A
+      // read cannot tell that label from a caption someone wrote, so nothing
+      // here drops it. `brain_update_thought` with `label: null` does, and
+      // logs a 202, which a sync reads.
+      const thoughts = new Map<string, FakeThought>([
+        ["t", { id: "t", name: "Tool", kind: 2, children: ["a"] }],
+        ["a", { id: "a", name: "Unity", typeId: "t" }],
+      ]);
+      const { logs, calls, store, embedder, indexer } = await indexed(thoughts);
+      expect(embedder.documents.slice().sort()).toEqual(["Tool\nTool", "Unity\ntype: Tool"]);
+
+      thoughts.set("t", { id: "t", name: "Instrument", kind: 2, label: "Tool", children: ["a"] });
+      logs.push(log("t", 103, LATER));
+      let from = embedder.documents.length;
+      await indexer.sync(BRAIN);
+      expect(embedder.documents.slice(from).sort()).toEqual([
+        "Instrument\nTool",
+        "Unity\ntype: Instrument",
+      ]);
+
+      // The label removed: null while it is a type, as the API reads it then.
+      // The 202 is the one entry this sync has to go by.
+      thoughts.set("t", { id: "t", name: "Instrument", kind: 2, label: null, children: ["a"] });
+      logs.pop();
+      logs.push(log("t", 202, LATER));
+      from = embedder.documents.length;
+      const graphs = calls.graphIds.length;
+      const result = await indexer.sync(BRAIN);
+      expect(embedder.documents.slice(from)).toEqual(["Instrument"]);
+      expect(result).toMatchObject({ indexed: 1, skipped: 0 });
+      // Nothing that carries the type is read for it: its name did not change.
+      expect(calls.graphIds.slice(graphs)).toEqual(["t"]);
       store.close();
     });
 

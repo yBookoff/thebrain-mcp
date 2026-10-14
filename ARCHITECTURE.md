@@ -84,7 +84,8 @@ that matter most:
   for HTML even on 200, and parses JSON regardless of what the header claims.
 
 `emptyOn400()` wraps the endpoints that answer 400 when a collection is empty
-(`/types`, `/tags`) — an API quirk, not a caller error.
+(`/types`, `/tags`, `/pins`) — an API quirk, not a caller error. It takes the
+sentence each of them answers for an empty list, and no other 400 (§7, item 1).
 
 **The address is found, not assumed.** A TheBrain update moved the local API
 from port 8001 to 11522, and `npx` hands every user the newest server whatever
@@ -1521,11 +1522,18 @@ deletion, and the thought and its graph read throughout.
 No request is added anywhere: each of these reads was being made. The
 descriptions say nothing of it, so `tools/list` is the size it was.
 
-**Left as they are.** `emptyOn400()` takes any 400 from `/types`, `/tags` and
-`/pins` for an empty list. The API's answer for an empty list is "Could not
-retrieve list of Types for brain …", the words of a failure, so nothing in it
-tells the two apart: with a 400 in other words put in, `brain_list_types_and_tags`
-answered "This brain has no types or tags yet". `supportsAliases()` answers
+**An empty list is told from a 400 in other words, and from no more than
+that.** `emptyOn400()` took any 400 from `/types`, `/tags` and `/pins` for an
+empty list: with a 400 in other words put in, `brain_list_types_and_tags`
+answered "This brain has no types or tags yet". It takes the three sentences
+measured for an empty list now, one for each (row L1), and passes any other
+400 on. What stays is that those sentences are the words of a failure, "Could
+not retrieve list of Types for brain …", and name no cause: a list the API
+could not read for a reason of its own, told so, would still be an empty
+list here. No such failure could be produced, so it is a limit that is
+known and not one that was seen.
+
+**Left as they are.** `supportsAliases()` answers
 yes when it cannot ask, and the write goes ahead (§7, on aliases). The read
 that waits for an alias or a type to read back takes a failure for "not yet"
 (above). `brain_recent_changes` prints the name the log kept for a thought
@@ -1663,7 +1671,9 @@ note could not be read (§4, *A read that fails inside a tool*).
 Findings from reading the spec and then testing every one of them against a live
 instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
 
-1. **`/types` and `/tags` return 400 when the list is empty.** Treat as `[]`.
+1. **`/types`, `/tags` and `/pins` return 400 when the list is empty**, each in
+   a sentence of its own that reads like a failure. Treat that sentence as
+   `[]`, and any other 400 as the error it is (row L1).
 2. **A malformed UUID in the path returns HTTP 200 with an HTML page.** Validate
    before the request; sniff the body after.
 3. **Five different error shapes** — bare JSON string, plain text,
@@ -1710,7 +1720,8 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
    what it saves (docs/api-map.md, *A note's Markdown*).
 6. **JSON Patch is not exposed.** Tools take flat fields and build the patch.
 7. **Writes are not immediately visible** — see the table below.
-8. **`SearchResultDto.brainId` comes back as zeros.** Use `sourceThought.brainId`.
+8. **`SearchResultDto.brainId` comes back as zeros** from the search within
+   one brain, and `brainName` as `null`. Use `sourceThought.brainId` (row L6).
 9. **A thought's type appears both as `type` and as a parent** in `/graph`
    responses. Filter it, or types pollute every traversal. So do the tag a tag
    carries and the second type of a thought made with two, and `getGraph()`
@@ -1894,7 +1905,10 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     order mark did not. `thoughtNameAsStored()` is the name a plan thought is
     looked for under and the name a result gives. A name of characters that
     do not show is none of this: the API stores a zero width space as it
-    stores a letter (§4, *A name that does not show*).
+    stores a letter (§4, *A name that does not show*). A link's name is
+    stored by the same rule, to the code point and to the cut, and
+    `linkNameAsStored()` follows it: it went by `trim()`, and a plan patched
+    a label that ended in a next line on every run.
 24. **A tag is made once a name, by a rule of its own, and a create says
     nothing of it.** A create with `kind: 4` under the name of a tag the
     brain has makes nothing and answers with that tag's identifier, as it
@@ -1922,6 +1936,28 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     the thought has, and `getGraph()` keeps a parent only for an ordinary link,
     with a second type in `otherTypes` (§4, *What stands above a type or a
     tag*; `docs/api-map.md`, L44).
+26. **A type is given its name for a label, and a rename leaves the label
+    where it was.** A thought with no label reads with its name for one
+    while it is a type, and with none again when it stops being one, as
+    long as the label is still its name. A rename does not move it: a
+    renamed type reads with the name it became a type under, keeps that as
+    an ordinary thought after, and is found by it in TheBrain's own search.
+    `remove` clears it. None of the giving and taking is in the log. The
+    index embeds the label as it reads (§8, *The label of a type*).
+27. **A graph lists a thought once.** A sibling that is also the thought's
+    parent, child or jump is under that list and not under `siblings`. So
+    `siblings` is not every thought that shares a parent, and nothing here
+    takes it for that (row L40).
+28. **`statistics` is exact for thoughts, links, notes and web links, and
+    behind for types and tags**: 0.04–0.9 s after one is made or deleted,
+    and 2.8–6.6 s after a burst of writes. Nothing in the server reads it;
+    the contract tests do, and wait for the two counts or leave them out
+    (row L41).
+29. **A log request with no `startTime` costs time by the length of the
+    whole log**, however few entries it asks for: 135 ms for the newest 50
+    of 170,000, and 15 ms with a `startTime` an hour back. Every reader
+    here that can name a start does (row L42, and *Reading the whole log*
+    below).
 
 ### Write visibility
 
@@ -1936,7 +1972,7 @@ Measured against a live API by polling until the result appeared:
 | clear a label or a colour → `get(id)` | up to 0.2 s |
 | delete a type's link → `get(id)` without `typeId` | 20–210 ms |
 | set a type by `PATCH` → `get(id)` | ~0.1 s, 107 ms at the most |
-| `PATCH` a link → `get(link)` | ~0.1 s, 0.2 s at the most |
+| `PATCH` a link → `get(link)` | 10–368 ms, 85–173 ms at the median of five spacings; there at the first read 12 times in 300. Behind bursts of writes to another brain up to 4.7 s, and once more than 5 s |
 | `create` with a type → `get(id)` shows it | instant |
 | the first `PATCH` after a burst of creates → `get(id)` | 0.6–0.8 s after 150, 2.6 s after 300 with a type |
 | `set note` → `get note` | ~0.2 s |
@@ -1952,7 +1988,9 @@ Measured against a live API by polling until the result appeared:
 | `attach URL` → `by-location` | instant |
 | `attach URL` → the thought's attachment list | up to 0.2 s: a copy refreshed about every 0.1 s. Live on its first read |
 | **`create` → `findByName`** | **~5.6 s** |
-| `create` → full-text search | up to 15 s (per the vendor docs); 3.8–5.3 s measured, at the next refresh of the search's index |
+| `create` → full-text search | 3.7–5.5 s, at the next refresh of the search's index (13 runs). The vendor's documentation says up to 15 s, which was not once seen |
+| a thought, a link, a note or a URL made or deleted → `statistics` | at the first read, every time measured |
+| a type or a tag made or deleted → `statistics.thoughtTypes`, `.tags` | 0.04–0.9 s on a quiet app; 2.8–6.6 s after a burst of 100 creates |
 | `delete` → `get(id)` is a 404 | 30–206 ms: the thought still reads at first, 80 times of 80 |
 | `delete` → the search and the lookup by name stop returning it | 4.5–5.2 s, at that refresh; never for about one in a hundred deleted 9 to 38 ms after a neighbour |
 | a new name, caption, alias or note → the search finds it by the new text | up to 5 s, at that refresh; by the old text, and under the old name, until then |
@@ -1969,8 +2007,10 @@ precisely because name resolution inside a batch would reliably miss.
 
 A link's `meaning` field is the discriminator: **1** ordinary, **2** type,
 **5** tag. It is read-only — `PATCH /meaning` returns 200 and silently ignores
-you, `PATCH /kind` returns 400. The server sets it, inferring from the `kind` of
-the target thought.
+you. The server sets it, inferring from the `kind` of the target thought. A
+link's own `kind` is another field and no way to its meaning: a patch of it
+takes 1, refuses 2 for a link with no `typeId` and does not keep it for one
+that has, and refuses every other number (docs/api-map.md, *Tags*).
 
 | Operation | How |
 |---|---|
@@ -2085,7 +2125,20 @@ watermark dropped the oldest of them and moved the watermark past them anyway.
 View settings (`601`) made up 45–82% of the logs measured, so the limit comes
 sooner than the size of a brain suggests.
 
-`brains.modificationPages()` pages back on `endTime` instead. What it rests on,
+**What a request costs goes by the log, not by what is asked of it.** With no
+`startTime` the API takes time by the length of the whole log: on two brains
+with 165,000 and 171,000 entries the newest 50 took 135 ms and the newest one
+45 ms, where the newest 50 from an hour back took 15 ms (row L42). The whole
+of such a log is 3.5 s in pages of 10,000. So a reader names a start wherever
+it has one: a sync its watermark, `brain_recent_changes` its `since`. A
+rebuild reads all of it, which it has to. The contract tests polled the
+newest entries with no start in some twenty places, read the whole log in
+three more and ran seven rebuilds that read it again; they read from the
+start of their own run now (§10).
+
+`brains.modificationPages()` pages back on `endTime` instead. It takes a
+`since` to stop at and an `until` to start from, so a stretch in the middle of
+a long log is read at the cost of that stretch. What it rests on,
 measured on a live TheBrain 15, each point with a contract test:
 
 | Question | Answer |
@@ -3022,6 +3075,35 @@ and the watermark's overlap covers it the same way.
 and prints the line only when there is one: the row is neither encoded nor
 unchanged, which is what it used to be reported as.
 
+**The label of a type.** The label a type reads with while nobody has given
+it one is not its name of the moment. TheBrain writes the name there when
+the thought becomes a type and does not move it when the type is renamed
+(row L38): the document of a type nobody renamed is its name twice, and of a
+renamed one `new name\nold name`. The old name therefore stays in the vector
+of a renamed type. It is left there, and `DOCUMENT_FORMAT` stays at 3:
+
+- **It is what TheBrain has.** The label is stored, it outlives the kind,
+  and TheBrain's own search returns the type for the old name. An index that
+  dropped it would say less of a type than the app does.
+- **A read cannot tell it from a caption.** A label someone wrote on a type
+  reads the same way, and that one belongs in the document. Only the log
+  tells them apart, by a `202` that is not there, and a thought's log is its
+  newest entries. The server does not guess: the judgement is the
+  caller's (invariant 6).
+- **Dropping it costs every user a rebuild.** It changes the document of
+  every type, which takes a new format. An index of another format is
+  reported as unusable: `brain_search` answers from TheBrain's own search,
+  and says why, until `brain_index` with `action=rebuild` has run, about a
+  minute for 10,000 thoughts. That is the price of a line in rows a search
+  returns only with `includeAuxiliary`.
+
+What takes the old name out is the label's removal, `label: null` through
+`brain_update_thought`: the `202` it logs is among the entries a sync reads,
+and the row is the new name alone after it. No tool prints a thought's
+label, so nothing shows a caller that a type has one to remove. Should the
+format change for another reason, whether a type's label equal to a name it
+no longer has belongs in the document is worth asking again then.
+
 Measured on a live 45-thought brain: first index 1.5 s, second run 0.1 s
 (everything skipped by hash), empty sync 0.1 s.
 
@@ -3081,6 +3163,46 @@ is never inferred from `app/state` — the same mistake the tools guard against,
 one this project actually made once. A second safety refuses any brain with more
 than 500 thoughts. Test thoughts are prefixed `zz-it-`; `afterAll` removes both
 this run's and leftovers from previous crashed runs.
+
+**They keep to that brain, and to their own run.** No write test searches
+another brain: `GET /api/search/accessible`, which one test sent twice a run,
+searched every brain the key opens and is gone from the suite, and what it
+showed stands in row L34 as a measurement made once. Two reads of other
+brains are left, and are the owner's to rule on: when a run of note changes
+is cut short, the log entries the other brains wrote in the seconds between
+two changes, to tell an interruption from a failure (L20), and the list of
+brains, for one home thought's identifier that is then read through the test
+brain alone. The read-only suite, which is given no brain, reads the home
+thought and the types of every brain.
+
+A test brain's log only grows, by about 2,800 entries a run, and a test must
+give the same verdict on a brain made today and on one used for a month. A
+log read is bounded by the start of the run (`newestLogs()`). An index a test
+needs for its own thoughts is filled from the test's start
+(`indexedSince()`) where the claim is not about a rebuild. The whole log is
+read only where a claim is about all of it. On the two old test brains the
+tests both versions have took 208 s where they took 247 s, and 194 s where
+they took 234 s; the new tests of this change add some 22 s. A test that looks for something
+rare in the log, an entry filed between another's creation and its filing,
+looks through the newest 250,000 entries and says so when it skips.
+
+**A sync rereads the last ten seconds, and a test's thoughts are seconds
+old.** Every sync reads the log from ten seconds before its own start, so a
+thought made just before is read again for its own `101`, whatever else the
+log says of it. With a sync that passed over every label, type, kind and
+note entry, the test of what a sync reads a thought again for passed all the
+same, and the test of a kind seen late failed only because the rebuild ahead
+of it took more than ten seconds on a long log: with an index filled in a
+second it passed too. A test about one entry puts the index past
+everything logged before the write that makes it (`caughtUp()`). The two
+tests about the ten seconds themselves do not, and fail when a sync leaves
+its watermark at its own start (2 runs of 2).
+
+**A burst is not a promise of 100 answers.** With another session at work in
+the app, one create of a burst is now and then answered with the catch-all
+403, and its thought is made all the same (4 of 4: the log had a `101` for
+every request). A test that needs a burst counts such an answer and says it
+aloud (`makeInBurst()`); it fails for what it is about.
 
 Two testing habits worth stating, because both caught real bugs:
 

@@ -61,7 +61,7 @@ import {
   ingest,
   linkFound,
 } from "../src/operations/ingest.js";
-import { indexModelId } from "../src/semantic/document.js";
+import { buildDocument, indexModelId } from "../src/semantic/document.js";
 import type { Embedder } from "../src/semantic/embedder.js";
 import {
   SemanticIndexer,
@@ -180,8 +180,11 @@ suite("resource layer against the live API", () => {
    * asks for. Measured on two brains with logs of 165,000 and 171,000
    * entries: the newest 50 took 135 ms with no bound and 15 ms from an hour
    * back, and the newest one 45 ms. A test brain's log only grows, by about
-   * 2,800 entries a run, and these reads are polled: they are what made a
-   * run on an old brain several times as long as on a new one.
+   * 2,800 entries a run, and these reads are polled. Bounded so, with the
+   * index a test fills from its own start and the truncation test reading
+   * no more than its four creates, the tests both versions have took 208 s
+   * where they took 247 s on one such brain, and 194 s where they took 234
+   * on the other.
    */
   const newestLogs = (maxLogs: number): Promise<ModificationLogDto[]> =>
     api.brains.modifications(brainId, { maxLogs, since: runStart });
@@ -254,7 +257,7 @@ suite("resource layer against the live API", () => {
     // eight sweeps of 100 to 350 deleted one after another, which is what
     // the run before this one ends with. It is asked again for five seconds
     // all the same before the run is refused. Two other counts of the same
-    // answer are seconds behind a write (L40), and what waiting costs is
+    // answer are seconds behind a write (L41), and what waiting costs is
     // five seconds for a brain that is over the limit and stays over it.
     const stats = await eventually(
       () => api.brains.statistics(brainId),
@@ -2087,6 +2090,197 @@ suite("resource layer against the live API", () => {
     }, 60_000);
   });
 
+  /**
+   * The label of a type. Measured on TheBrain 15.0.640, 2026-10-13, 5 of 5
+   * for each step (docs/api-map.md, L38). A thought with no label is given
+   * its name for one when it becomes a type, born or turned, and a label
+   * that is still its name is taken away when it stops being one. Neither is
+   * logged. Nothing else touches it: a rename does not, so a type that was
+   * renamed keeps the name it became a type under as its label, and keeps
+   * it as an ordinary thought after. It is a label like any other: `remove`
+   * clears it, and TheBrain's own search finds the type by it.
+   */
+  describe("the label a type is given", () => {
+    const { Normal, Type, Tag } = ThoughtKind;
+    const named = (word: string): string => `${PREFIX}type-label-${word}`;
+    const renamed = async (id: string, name: string): Promise<ThoughtDto> => {
+      await api.thoughts.update(brainId, id, { name });
+      return eventually(() => api.thoughts.get(brainId, id), (t) => t.name === name);
+    };
+    const turned = async (id: string, kind: number): Promise<ThoughtDto> => {
+      await api.thoughts.update(brainId, id, { kind });
+      return eventually(() => api.thoughts.get(brainId, id), (t) => t.kind === kind);
+    };
+    /** What the log has of one thought, oldest first, as `modType old→new`. */
+    const logged = async (id: string): Promise<string[]> =>
+      (await newestLogs(1000))
+        .filter((l) => l.sourceId === id)
+        .sort((x, y) => compareLogTime(logTime(x), logTime(y)))
+        .map((l) => `${l.modType} ${l.oldValue}→${l.newValue}`);
+
+    it("a type with no label of its own has the name it became a type under for one, through every rename, and as an ordinary thought after", async () => {
+      const born = await make("type-label-born", Type);
+      const made = await make("type-label-made");
+      expect((await api.thoughts.get(brainId, made)).label).toBeNull();
+      await turned(made, Type);
+
+      for (const [id, first] of [
+        [born, named("born")],
+        [made, named("made")],
+      ] as const) {
+        expect((await api.thoughts.get(brainId, id)).label, first).toBe(first);
+
+        // A rename leaves it where it was, the first time and the second.
+        expect((await renamed(id, `${first} two`)).label, first).toBe(first);
+        const third = await renamed(id, `${first} three`);
+        expect([third.label, third.cleanedUpName], first).toEqual([first, `${first} three`]);
+        // The same in the list of types, and for a thought of that type.
+        const listed = (await api.thoughts.listTypes(brainId)).find((t) => t.id === id);
+        expect([listed?.name, listed?.label], first).toEqual([`${first} three`, first]);
+        const instance = await api.thoughts.create(brainId, {
+          name: `${first} instance`,
+          typeId: id,
+        });
+        created.push(instance);
+        const graph = await eventually(
+          () => api.thoughts.getGraph(brainId, instance),
+          (g) => g.type?.id === id,
+        );
+        expect(graph.type?.label, first).toBe(first);
+        await api.links.detachType(brainId, instance, id);
+
+        // No longer its name, so it stays when the thought stops being a type...
+        expect((await turned(id, Normal)).label, first).toBe(first);
+        expect((await turned(id, Tag)).label, first).toBe(first);
+        expect((await turned(id, Type)).label, first).toBe(first);
+        // ...and goes once it is the name again.
+        expect((await renamed(id, first)).label, first).toBe(first);
+        expect((await turned(id, Normal)).label, first).toBeNull();
+        // Given again under the name the thought has now.
+        await renamed(id, `${first} four`);
+        expect((await turned(id, Type)).label, first).toBe(`${first} four`);
+      }
+
+      // None of it is in the log: no 202 beside the renames and the kinds.
+      const entries = await logged(born);
+      expect(entries.filter((e) => e.startsWith(`${ModType.LabelChanged} `))).toEqual([]);
+      expect(entries.map((e) => Number(e.split(" ")[0]))).toEqual([
+        ModType.Created,
+        ModType.NameChanged,
+        ModType.NameChanged,
+        ModType.KindChanged,
+        ModType.KindChanged,
+        ModType.KindChanged,
+        ModType.NameChanged,
+        ModType.KindChanged,
+        ModType.NameChanged,
+        ModType.KindChanged,
+      ]);
+    }, 60_000);
+
+    it("a patch of another field does not keep it, a label of the thought's own is left alone, and one removed stays away while the thought is a type", async () => {
+      // Whatever else is patched while it is a type, the label is the name
+      // and goes with the kind: it is not written by the patch.
+      const coloured = await make("type-label-coloured", Type);
+      await api.thoughts.update(brainId, coloured, { foregroundColor: "#ff7145" });
+      await eventually(() => api.thoughts.get(brainId, coloured), (t) => t.foregroundColor !== null);
+      expect((await api.thoughts.get(brainId, coloured)).label).toBe(named("coloured"));
+      expect((await turned(coloured, Normal)).label).toBeNull();
+
+      // A label it was given: through a rename and out of the kind.
+      const own = await api.thoughts.create(brainId, {
+        name: named("own"),
+        kind: Type,
+        label: "a caption",
+      });
+      created.push(own);
+      expect((await eventually(() => api.thoughts.get(brainId, own), (t) => t.label !== named("own"))).label).toBe("a caption");
+      expect((await renamed(own, named("own two"))).label).toBe("a caption");
+      expect((await turned(own, Normal)).label).toBe("a caption");
+      // The log has it as a change from the name the type was born with.
+      expect(await logged(own)).toContain(`${ModType.LabelChanged} ${named("own")}→a caption`);
+
+      // Removed, the name the type was renamed from is gone for good: null
+      // while it is a type, through a rename, and as an ordinary thought.
+      const cleared = await make("type-label-cleared", Type);
+      await renamed(cleared, named("cleared two"));
+      expect((await api.thoughts.get(brainId, cleared)).label).toBe(named("cleared"));
+      await api.thoughts.update(brainId, cleared, { label: null });
+      const gone = await eventually(() => api.thoughts.get(brainId, cleared), (t) => t.label === null);
+      expect([gone.kind, gone.label]).toEqual([Type, null]);
+      expect(await logged(cleared)).toContain(`${ModType.LabelChanged} ${named("cleared")}→null`);
+      expect((await renamed(cleared, named("cleared three"))).label).toBeNull();
+      expect((await turned(cleared, Normal)).label).toBeNull();
+      // Only the kind gives it a label again, under the name it has by then.
+      expect((await turned(cleared, Type)).label).toBe(named("cleared three"));
+
+      // A tag has none, born or renamed.
+      const tag = await make("type-label-tag", Tag);
+      expect((await api.thoughts.get(brainId, tag)).label).toBeNull();
+      expect((await renamed(tag, named("tag two"))).label).toBeNull();
+    }, 60_000);
+
+    it("the document a renamed type is embedded from holds its old name, and TheBrain's own search finds the type by it", async () => {
+      // Why the label stays in the document (ARCHITECTURE.md §8): it is what
+      // TheBrain stores for the type and finds it by, and a read cannot tell
+      // it from a caption someone wrote. `brain_update_thought` with
+      // `label: null` is what takes it away.
+      const since = new Date().toISOString();
+      const stamp = Date.now();
+      const [was, is] = [`${PREFIX}formerly${stamp}`, `${PREFIX}presently${stamp}`];
+      const id = await api.thoughts.create(brainId, { name: was, kind: Type });
+      created.push(id);
+      const plain = await api.thoughts.create(brainId, { name: `${PREFIX}plainly${stamp}` });
+      created.push(plain);
+      // Both are in the search's index before they are renamed.
+      const found = async (word: string): Promise<string[]> =>
+        (await api.search.inBrain(brainId, word, { maxResults: 10 })).map((h) => h.thought.id);
+      await eventually(() => found(`plainly${stamp}`), (ids) => ids.includes(plain), {
+        timeoutMs: 20_000,
+        stepMs: 250,
+      });
+      await renamed(id, is);
+      await renamed(plain, `${PREFIX}lately${stamp}`);
+
+      /** The document of a thought with no aliases, type, tags or note, as the indexer builds it. */
+      const documentOf = ({ id, name, kind, label }: ThoughtDto): string =>
+        buildDocument({ id, name: name ?? "", kind, label });
+      const graph = await api.thoughts.getGraph(brainId, id);
+      expect(documentOf(graph.thought)).toBe(`${is}\n${was}`);
+      const documents: string[] = [];
+      const { store } = await indexedSince(since, {
+        id: "contract@v1",
+        dimensions: 1,
+        embedDocuments: async (texts) => {
+          documents.push(...texts);
+          return texts.map(() => new Float32Array([1]));
+        },
+        embedQuery: async () => new Float32Array([1]),
+      });
+      expect(documents).toContain(`${is}\n${was}`);
+      store.close();
+
+      // Once the search has the renames, the old name of the type still
+      // finds it, by its label, and the old name of the other finds nothing.
+      await eventually(() => found(`lately${stamp}`), (ids) => ids.includes(plain), {
+        timeoutMs: 20_000,
+        stepMs: 250,
+      });
+      expect(await found(`plainly${stamp}`)).toEqual([]);
+      const hits = await api.search.inBrain(brainId, `formerly${stamp}`, { maxResults: 10 });
+      expect(hits.map((h) => [h.thought.id, h.thought.name, h.thought.label])).toEqual([[id, is, was]]);
+      expect(await found(`presently${stamp}`)).toEqual([id]);
+
+      // Cleared, the document is the name alone.
+      await api.thoughts.update(brainId, id, { label: null });
+      const cleared = await eventually(
+        () => api.thoughts.getGraph(brainId, id),
+        (g) => g.thought.label === null,
+      );
+      expect(documentOf(cleared.thought)).toBe(is);
+    }, 90_000);
+  });
+
   it("the log returns the newest entries first and truncates at maxLogs", async () => {
     // brain_recent_changes filters out settings before applying its limit
     // because of this: the newest entries can all be settings.
@@ -2808,6 +3002,80 @@ suite("resource layer against the live API", () => {
     );
     expect(counted(stats)).toEqual([normal, types]);
   }, 120_000);
+
+  it("statistics counts a thought, a link, a note and a web link at the first read after the write, and types and tags from a copy that is behind", async () => {
+    // Measured on TheBrain 15.0.640, 2026-10-13. `thoughts` was right at the
+    // first read after 19 creates and 19 deletes one at a time, after eight
+    // bursts of 30 and of 100 creates sent at once, and after eight sweeps
+    // of 100 to 350 deletes; `links`, `notes` and `webLinks` 10 times of 10
+    // each. `thoughtTypes` and `tags` are another matter: after one type or
+    // tag made or deleted the first read was wrong 38 times in 52 and right
+    // 0.04 to 0.9 s later; a type and a tag made straight after a burst of
+    // 100 creates were counted 2.8 to 6.6 s later (5 of 5), and deleted at
+    // the end of a sweep they were still counted at the first read 4 times
+    // in 5, for up to 2.2 s.
+    type Counts = { thoughts: number; links: number; notes: number; webLinks: number };
+    const now = async (): Promise<Counts> => {
+      const { thoughts, links, notes, webLinks } = await api.brains.statistics(brainId);
+      return { thoughts, links, notes, webLinks };
+    };
+    const kinds = async (): Promise<number[]> => {
+      const s = await api.brains.statistics(brainId);
+      return [s.thoughtTypes, s.tags];
+    };
+    // What the two lagging counts settle at, before anything is added here.
+    let was = await kinds();
+    for (let same = 0; same < 3; ) {
+      await settle(700);
+      const next = await kinds();
+      same = next.join() === was.join() ? same + 1 : 0;
+      was = next;
+    }
+    const base = await now();
+
+    const a = await make("stats-a");
+    expect(await now()).toEqual({ ...base, thoughts: base.thoughts + 1 });
+    const b = await make("stats-b");
+    const link = await api.links.create(brainId, {
+      thoughtIdA: a,
+      thoughtIdB: b,
+      relation: Relation.Jump,
+    });
+    expect(await now()).toEqual({ ...base, thoughts: base.thoughts + 2, links: base.links + 1 });
+    await api.notes.set(brainId, a, "counted");
+    await api.attachments.attachUrl(brainId, a, `https://example.com/${PREFIX}stats-${Date.now()}`, {
+      name: `${PREFIX}stats`,
+    });
+    const full = {
+      thoughts: base.thoughts + 2,
+      links: base.links + 1,
+      notes: base.notes + 1,
+      webLinks: base.webLinks + 1,
+    };
+    expect(await now()).toEqual(full);
+
+    // A type and a tag are no thoughts to it, and are counted in time.
+    const typeId = await make("stats-type", ThoughtKind.Type);
+    const tagId = await make("stats-tag", ThoughtKind.Tag);
+    expect(await now()).toEqual(full);
+    const both = [was[0]! + 1, was[1]! + 1];
+    expect(
+      await eventually(kinds, (k) => k.join() === both.join(), { timeoutMs: 20_000, stepMs: 100 }),
+    ).toEqual(both);
+
+    // Deleted, each is gone from its count at the first read as well.
+    await api.links.delete(brainId, link);
+    expect(await now()).toEqual({ ...full, links: base.links });
+    await api.thoughts.delete(brainId, b);
+    expect(await now()).toEqual({ ...full, links: base.links, thoughts: base.thoughts + 1 });
+    await settle(350);
+    await api.thoughts.delete(brainId, typeId);
+    await settle(350);
+    await api.thoughts.delete(brainId, tagId);
+    expect(
+      await eventually(kinds, (k) => k.join() === was.join(), { timeoutMs: 20_000, stepMs: 100 }),
+    ).toEqual(was);
+  }, 90_000);
 
   it("a link between thoughts is created and found", async () => {
     const a = await make("link-A");
@@ -3925,6 +4193,12 @@ suite("resource layer against the live API", () => {
    * thought deleted within some tens of milliseconds of a neighbour stayed in
    * that index for good about once in a hundred (7 of 720), and such hits
    * were still returned seventeen hours later.
+   *
+   * Nor is `GET /api/search/accessible`, which one of these tests used to
+   * send twice a run. It searches every brain the key opens, and these tests
+   * keep to the one brain they are given. What it showed when it was
+   * measured, on 2026-10-11, stands in L34 as a measurement made once: it
+   * returned a new thought, and did not return a deleted one.
    */
   describe("a thought the search still returns after it is deleted or changed", () => {
     const hitsFor = (queryText: string): Promise<SearchResultDto[]> =>
@@ -3988,9 +4262,15 @@ suite("resource layer against the live API", () => {
           stepMs: 50,
         });
         expect(hit, "the search never returned the new thought").not.toBeNull();
+        // A hit of the search within one brain names no brain at its root:
+        // zeros and no name, with the brain in the thought (L6).
+        expect(hit).toMatchObject({
+          brainId: "00000000-0000-0000-0000-000000000000",
+          brainName: null,
+          isFromOtherBrain: false,
+          sourceThought: { id, brainId },
+        });
         expect((await lookedUp(name))?.id).toBe(id);
-        const everywhere = await api.search.accessible(word, { maxResults: 10 });
-        expect(everywhere.map((h) => h.thought.id)).toContain(id);
 
         await api.thoughts.delete(brainId, id);
         // The thought itself reads for a moment more: 30 to 206 ms, 80 times of 80.
@@ -4004,7 +4284,6 @@ suite("resource layer against the live API", () => {
         const byName = await lookedUp(name);
         const found = await api.thoughts.findByName(brainId, name);
         const outcome = await fallback().find(brainId, word);
-        const acrossBrains = await api.search.accessible(word, { maxResults: 10 });
         const after = await hitFor(word, id);
         if (before === null || after === null) return false;
 
@@ -4015,8 +4294,6 @@ suite("resource layer against the live API", () => {
         expect(after).toEqual(hit);
         expect(byName?.id).toBe(id);
         expect(await reads(id)).toBe("not_found");
-        // The search across every brain does not return it.
-        expect(acrossBrains.map((h) => h.thought.id)).not.toContain(id);
         // What the layers above make of it: no thought of that name, and a
         // hit left out and counted.
         expect(found).toBeNull();
@@ -7467,6 +7744,74 @@ suite("resource layer against the live API", () => {
       ]);
     }, 30_000);
 
+    it("a link's kind is not what it means: only 1 is taken as it stands, 2 asks for a typeId and is not kept, and meaning stays", async () => {
+      // `PATCH /kind` on a link, which is not the `kind` of a thought (L31):
+      // a link's says whether it is a link or a link type, and what a link
+      // is between two thoughts is its `meaning`, which no patch sets.
+      // Measured on 15.0.640, 3 of 3 for each answer on a jump, a child's
+      // link, a type's and a tag's, each patch sent to a link of its own.
+      const ZEROS = "00000000-0000-0000-0000-000000000000";
+      const kind = (value: unknown): Op => ({ op: "replace", path: "/kind", value });
+      const jump = (await linked("link-kind")).id;
+      const tagId = await make("link-kind-tag", ThoughtKind.Tag);
+      const tagLink = await api.links.attachTag(brainId, await make("link-kind-tagged"), tagId);
+
+      for (const [id, meaning] of [
+        [jump, LinkMeaning.Normal],
+        [tagLink, LinkMeaning.Tag],
+      ] as const) {
+        const fresh = await read(id, (l) => l.meaning === meaning);
+        expect([fresh.kind, fresh.meaning, fresh.typeId]).toEqual([1, meaning, null]);
+
+        const refused = async (op: Op): Promise<string> => {
+          const e = await refusal(id, op);
+          return e === null ? "accepted" : `${e.status} ${e.kind}: ${e.message}`;
+        };
+        for (const value of [-1, 0, 3, 4, 5, 6, 99]) {
+          expect(await refused(kind(value)), `kind ${value}`).toBe(
+            "400 bad_request: Invalid 'kind' specified.",
+          );
+        }
+        // A link with no typeId: the number and the number as a string alike.
+        for (const value of [2, "2"]) {
+          expect(await refused(kind(value)), `kind ${JSON.stringify(value)}`).toBe(
+            "400 bad_request: Link 'typeId' must be specified if setting 'kind' to '2'.",
+          );
+        }
+        // The catch-all 403 for what is no whole number.
+        for (const value of [null, 1.5, "tag", true]) {
+          expect((await refusal(id, kind(value)))?.kind, `kind ${JSON.stringify(value)}`).toBe(
+            "forbidden",
+          );
+        }
+        for (const op of [{ op: "remove", path: "/kind" }, { ...kind(1), op: "add" }] as Op[]) {
+          expect(await refused(op), op.op).toBe(
+            "400 bad_request: Only 'replace' operations are allowed for 'kind' path.",
+          );
+        }
+        // `meaning` is accepted and ignored, whatever is sent.
+        for (const value of [1, 2, 5, 7]) {
+          expect(await refused({ op: "replace", path: "/meaning", value }), `meaning ${value}`).toBe(
+            "accepted",
+          );
+        }
+        await settle(500);
+        expect(await api.links.get(brainId, id)).toEqual(fresh);
+
+        // 1 is accepted, and writes after all: the link reads a typeId of
+        // zeros from then on, where it had none.
+        expect(await refused(kind(1))).toBe("accepted");
+        const one = await read(id, (l) => l.typeId !== null);
+        expect([one.kind, one.meaning, one.typeId]).toEqual([1, meaning, ZEROS]);
+        // With a typeId, zeros for one, 2 is accepted. The link reads kind 2
+        // at once and kind 1 again 22 to 344 ms later (18 of 18): not kept.
+        expect(await refused(kind(2))).toBe("accepted");
+        await settle(800);
+        const two = await api.links.get(brainId, id);
+        expect([two.kind, two.meaning]).toEqual([1, meaning]);
+      }
+    }, 60_000);
+
     it("a read straight after a link is patched can still return the old value", async () => {
       // The read of a link by its identifier is behind a patch of it, as a
       // graph is behind a create: of 300 patches of a name, 60 each of five
@@ -7759,6 +8104,66 @@ suite("resource layer against the live API", () => {
       expect(unasked.siblings).toBeNull();
       expect(ids(unasked.parents ?? [])).toEqual([parent]);
     });
+
+    it("a sibling that is also the thought's parent, child or jump is listed there, and not among its siblings", async () => {
+      // A graph lists a thought once. Measured 10 of 10 for each line below
+      // (docs/api-map.md, L40): of four thoughts under one parent beside the
+      // active one, the one it jumps to, the one that jumps to it and the
+      // one that is its child as well are under `jumps` and `children`, and
+      // `siblings` is left with the fourth. `brain_get_thought` prints the
+      // lists as they come, so nothing is lost: it stands under the other.
+      const parent = await make("sibs-once-parent");
+      const active = await under("sibs-once-active", parent);
+      const jumpedTo = await under("sibs-once-jumped-to", parent);
+      const jumpsHere = await under("sibs-once-jumps-here", parent);
+      const childToo = await under("sibs-once-child-too", parent);
+      const plain = await under("sibs-once-plain", parent);
+      const link = (thoughtIdA: string, thoughtIdB: string, relation: Relation): Promise<string> =>
+        api.links.create(brainId, { thoughtIdA, thoughtIdB, relation });
+      const jump = await link(active, jumpedTo, Relation.Jump);
+      await link(jumpsHere, active, Relation.Jump);
+      await link(active, childToo, Relation.Child);
+
+      const around = (id: string): Promise<CleanGraph> =>
+        api.thoughts.getGraph(brainId, id, { includeSiblings: true });
+      const lists = (g: CleanGraph): Record<string, string[]> => ({
+        parents: ids(g.parents).sort(),
+        children: ids(g.children).sort(),
+        jumps: ids(g.jumps).sort(),
+        siblings: ids(g.siblings).sort(),
+      });
+      const graph = await eventually(
+        () => around(active),
+        (g) => g.jumps.length === 2 && g.children.length === 1,
+      );
+      expect(lists(graph)).toEqual({
+        parents: [parent],
+        children: [childToo],
+        jumps: [jumpedTo, jumpsHere].sort(),
+        siblings: [plain],
+      });
+      // From the other side of each: the active thought is under the list
+      // its link puts it in, and the other three are siblings still.
+      const fromChild = await eventually(() => around(childToo), (g) => g.parents.length === 2);
+      expect(lists(fromChild)).toEqual({
+        parents: [parent, active].sort(),
+        children: [],
+        jumps: [],
+        siblings: [jumpedTo, jumpsHere, plain].sort(),
+      });
+      const fromJump = await eventually(() => around(jumpedTo), (g) => g.jumps.length === 1);
+      expect(lists(fromJump)).toEqual({
+        parents: [parent],
+        children: [],
+        jumps: [active],
+        siblings: [jumpsHere, childToo, plain].sort(),
+      });
+
+      // With the jump gone, the thought is a sibling again.
+      await api.links.delete(brainId, jump);
+      const after = await eventually(() => around(active), (g) => g.jumps.length === 1);
+      expect(lists(after).siblings).toEqual([jumpedTo, plain].sort());
+    }, 30_000);
 
     it("create refuses a relation that is none of the three, and ingest a plan that names one, before anything is written", async () => {
       const source = await make("sib-refused-source");

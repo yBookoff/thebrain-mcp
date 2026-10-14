@@ -53,6 +53,20 @@ export function indexModelId(embedderId: string): string {
  * The name comes first deliberately: with mean pooling this pulls the vector
  * towards the thought's title rather than its note. Aliases follow it
  * unprefixed, because they are other titles for the same thought.
+ *
+ * The label goes in as the API reads it, a type's included. TheBrain gives a
+ * thought with no label its name for one when it becomes a type, and leaves
+ * that label where it was when the type is renamed: a type nobody renamed
+ * has its name twice here, and a renamed one its old name on the second line
+ * (contract test; docs/api-map.md, L38). That line is kept, on three counts.
+ * It is TheBrain's own label, and its search finds the type by it. A read
+ * cannot tell it from a caption someone wrote on the type, which belongs
+ * in the document. And leaving it out would change the document of
+ * every type, which takes a new `DOCUMENT_FORMAT` and a rebuild of every
+ * index, for rows a search leaves out unless it is asked for types.
+ * Removing the label, `label: null` through `brain_update_thought`, takes
+ * the line away, and the `202` it logs brings the row up to date at the next
+ * sync.
  */
 export function buildDocument(thought: IndexableThought): string {
   const parts: string[] = [thought.name];

@@ -10,6 +10,7 @@ import {
   buildDocument,
   documentHash,
   excerpt,
+  indexModelId,
 } from "../src/semantic/document.js";
 
 /**
@@ -227,6 +228,21 @@ describe("building the text to embed", () => {
       "Retrieval-augmented generation, генерация с дополненной выборкой",
       "pattern",
     ]);
+  });
+
+  it("a label is a line of the document as the API reads it, a type's included", () => {
+    // A type nobody gave a label reads with its name for one, and after a
+    // rename with the name it had (contract test; docs/api-map.md, L38). The
+    // document keeps both as they come: it is TheBrain's label, its search
+    // finds the type by it, and no read tells it from a caption. Dropping it
+    // would be a new DOCUMENT_FORMAT, and every index built again.
+    expect(buildDocument({ id: "1", name: "Tool", kind: 2, label: "Tool" })).toBe("Tool\nTool");
+    expect(buildDocument({ id: "1", name: "Instrument", kind: 2, label: "Tool" })).toBe(
+      "Instrument\nTool",
+    );
+    // Removed, which is what takes the old name out, it leaves the name alone.
+    expect(buildDocument({ id: "1", name: "Instrument", kind: 2, label: null })).toBe("Instrument");
+    expect(indexModelId("e5")).toBe("e5#doc3");
   });
 
   it("the name comes first — it is the strongest signal", () => {

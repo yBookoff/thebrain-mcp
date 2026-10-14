@@ -4,8 +4,13 @@ import type { SearchResultDto, ThoughtDto } from "../types.js";
 
 export interface SearchHit {
   thought: ThoughtDto;
-  /** The real brain: the field at the result root arrives as all zeroes. */
+  /**
+   * The brain the thought is in, taken from the thought. A hit of the search
+   * within one brain has zeros for `brainId` at its root and no `brainName`
+   * (contract test; docs/api-map.md, L6).
+   */
   brainId: string;
+  /** Null from the search within one brain: the API sends none there. */
   brainName: string | null;
   isFromOtherBrain: boolean;
   matchedOn: string | null;
@@ -15,7 +20,10 @@ export interface SearchHit {
  * TheBrain's own search.
  *
  * Two properties confirmed against the live API:
- *  - the index lags by up to 15 seconds, so freshly created content is missing;
+ *  - the index lags, so freshly created content is missing: a new thought
+ *    was first returned 3.7 to 5.5 s after its create, at the index's next
+ *    refresh. The vendor's documentation says up to 15 seconds, which was
+ *    not once seen;
  *  - matching is prefix-based, not semantic: `OT` finds `OTGP`, but a typo or
  *    a synonym returns nothing.
  *
@@ -31,7 +39,10 @@ export interface SearchHit {
  * hit; `SemanticSearch` does.
  *
  * `accessible` did not return a deleted thought past the moment its own read
- * turned 404, nor any of thirteen such leftovers.
+ * turned 404, nor any of thirteen such leftovers. That was measured once, on
+ * 2026-10-11, and no test repeats it: the request searches every brain the
+ * key opens, and the contract tests keep to the one brain they are given.
+ * Nothing in this server calls `accessible`.
  */
 export class SearchResource {
   constructor(private readonly client: TheBrainClient) {}
