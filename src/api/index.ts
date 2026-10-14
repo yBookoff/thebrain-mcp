@@ -79,6 +79,8 @@ export {
   type UpdateThoughtInput,
 } from "./resources/thoughts.js";
 export {
+  isAttachmentOf,
+  isJoinedMoreThanOnce,
   isStructuralLink,
   isTagLink,
   isTypeLink,

@@ -292,7 +292,7 @@ export class LinksResource {
    */
   async hasTag(brainId: string, thoughtId: string, tagThoughtId: string): Promise<boolean> {
     const link = await this.between(brainId, thoughtId, tagThoughtId);
-    return link !== null && isTagLink(link) && sameId(link.thoughtIdA, tagThoughtId);
+    return link !== null && isAttachmentOf(link, tagThoughtId);
   }
 
   /**
@@ -310,11 +310,37 @@ export class LinksResource {
     tagThoughtId: string,
   ): Promise<boolean> {
     const link = await this.between(brainId, thoughtId, tagThoughtId);
-    if (link === null || !isTagLink(link) || !sameId(link.thoughtIdA, tagThoughtId)) {
-      return false;
+    if (link === null || !isAttachmentOf(link, tagThoughtId)) return false;
+    await this.detachTagLink(brainId, thoughtId, tagThoughtId, link);
+    return true;
+  }
+
+  /**
+   * Deletes one attachment of a tag to a thought: `link`, as the lookup or
+   * the thought's graph gave it. Any other link is refused with nothing sent:
+   * one that is not the tag's, with the tag at its head, or that joins other
+   * thoughts.
+   *
+   * A tag attached twice is two such links, which the lookup `detachTag`
+   * goes by has neither of (L43): a caller takes them from the thought's
+   * graph, through `linksOfPair`, and deletes each here.
+   */
+  async detachTagLink(
+    brainId: string,
+    thoughtId: string,
+    tagThoughtId: string,
+    link: LinkDto,
+  ): Promise<void> {
+    assertUuid(brainId, "brainId");
+    assertUuid(link.id, "linkId");
+    if (!isAttachmentOf(link, tagThoughtId) || !sameId(link.thoughtIdB, thoughtId)) {
+      throw new TheBrainError(
+        "bad_request",
+        `link ${link.id} is not an attachment of the tag ${tagThoughtId} to ${thoughtId}, ` +
+          "and was not removed",
+      );
     }
     await this.#remove(brainId, link.id);
-    return true;
   }
 
   /**
@@ -346,6 +372,30 @@ export class LinksResource {
  */
 export function isTagLink(link: LinkDto): boolean {
   return link.meaning === LinkMeaning.Tag || link.meaning === LinkMeaning.SubTag;
+}
+
+/**
+ * The attachment of `tagThoughtId` to the thought at the other end: a tag's
+ * link with that tag at its head. Not a link of the pair that is anything
+ * else, and not the tag's own tag (meaning 7, the other way round).
+ */
+export function isAttachmentOf(link: LinkDto, tagThoughtId: string): boolean {
+  return isTagLink(link) && sameId(link.thoughtIdA, tagThoughtId);
+}
+
+/**
+ * The 400 a post between two thoughts is answered with when they are joined
+ * by more than one link already, whatever it asks for and from either end:
+ * `"Link could not be created."`, which names nothing (L43). A tag attached
+ * twice is such a pair, and attached again it is this answer, with nothing
+ * made.
+ */
+export function isJoinedMoreThanOnce(error: unknown): boolean {
+  return (
+    error instanceof TheBrainError &&
+    error.kind === "bad_request" &&
+    /^link could not be created\.?$/i.test(error.message.trim())
+  );
 }
 
 /**

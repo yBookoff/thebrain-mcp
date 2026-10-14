@@ -16,6 +16,8 @@ import {
   READ_LAG,
   TheBrainError,
   assertUuid,
+  isAttachmentOf,
+  isJoinedMoreThanOnce,
   isStructuralLink,
   isTagLink,
   isTypeLink,
@@ -807,27 +809,89 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       for (const tagId of [...(add ?? []), ...(remove ?? [])]) {
         await ctx.api.links.requireTag(bid, tagId, thoughtId);
       }
-      // "Was not on the thought" is an answer about a thought that is there.
-      // The lookup behind a removal is a 404 for a thought nobody has as for
-      // a tag that is not on one, and the first used to get that answer too.
-      // So the thought is read before it is given, once a call: a removal
-      // that finds its tag costs nothing more.
-      let read: Promise<unknown> | undefined;
-      const thoughtIsThere = (): Promise<unknown> =>
-        (read ??= ctx.api.thoughts.get(bid, thoughtId));
+      const ends: Ends = { from: thoughtId, to: "", fromName: "the thought", toName: "the tag" };
+      /**
+       * The tag's attachments to the thought: those of the pair's links, by
+       * `linksOfPair`, and those its graph lists, which may be behind.
+       */
+      const attachments = async (
+        tagId: string,
+        lookup: LinkDto | null,
+      ): Promise<{ found: LinkDto[]; listed: LinkDto[] }> => {
+        const links = (await graphOf(ctx, bid, thoughtId)).links;
+        const own = (l: LinkDto): boolean =>
+          isAttachmentOf(l, tagId) && sameThought(l.thoughtIdB, thoughtId);
+        return {
+          found: linksOfPair(thoughtId, tagId, links, lookup).filter(own),
+          listed: links.filter(own),
+        };
+      };
       const steps: Step[] = [
         ...(add ?? []).map((tagId) => ({
           what: `attach ${tagId}`,
           run: async () => {
-            await ctx.api.links.attachTag(bid, thoughtId, tagId);
-            return [`attached ${tagId}`];
+            // Attached again, a tag is a 200 that changes nothing and logs a
+            // `402` (L35); it was sent every time.
+            const there = await ctx.api.links.between(bid, thoughtId, tagId);
+            if (there !== null && isAttachmentOf(there, tagId)) {
+              return [`tag ${tagId} was on the thought already`];
+            }
+            // Two thoughts share one link, and the attach is posted over the
+            // one there: a jump or a parent link became the tag's attachment
+            // under its identifier, and was gone as what it had been (L23).
+            if (there !== null) {
+              throw new Error(
+                `the thought and the tag ${tagId} are joined by a link, ${there.id}: ` +
+                  `${linkKind(there, { ...ends, to: tagId })}${labelOf(there)}. Two thoughts ` +
+                  "share one link, and attaching the tag would turn that one into the tag's " +
+                  "attachment: what it is now would be gone. Nothing was sent for this tag. To " +
+                  "tag the thought, remove that link first with brain_unlink.",
+              );
+            }
+            try {
+              await ctx.api.links.attachTag(bid, thoughtId, tagId);
+              return [`attached ${tagId}`];
+            } catch (error) {
+              // A 404 to the lookup is no link, or more than one the same way,
+              // which is what two attaches at once leave (L43): then the post
+              // is refused, and the graph tells which.
+              if (!isJoinedMoreThanOnce(error)) throw error;
+              const twice = (await attachments(tagId, null)).found;
+              if (twice.length === 0) throw error;
+              return [
+                `tag ${tagId} was on the thought already, attached ${twice.length} times, and ` +
+                  "TheBrain posts nothing between two thoughts joined more than once, so " +
+                  `nothing changed: ${twice.map((l) => `${l.id}${labelOf(l)}`).join(", ")}. ` +
+                  "brain_tag remove takes every attachment off, and add then attaches it once.",
+              ];
+            }
           },
         })),
         ...(remove ?? []).map((tagId) => ({
           what: `remove ${tagId}`,
           run: async () => {
-            if (await ctx.api.links.detachTag(bid, thoughtId, tagId)) return [`removed ${tagId}`];
-            await thoughtIsThere();
+            const lookup = await ctx.api.links.between(bid, thoughtId, tagId);
+            if (lookup !== null && isAttachmentOf(lookup, tagId)) {
+              await ctx.api.links.detachTagLink(bid, thoughtId, tagId, lookup);
+              return [`removed ${tagId}`];
+            }
+            // A 404 is no link, and a tag attached twice as well (L43); and
+            // "was not on the thought" is an answer about a thought that is
+            // there, which the graph's read tells too. It used to be given
+            // for a tag the graph listed twice.
+            const { found, listed } = await attachments(tagId, lookup);
+            if (found.length > 0) return removeAttachments(ctx, bid, thoughtId, tagId, found);
+            // One listed and none looked up is one removed a moment ago, or
+            // one of two the graph does not list both of yet (L27, L43).
+            if (listed.length > 0) {
+              throw new Error(
+                `TheBrain's lookup has no attachment of the tag ${tagId} to the thought, and ` +
+                  `the thought's graph lists one, ${listed[0]!.id}: it was removed a moment ago, ` +
+                  "or the tag is attached more than once, which the lookup cannot see and the " +
+                  "graph does not list all of yet. Nothing was removed for this tag. Send it " +
+                  "again in a moment.",
+              );
+            }
             return [`tag ${tagId} was not on the thought`];
           },
         })),
@@ -1319,6 +1383,73 @@ function notReplaced(link: LinkDto, ends: Ends): string {
   );
 }
 
+/**
+ * A thought's graph, where a thought nobody has is the 404 of its own read:
+ * its graph is the catch-all 403, which names no cause (L3).
+ */
+async function graphOf(ctx: ServerContext, brainId: string, thoughtId: string): Promise<CleanGraph> {
+  try {
+    return await ctx.api.thoughts.getGraph(brainId, thoughtId);
+  } catch (error) {
+    if (error instanceof TheBrainError && error.kind === "forbidden") {
+      await ctx.api.thoughts.get(brainId, thoughtId);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Takes a tag off a thought by each of its attachments `found` lists, and by
+ * nothing else: a tag attached more than once, which the lookup has none of
+ * (L43), or attached beside another link of the pair, which stays.
+ *
+ * Every one, and not one of them: the call asks for the tag to go, the
+ * attachments are one tag to TheBrain, which shows it once, and with one
+ * left the tag is still on the thought. Nothing a removal loses is beyond
+ * `brain_tag` add, which attaches the tag once, so no consent is asked, as
+ * for a tag attached once.
+ */
+async function removeAttachments(
+  ctx: ServerContext,
+  brainId: string,
+  thoughtId: string,
+  tagId: string,
+  found: readonly LinkDto[],
+): Promise<string[]> {
+  const list = (links: readonly LinkDto[]): string =>
+    links.map((l) => `${l.id}${labelOf(l)}`).join(", ");
+  const removed: LinkDto[] = [];
+  const gone: LinkDto[] = [];
+  for (const link of found) {
+    try {
+      await ctx.api.links.detachTagLink(brainId, thoughtId, tagId, link);
+      removed.push(link);
+    } catch (error) {
+      // The answer for a link that is gone (L43): the graph is behind a
+      // deletion for up to 0.2 s, and listed one removed a moment ago.
+      if (error instanceof TheBrainError && error.kind === "bad_request" && error.status === 400) {
+        gone.push(link);
+        continue;
+      }
+      if (removed.length === 0) throw error;
+      throw new Error(
+        `${removed.length} of the ${found.length} attachments of the tag ${tagId} were ` +
+          `removed, ${list(removed)}, and then ${link.id} was not: ` +
+          `${describeError(error, false)}${unanswered(error)}`,
+      );
+    }
+  }
+  if (removed.length === 0) {
+    return [`tag ${tagId} was not on the thought: ${list(gone)}, which its graph listed, was gone`];
+  }
+  if (found.length === 1) return [`removed ${tagId}`];
+  return [
+    `removed ${tagId}: it was attached ${found.length} times, and each attachment is gone, ` +
+      `${list(removed)}` +
+      (gone.length > 0 ? ` (${list(gone)} was gone already)` : ""),
+  ];
+}
+
 /** `brain_unlink` named a link that is not an ordinary one. */
 function notRemoved(link: LinkDto, joined: readonly LinkDto[], ends: Ends): string {
   const what = linkKind(link, ends);
@@ -1330,8 +1461,8 @@ function notRemoved(link: LinkDto, joined: readonly LinkDto[], ends: Ends): stri
       `${what}: a tag's attachment, which brain_unlink does not remove. Nothing was removed. ` +
       "Take the tag off with brain_tag." +
       (twice.length > 1
-        ? ` The tag is attached ${twice.length} times, and brain_tag finds none of them ` +
-          "while it is: all but one are removed in TheBrain itself."
+        ? ` The tag is attached ${twice.length} times, and brain_tag remove takes every ` +
+          "attachment off; add then attaches it once."
         : "")
     );
   }

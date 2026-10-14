@@ -811,9 +811,9 @@ graph only for a pair joined more than once.
 
 **Left as they were.** `brain_link` without `replace` answers what it
 answered, but for the 400, and so do the other tools. A plan of
-`brain_ingest` adds and never changes or removes a link. `brain_tag`
-cannot take off a tag attached twice, since its lookup has neither;
-`brain_unlink` refuses a tag's attachment and says so.
+`brain_ingest` adds and never changes or removes a link. `brain_unlink`
+refuses a tag's attachment and says so; a tag attached twice it points at
+`brain_tag` remove, which takes every attachment off (§7, *Tags: undocumented, but they work*).
 
 **Not guarded.** A graph read straight after one of three links that go the
 same way was deleted lists it beside the two left, and the lookup sees none
@@ -1283,8 +1283,8 @@ times in 20.
 or two plans, are two posts as they were: there is no lock (*What a second
 run finds*). A pair that already has two links cannot be linked or labelled
 by any tool: the lookup answers 404, so the tools post, and the post is
-refused. And `brain_tag` asked to add a tag that is on the thought attaches
-it again, and logs the `402`.
+refused. `brain_tag` asked to add a tag that is on the thought looks first
+now, and sends nothing (§7, *Tags: undocumented, but they work*).
 
 #### When a thought of the plan is not created
 
@@ -1609,11 +1609,13 @@ with that: 10 of 10 kept, with a type and without.
 behind a removal is the same 404 for a thought nobody has as for a tag that
 is not on one (`docs/api-map.md`, row L3), and `brain_tag` gave that answer
 for both, in a result that was no error. It reads the thought before it gives
-it, once a call, and passes the read's 404 on. A removal that finds its tag
-reads nothing more, so the check costs one request on the answer it protects
-and none anywhere else. Read ahead of the first write it would have cost that
-request on every call, to refuse an attach the API refuses by itself, naming
-the thought.
+it, and passes the read's 404 on. A removal that finds its tag reads nothing
+more, so the check costs one request on the answer it protects and none
+anywhere else. Read ahead of the first write it would have cost that request
+on every call, to refuse an attach the API refuses by itself, naming the
+thought. The read is now the thought's graph, for each tag the lookup does
+not find, since a 404 is also a tag attached twice (§7, *Tags: undocumented, but they work*); its 403 asks
+the thought's own read, whose 404 is passed on.
 
 **A write result marks a type or a tag where it has the kind in hand.**
 `brain_ingest` lists a thought it found in place with `[type]` or `[tag]`
@@ -2300,7 +2302,28 @@ item 21).
 Attached a second time, a tag is a 200 with the identifier of the attachment
 that is there, and a `402` in the log against it. `links.hasTag()` asks first,
 with the lookup `detachTag()` uses, and a plan does not attach a tag that is
-on its thought (§4, *What a second run writes*).
+on its thought (§4, *What a second run writes*). `brain_tag` add asks the
+same lookup and answers "was on the thought already" with nothing sent; a
+link of the pair that is not the tag's is refused, since the attach posted
+over it would make it the tag's attachment (`docs/api-map.md`, L23, L46),
+and `brain_unlink` is named.
+
+**A tag attached twice.** Two attaches at once can leave two attachments,
+which the lookup has neither of, and to which every post is the bare 400
+(L43). `brain_tag` remove answered "was not on the thought" while the graph
+listed both. Now a lookup that does not give the tag's attachment is
+followed by the thought's graph, and every attachment of the tag among the
+pair's links (`linksOfPair()`, `isAttachmentOf()`) is deleted through
+`links.detachTagLink()`, which refuses any other link with nothing sent.
+Every one and not one of them: the call asks for the tag to go, TheBrain
+shows it once, and with one left it is still on. Nothing a removal loses is
+beyond `brain_tag` add, so it asks no consent and passes no gate, as for a
+tag attached once. One attachment listed and none looked up is a removal a
+moment ago or a second the graph does not list yet: refused, nothing
+removed. add of such a tag reads the graph after the bare 400 and says the
+tag is on, attached twice, nothing changed. Cost: add of a new tag one
+lookup more (4 requests), add of one that is on 2 and no write, and a graph
+read for each tag the lookup does not find.
 
 `statistics.links` does not count tags — links with `meaning=5` are excluded.
 

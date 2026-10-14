@@ -34,6 +34,7 @@ import {
   ThoughtKind,
   aliasesOf,
   compareLogTime,
+  isAttachmentOf,
   isTagLink,
   isTypeLink,
   isUuid,
@@ -8420,6 +8421,36 @@ suite("resource layer against the live API", () => {
         });
       }
       expect((await api.thoughts.getGraph(brainId, a)).tags.map((t) => t.id)).toEqual([b]);
+    }, 120_000);
+
+    it("a tag attached twice comes off by both attachments the graph lists: the lookup has the other once one is gone, and neither after", async () => {
+      // What brain_tag remove does with such a tag; it answered "was not on
+      // the thought" while the graph listed both, 3 times of 3.
+      const attach = (a: string, b: string) => ({ thoughtIdA: a, thoughtIdB: b, relation: 2 });
+      const { a, b } = await atOnce("tag-off", (a, b) => [attach(a, b), attach(a, b)], 2, ThoughtKind.Tag);
+      expect(await api.links.between(brainId, a, b)).toBeNull();
+      const found = linksOfPair(a, b, (await api.thoughts.getGraph(brainId, a)).links, null).filter(
+        (l) => isAttachmentOf(l, b),
+      );
+      expect(found).toHaveLength(2);
+      const [first, second] = found as [LinkDto, LinkDto];
+
+      await api.links.detachTagLink(brainId, a, b, first);
+      expect((await api.links.between(brainId, a, b))?.id).toBe(second.id);
+      expect((await api.links.between(brainId, b, a))?.id).toBe(second.id);
+      // Deleted again, an attachment is the 400 of any link that is gone.
+      await expect(api.links.detachTagLink(brainId, a, b, first)).rejects.toMatchObject({
+        kind: "bad_request",
+        status: 400,
+      });
+
+      await api.links.detachTagLink(brainId, a, b, second);
+      expect(await api.links.between(brainId, a, b)).toBeNull();
+      const graph = await eventually(
+        () => api.thoughts.getGraph(brainId, a),
+        (g) => g.links.length === 0,
+      );
+      expect(graph.tags).toEqual([]);
     }, 120_000);
 
     it("a post towards an end deleted a moment ago is the 400 that names it, not the bare one", async () => {

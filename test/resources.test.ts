@@ -5,8 +5,10 @@ import {
   LOG_PAGE_SIZE,
   MAX_NAME_LENGTH,
   READ_BACK,
+  TheBrainError,
   codePoints,
   compareLogTime,
+  isJoinedMoreThanOnce,
   linkNameAsStored,
   linksOfPair,
   logEntryKey,
@@ -2231,6 +2233,42 @@ describe("tags", () => {
       await expect(api.links.detachTag(BRAIN, THOUGHT, other), what).resolves.toBe(false);
       expect(writes(calls), what).toEqual([]);
     }
+  });
+
+  it("an attachment taken from a graph is deleted as given, and any other link is refused with nothing sent", async () => {
+    // A tag attached twice is two attachments the lookup has neither of
+    // (L43): the tool takes them from the thought's graph, and deletes each.
+    const as = (a: string, b: string, meaning: number, id = LINK): LinkDto =>
+      ({ id, thoughtIdA: a, thoughtIdB: b, relation: 1, meaning }) as LinkDto;
+    for (const meaning of [5, 7]) {
+      const { api, calls } = brain();
+      await api.links.detachTagLink(BRAIN, THOUGHT, TAG.toUpperCase(), as(TAG, THOUGHT, meaning));
+      expect(sent(calls)).toEqual([`DELETE /api/links/${BRAIN}/${LINK}`]);
+    }
+    for (const [what, link] of [
+      ["the thought's type", as(TYPE, THOUGHT, 2)],
+      ["a jump to the tag", { ...as(THOUGHT, TAG, 1), relation: 3 }],
+      ["the thought as a tag on the tag", as(THOUGHT, TAG, 7)],
+      ["the tag on another thought", as(TAG, PLAIN, 5)],
+    ] as const) {
+      const { api, calls } = brain();
+      await expect(api.links.detachTagLink(BRAIN, THOUGHT, TAG, link), what).rejects.toMatchObject({
+        message: `link ${LINK} is not an attachment of the tag ${TAG} to ${THOUGHT}, and was not removed`,
+      });
+      expect(calls, what).toEqual([]);
+    }
+  });
+
+  it("the bare 400 of a post is told apart from the 400 that names an end", () => {
+    // The first is a pair joined more than once, a tag attached twice
+    // among them; the second an end nobody has (L43).
+    expect(isJoinedMoreThanOnce(new TheBrainError("bad_request", "Link could not be created."))).toBe(true);
+    expect(isJoinedMoreThanOnce(new TheBrainError("bad_request", ` link could not be created `))).toBe(true);
+    expect(
+      isJoinedMoreThanOnce(new TheBrainError("bad_request", `Could not get target thought ${TAG}`)),
+    ).toBe(false);
+    expect(isJoinedMoreThanOnce(new TheBrainError("server", "Link could not be created."))).toBe(false);
+    expect(isJoinedMoreThanOnce(new Error("Link could not be created."))).toBe(false);
   });
 
   it("a tag is on a thought when the link they share is the tag's, with the tag at its head", async () => {
