@@ -982,38 +982,42 @@ export async function ingest(
     if (first === undefined) return;
     const { link, from, to } = first;
     try {
-      const existing = await api.links.between(brainId, from, to);
-      if (existing !== null) {
-        const found = linkFound(
-          existing,
-          {
-            from,
-            to,
-            relation: link.relation ?? "jump",
-            fromName: link.from,
-            toName: link.to,
-          },
-          link.name,
-        );
-        // Not a label the link has already: that write is a 200 that changes
-        // nothing, and every run of a plan sent it for every link.
-        if (found.label?.write === true) {
-          await api.links.update(brainId, existing.id, { name: link.name });
+      // In the pair's turn, the look and the write together: a `brain_link`
+      // call for the same two thoughts at the same moment waits, or is waited for.
+      await api.links.inTurn(brainId, from, to, async () => {
+        const existing = await api.links.between(brainId, from, to);
+        if (existing !== null) {
+          const found = linkFound(
+            existing,
+            {
+              from,
+              to,
+              relation: link.relation ?? "jump",
+              fromName: link.from,
+              toName: link.to,
+            },
+            link.name,
+          );
+          // Not a label the link has already: that write is a 200 that changes
+          // nothing, and every run of a plan sent it for every link.
+          if (found.label?.write === true) {
+            await api.links.update(brainId, existing.id, { name: link.name });
+          }
+          (found.ordinary ? outcome.linksReused : outcome.linksNotAdded).push({
+            from: link.from,
+            to: link.to,
+            note: found.note,
+          });
+        } else {
+          await api.links.create(brainId, {
+            thoughtIdA: from,
+            thoughtIdB: to,
+            relation: RELATION_BY_NAME[link.relation ?? "jump"] as Relation,
+            ...(link.name !== undefined ? { name: link.name } : {}),
+          });
+          outcome.linksCreated += 1;
         }
-        (found.ordinary ? outcome.linksReused : outcome.linksNotAdded).push({
-          from: link.from,
-          to: link.to,
-          note: found.note,
-        });
-      } else {
-        await api.links.create(brainId, {
-          thoughtIdA: from,
-          thoughtIdB: to,
-          relation: RELATION_BY_NAME[link.relation ?? "jump"] as Relation,
-          ...(link.name !== undefined ? { name: link.name } : {}),
-        });
-        outcome.linksCreated += 1;
-      }
+      });
     } catch (error) {
       failed("link", `link ${link.from} -> ${link.to}`, error);
     }

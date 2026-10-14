@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import { assertUuid, createdId, type JsonPatchOp, type TheBrainClient } from "../client.js";
 import { TheBrainError } from "../errors.js";
 import {
@@ -43,8 +45,50 @@ export interface UpdateLinkInput {
   direction?: number | undefined;
 }
 
+/** The pairs whose turn (`inTurn`) the code running now holds. */
+const held = new AsyncLocalStorage<ReadonlySet<string>>();
+
 export class LinksResource {
+  /**
+   * The work under way for each pair of thoughts, by `pairKey`: the last to
+   * have come, which the next waits for.
+   */
+  readonly #underWay = new Map<string, Promise<unknown>>();
+
   constructor(private readonly client: TheBrainClient) {}
+
+  /**
+   * Runs `work` once no other work of this process on the same two thoughts
+   * is under way, ends in either order, and holds the next off until it is
+   * done. `create` and `attachTag` take the turn themselves; a caller that
+   * looks the pair up and then writes takes it around both, and the writes
+   * inside take no second turn.
+   *
+   * Two posts sent at once for a pair with no link were two links 51 times
+   * in 60 (L35), and sent one after the other they are one, the second
+   * written over the first. Two `brain_link` calls sent at once each looked
+   * before either posted: two links 12 times in 21, and of the other 9, 7
+   * answered one call with zeros (L47). So the look goes into the turn with
+   * the write, and the second call sees the link the first made.
+   *
+   * Never take a second pair's turn inside one: two calls that did so in
+   * opposite orders would each wait for the other. Not guarded: another
+   * process, or TheBrain itself, writing to the pair at the same moment.
+   */
+  async inTurn<T>(brainId: string, a: string, b: string, work: () => Promise<T>): Promise<T> {
+    const slot = pairKey(brainId, a, b);
+    const mine = held.getStore();
+    if (mine?.has(slot)) return work();
+    const turn = (this.#underWay.get(slot) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() => held.run(new Set([...(mine ?? []), slot]), work));
+    this.#underWay.set(slot, turn);
+    try {
+      return await turn;
+    } finally {
+      if (this.#underWay.get(slot) === turn) this.#underWay.delete(slot);
+    }
+  }
 
   async get(brainId: string, linkId: string): Promise<LinkDto> {
     assertUuid(brainId, "brainId");
@@ -82,6 +126,10 @@ export class LinksResource {
    * A thought linked to itself is refused as well, whatever the relation:
    * that is a 200 with an identifier of zeros and no link. Any other answer
    * of zeros is `zero_id`, from `#post`.
+   *
+   * One post for a pair at a time in this process (`inTurn`). Posted over
+   * the link a pair has, a link rewrites it to the relation asked for (L43):
+   * look first, in the same turn.
    */
   async create(brainId: string, input: CreateLinkInput): Promise<string> {
     // Here as well as in `#post`: a malformed end sends nothing, a read included.
@@ -95,20 +143,22 @@ export class LinksResource {
         `a thought cannot be linked to itself: both ends of the link are ${input.thoughtIdA}`,
       );
     }
-    const relation = input.relation ?? Relation.Child;
-    if (relation === Relation.Child) {
-      await this.requireParent(brainId, input.thoughtIdA, "thoughtIdA");
-    }
-    if (relation === Relation.Parent) {
-      await this.requireParent(brainId, input.thoughtIdB, "thoughtIdB");
-    }
-    const id = await this.#post(brainId, input);
-    // Each end's graph lists the other from now on, where the relation puts
-    // it, and a copy of either graph from before this answer does not: kept
-    // for a reader that looks there next. Not for a tag's attachment, which
-    // does not come through here.
-    this.client.written.linked(brainId, input.thoughtIdA, input.thoughtIdB, relation);
-    return id;
+    return this.inTurn(brainId, input.thoughtIdA, input.thoughtIdB, async () => {
+      const relation = input.relation ?? Relation.Child;
+      if (relation === Relation.Child) {
+        await this.requireParent(brainId, input.thoughtIdA, "thoughtIdA");
+      }
+      if (relation === Relation.Parent) {
+        await this.requireParent(brainId, input.thoughtIdB, "thoughtIdB");
+      }
+      const id = await this.#post(brainId, input);
+      // Each end's graph lists the other from now on, where the relation puts
+      // it, and a copy of either graph from before this answer does not: kept
+      // for a reader that looks there next. Not for a tag's attachment, which
+      // does not come through here.
+      this.client.written.linked(brainId, input.thoughtIdA, input.thoughtIdB, relation);
+      return id;
+    });
   }
 
   /**
@@ -133,8 +183,9 @@ export class LinksResource {
       created,
       path,
       `no link was made between ${input.thoughtIdA} and ${input.thoughtIdB}: TheBrain answered ` +
-        "200 with an identifier of zeros, which is its answer for a pair it does not link. " +
-        "Nothing was written",
+        "200 with an identifier of zeros, which is its answer for a pair it does not link, " +
+        "and for a post sent next to another between the same two thoughts. Nothing was " +
+        "written",
     );
   }
 
@@ -223,6 +274,10 @@ export class LinksResource {
    * one: the server infers the same way from any other kind.
    *
    * Returns the identifier of the created link.
+   *
+   * In the pair's turn (`inTurn`), as `create` is: two attachments of one
+   * tag sent at once were two 6 times in 24 (L46), and one after the
+   * other the second is the first's identifier and a `402` (L47).
    */
   async attachTag(
     brainId: string,
@@ -231,11 +286,13 @@ export class LinksResource {
   ): Promise<string> {
     await this.requireTag(brainId, tagThoughtId, thoughtId);
     // Not through `create`: what it would read again is known to be a tag.
-    return this.#post(brainId, {
-      thoughtIdA: thoughtId,
-      thoughtIdB: tagThoughtId,
-      relation: Relation.Parent,
-    });
+    return this.inTurn(brainId, thoughtId, tagThoughtId, () =>
+      this.#post(brainId, {
+        thoughtIdA: thoughtId,
+        thoughtIdB: tagThoughtId,
+        relation: Relation.Parent,
+      }),
+    );
   }
 
   /**
@@ -413,6 +470,11 @@ export function isStructuralLink(link: LinkDto): boolean {
 
 function sameId(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
+}
+
+/** A pair of thoughts in a brain, whichever end is named first and case aside. */
+function pairKey(brainId: string, a: string, b: string): string {
+  return [brainId.toLowerCase(), ...[a.toLowerCase(), b.toLowerCase()].sort()].join(" ");
 }
 
 /**

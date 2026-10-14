@@ -1284,9 +1284,22 @@ tag named twice, in one list or by two plan items that are one thought, is
 one attach. Two attaches of one tag sent at once left two attachments 11
 times in 20.
 
-**Not guarded.** Two calls sent at once for one pair, two `brain_link` calls
-or two plans, are two posts as they were: there is no lock (*What a second
-run finds*). A pair that already has two links cannot be linked or labelled
+**One write to a pair at a time, in this process.** Two `brain_link` calls
+sent at once for one pair each looked before either posted: two links 12
+times in 21, and 7 of the other 9 answered one call with zeros
+(`docs/api-map.md`, L47). A pair is a lock where a batch is not (*What a
+second run finds*): it is all a link touches, a turn for one costs a call
+for another pair nothing, and it covers a link of a plan beside a
+`brain_link` call. `links.inTurn()` runs one caller's work on a pair at a
+time; `create()` and `attachTag()` take it, and `brain_link`, `brain_tag`
+add and `ingest()` take it around the look and the write, so the second
+call sees what the first made: 0 of 21 after. A turn knows its holder
+through `AsyncLocalStorage`, and a write inside it takes no second one; no
+code holds two pairs' turns.
+
+**Not guarded.** Two processes, or a process and TheBrain itself, writing to
+one pair at once. A create of `brain_link` answered with zeros then has the
+pair looked up, and names the link found. A pair that already has two links cannot be linked or labelled
 by any tool: the lookup answers 404, so the tools post, and the post is
 refused. `brain_tag` asked to add a tag that is on the thought looks first
 now, and sends nothing (§7, *Tags: undocumented, but they work*).

@@ -5050,6 +5050,47 @@ suite("resource layer against the live API", () => {
       expect(restored.links).toHaveLength(1);
     }, 30_000);
 
+    it("a look and a post for one pair, sent at once twice in this process, are one link in the pair's turn", async () => {
+      // Two brain_link calls at once each looked before either posted, and
+      // the pair had two links 12 times in 21 on 15.0.640 (L47). In the
+      // pair's turn the second looks once the first has posted, and the
+      // lookup, which is not behind a write (L35), has the link. One link is
+      // what both lookups give: two the same way are a 404 from either end,
+      // and one each way two answers (L43).
+      const linkOnce = (x: string, y: string, relation: Relation): Promise<string> =>
+        api.links.inTurn(brainId, x, y, async () => {
+          const there = await api.links.between(brainId, x, y);
+          return there?.id ?? api.links.create(brainId, { thoughtIdA: x, thoughtIdB: y, relation });
+        });
+      const oneLink = async (a: string, b: string, id: string, what: string): Promise<void> => {
+        expect((await api.links.between(brainId, a, b))?.id, what).toBe(id);
+        expect((await api.links.between(brainId, b, a))?.id, what).toBe(id);
+      };
+      for (const what of ["the same jump", "a jump and a child", "a jump from each end"]) {
+        const a = await make(`turn ${what} a`);
+        const b = await make(`turn ${what} b`);
+        const [one, other] = await Promise.all([
+          linkOnce(a, b, Relation.Jump),
+          what === "a jump from each end"
+            ? linkOnce(b, a, Relation.Jump)
+            : linkOnce(a, b, what === "a jump and a child" ? Relation.Child : Relation.Jump),
+        ]);
+        expect(other, what).toBe(one);
+        await oneLink(a, b, one, what);
+      }
+
+      // Two creates alone go one after the other: the second is posted over
+      // the first's link, and answers with its identifier.
+      const a = await make("turn creates a");
+      const b = await make("turn creates b");
+      const [one, other] = await Promise.all([
+        api.links.create(brainId, { thoughtIdA: a, thoughtIdB: b, relation: Relation.Jump }),
+        api.links.create(brainId, { thoughtIdA: b, thoughtIdB: a, relation: Relation.Jump }),
+      ]);
+      expect(other).toBe(one);
+      await oneLink(a, b, one, "two creates");
+    }, 30_000);
+
     it("so a jump posted to a thought's own type or tag takes the type or the tag away", async () => {
       const typeId = await make("jumped-type", ThoughtKind.Type);
       const tagId = await make("jumped-tag", ThoughtKind.Tag);

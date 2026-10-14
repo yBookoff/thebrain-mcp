@@ -6861,6 +6861,149 @@ describe("a link changed or removed", () => {
     });
   });
 
+  describe("a pair written to at once", () => {
+    const NO_ANSWER_HERE =
+      "request exceeded 30000 ms. Check that the TheBrain desktop app is running and its " +
+      "local API is enabled.";
+    /** A post as the API keeps it: into `links`, under `id`, and answered with `answer`. */
+    const posting = (links: Link[], id = LINK, answer = id): Route => [
+      "POST /api/links/",
+      (_url, body) => {
+        const b = body as { thoughtIdA: string; thoughtIdB: string; relation: number };
+        // A parent's link is stored as a child's from the other end, and
+        // one with a tag above is the tag's attachment.
+        links.push(
+          b.relation !== 2
+            ? link(id, b.thoughtIdA, b.thoughtIdB, b.relation)
+            : link(id, b.thoughtIdB, b.thoughtIdA, 1, { meaning: b.thoughtIdB === TAG ? 5 : 1 }),
+        );
+        return { id: answer };
+      },
+    ];
+
+    it("two calls for one pair sent at once post once, and the second says what the first made", async () => {
+      // Each used to look before either posted: on TheBrain 15.0.640 the
+      // pair had two links 12 times in 21, and 7 of the other 9 answered one
+      // call with zeros (L47).
+      const notAdded =
+        `## Link already existed\nidentifier ${LINK}: the link already existed as jump, the ` +
+        "requested parent-child with fromId above was not added";
+      for (const [second, already] of [
+        [ends, `## Link already existed\nidentifier ${LINK}`],
+        [{ ...ends, relation: "child" }, notAdded],
+        [
+          { brainId: BRAIN, fromId: PARENT, toId: THOUGHT },
+          `## Link already existed\nidentifier ${LINK}`,
+        ],
+      ] as const) {
+        const links: Link[] = [];
+        const { call, sent } = await connect(brain(links, { first: [posting(links)] }));
+        const results = await Promise.all([call("brain_link", ends), call("brain_link", second)]);
+        expect(results).toEqual([
+          { isError: false, text: `## Done\nlink created — ${LINK}` },
+          { isError: false, text: already },
+        ]);
+        expect(sent("POST")).toHaveLength(1);
+      }
+    });
+
+    it("two brain_tag calls at once attach the tag once, and the second says it was there", async () => {
+      // Each used to look before either attached: one attachment, and both
+      // calls said "attached" (L47).
+      const links: Link[] = [];
+      const { call, sent } = await connect(brain(links, { first: [posting(links)] }));
+      const args = { brainId: BRAIN, thoughtId: THOUGHT, add: [TAG] };
+      const [first, second] = await Promise.all([call("brain_tag", args), call("brain_tag", args)]);
+      expect(first.text).toContain(`## Done\n- attached ${TAG}`);
+      expect(second.text).toContain(`## Done\n- tag ${TAG} was on the thought already`);
+      expect(sent("POST")).toHaveLength(1);
+    });
+
+    it("a create that may have landed says so, and that the call sent again looks first", async () => {
+      // It used to be the error alone, with no word that the two might be
+      // linked: what every other tool that writes once says (L45).
+      const next =
+        "so TheBrain may have linked the two all the same. Sent again as it is, this call " +
+        "looks the two up first: it adds nothing where a link joins them, and says what that " +
+        "link is.";
+      for (const [answer, opening, why] of [
+        [noAnswer, NO_ANSWER_HERE, "No answer came to the create"],
+        [
+          generic403,
+          "TheBrain answered 403 and named no cause",
+          "The 403 does not say whether the create was carried out",
+        ],
+        [
+          brokenOff,
+          "TheBrain answered 200, and the connection failed",
+          "The answer to the create broke off after its status",
+        ],
+      ] as const) {
+        const { call, sent } = await connect(brain([], { first: [["POST /api/links/", answer]] }));
+        const result = await call("brain_link", ends);
+        expect(result.isError).toBe(true);
+        expect(result.text.startsWith(opening)).toBe(true);
+        expect(result.text).toContain(`\n\n## Next\n${why}, ${next}`);
+        expect(sent("POST")).toHaveLength(1);
+      }
+    });
+
+    it("a change with replace that got no answer may have changed the link", async () => {
+      const { call } = await connect(
+        brain([link(LINK, THOUGHT, PARENT, 3)], { first: [["POST /api/links/", noAnswer]] }),
+      );
+      const result = await call("brain_link", { ...ends, relation: "child", replace: true });
+      expect(result).toEqual({
+        isError: true,
+        text:
+          `${NO_ANSWER_HERE}\n\n## Next\nNo answer came to the change, so TheBrain may have ` +
+          "changed the link all the same. Sent again as it is, this call reads the link first, " +
+          "and changes it only if it is not yet the link asked for.",
+      });
+    });
+
+    it("an answer of zeros next to a link made at that moment names that link", async () => {
+      // Another session's post for the pair went first: TheBrain answers the
+      // second with zeros, and makes nothing of it (L47).
+      const zeros =
+        `no link was made between ${THOUGHT} and ${PARENT}: TheBrain answered 200 with an ` +
+        "identifier of zeros, which is its answer for a pair it does not link, and for a post " +
+        "sent next to another between the same two thoughts. Nothing was written " +
+        `(POST /api/links/${BRAIN})`;
+      const links: Link[] = [];
+      const { call } = await connect(brain(links, { first: [posting(links, LINK_2, ZEROS)] }));
+      expect(await call("brain_link", { ...ends, name: "motivates" })).toEqual({
+        isError: true,
+        text:
+          `${zeros}\n\n## Joined\nthe two are linked all the same, by ${LINK_2}: jump. Another ` +
+          "write to them went at the same moment, from another session or from TheBrain " +
+          "itself.\n\n## Next\nSent again as it is, this call finds that link and says whether " +
+          "it is the one asked for.",
+      });
+
+      // With nothing between the two, the answer is all there is to say.
+      const zeroed: Route = ["POST /api/links/", () => ({ id: ZEROS })];
+      const none = await connect(brain([], { first: [zeroed] }));
+      expect(await none.call("brain_link", ends)).toEqual({ isError: true, text: zeros });
+
+      // A lookup that fails is said, and not taken for no link.
+      let looks = 0;
+      const unread = await connect(
+        brain([], {
+          first: [
+            zeroed,
+            ["GET /api/links/", () => ((looks += 1) > 1 ? 500 : 404)],
+          ],
+        }),
+      );
+      const result = await unread.call("brain_link", ends);
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain(
+        `${zeros}\n\n## Not read\nwhat joins the two now: TheBrain failed with a 500`,
+      );
+    });
+  });
+
   describe("brain_unlink", () => {
     const allowed = () => ({ config: { allowDestructive: true } });
     const ASK =

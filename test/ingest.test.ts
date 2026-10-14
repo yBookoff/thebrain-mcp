@@ -99,6 +99,8 @@ function fakeBrain(
   const tagAttaches: string[] = [];
   /** Each label sent to a link that was there. */
   const labelWrites: Array<{ id: string; name: string }> = [];
+  /** The turns of pairs (`links.inTurn`), and the lookups and posts of links, in order. */
+  const turnLog: string[] = [];
   /** Each read that asked whether something named as a parent is a type. */
   const parentReads: string[] = [];
   /** Each read of a thought by its identifier. */
@@ -377,8 +379,19 @@ function fakeBrain(
       },
     },
     links: {
+      // As the real method, with no other work under way: it runs `work`.
+      async inTurn<T>(_b: string, a: string, b: string, work: () => Promise<T>): Promise<T> {
+        const pair = [a, b].sort().join(" ");
+        turnLog.push(`turn ${pair}`);
+        try {
+          return await work();
+        } finally {
+          turnLog.push(`end ${pair}`);
+        }
+      },
       // As the API: the one link a pair has, whatever it is, in its own terms.
       async between(_b: string, a: string, b: string) {
+        turnLog.push(`look ${a} ${b}`);
         const found = joining(a, b);
         return found === undefined
           ? null
@@ -395,6 +408,7 @@ function fakeBrain(
         _b: string,
         input: { thoughtIdA: string; thoughtIdB: string; relation: number; name?: string },
       ) {
+        turnLog.push(`post ${input.thoughtIdA} ${input.thoughtIdB}`);
         // As the real method: no thought is linked to itself, which the API
         // answers with an identifier of zeros,
         if (input.thoughtIdA === input.thoughtIdB) {
@@ -513,6 +527,7 @@ function fakeBrain(
     tagLooks,
     tagAttaches,
     labelWrites,
+    turnLog,
     parentReads,
     thoughtReads,
     vanishing,
@@ -4117,6 +4132,20 @@ describe("two links of a plan between the same two thoughts", () => {
     });
     expect(outcome).toMatchObject({ linksCreated: 3, linksNotAdded: [], failures: [] });
     expect(links.filter((l) => l.a !== ROOT)).toHaveLength(3);
+  });
+
+  it("a pair is looked up and written in its turn, which a brain_link call for it waits on", async () => {
+    // The lookup used to go ahead of any turn: a brain_link call for the
+    // same two thoughts at the same moment could post between the plan's
+    // look and its post, and the plan's post rewrote the link it made.
+    const { api, turnLog } = existing();
+    const outcome = await ingest(api, BRAIN, {
+      thoughts: [{ tempId: "x", name: "X", parent: ROOT }],
+      links: [{ from: P, to: Q, name: "pq" }],
+    });
+    expect(outcome).toMatchObject({ linksCreated: 1, failures: [] });
+    const pair = [P, Q].sort().join(" ");
+    expect(turnLog).toEqual([`turn ${pair}`, `look ${P} ${Q}`, `post ${P} ${Q}`, `end ${pair}`]);
   });
 });
 

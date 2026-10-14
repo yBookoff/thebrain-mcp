@@ -3029,6 +3029,115 @@ describe("every link between two thoughts", () => {
   });
 });
 
+describe("one write to a pair of thoughts at a time", () => {
+  const OTHER = "eeeeeeee-0000-4000-8000-000000000005";
+  const THIRD = "ffffffff-0000-4000-8000-000000000006";
+  const LINK = "99999999-0000-4000-8000-000000000009";
+  const short = (id: string): string => id.slice(0, 2);
+
+  /**
+   * A brain whose post of a link is answered a moment after it is sent, and
+   * which logs each post and each answer by its pair; a post named "fails"
+   * is refused. TAG is a tag, any other thought an ordinary one.
+   */
+  const slow = () => {
+    const log: string[] = [];
+    const fetchImpl = vi.fn(
+      async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        const url = new URL(String(input));
+        const json = (value: unknown, status = 200): Response =>
+          new Response(JSON.stringify(value), {
+            status,
+            headers: { "content-type": "application/json" },
+          });
+        if ((init?.method ?? "GET") === "GET") {
+          const id = url.pathname.split("/").pop()!;
+          return json(thought(id, "named", { kind: id === TAG ? 4 : 1 }));
+        }
+        const body = JSON.parse(String(init!.body)) as {
+          thoughtIdA: string;
+          thoughtIdB: string;
+          name?: string;
+        };
+        const pair = [body.thoughtIdA, body.thoughtIdB].map((id) => short(id.toLowerCase()));
+        const name = pair.sort().join("+");
+        log.push(`post ${name}`);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        log.push(`answer ${name}`);
+        return body.name === "fails" ? json("Link could not be created.", 400) : json({ id: LINK });
+      },
+    );
+    return {
+      api: new TheBrainApi({ apiKey: "k", fetchImpl: fetchImpl as unknown as typeof fetch }),
+      log,
+    };
+  };
+  const at = (log: readonly string[], entry: string, nth = 0): number =>
+    log.map((e, i) => (e === entry ? i : -1)).filter((i) => i >= 0)[nth] ?? -1;
+  const jump = (a: string, b: string, extra: { name?: string } = {}) => ({
+    thoughtIdA: a,
+    thoughtIdB: b,
+    relation: Relation.Jump,
+    ...extra,
+  });
+
+  it("creates for one pair, whichever end comes first, post one after the other; other pairs do not wait", async () => {
+    // Sent at once, two posts for a pair with no link were two links 51
+    // times in 60 (L35).
+    const { api, log } = slow();
+    const pair = [THOUGHT, OTHER].map(short).sort().join("+");
+    const elsewhere = [THOUGHT, THIRD].map(short).sort().join("+");
+    await Promise.all([
+      api.links.create(BRAIN, jump(THOUGHT, OTHER)),
+      api.links.create(BRAIN, jump(OTHER.toUpperCase(), THOUGHT)),
+      api.links.create(BRAIN, jump(THOUGHT, THIRD)),
+    ]);
+    expect(at(log, `post ${pair}`, 1)).toBeGreaterThan(at(log, `answer ${pair}`));
+    expect(at(log, `post ${elsewhere}`)).toBeLessThan(at(log, `answer ${pair}`));
+  });
+
+  it("a caller's lookup and the create inside its turn go together, and the create takes no second turn", async () => {
+    // A turn that did not know its own holder would wait for itself here.
+    const { api, log } = slow();
+    const order: string[] = [];
+    await Promise.all(
+      [1, 2].map((n) =>
+        api.links.inTurn(BRAIN, OTHER, THOUGHT, async () => {
+          order.push(`look ${n}`);
+          await api.links.create(BRAIN, jump(THOUGHT, OTHER));
+          order.push(`made ${n}`);
+        }),
+      ),
+    );
+    expect(order).toEqual(["look 1", "made 1", "look 2", "made 2"]);
+    expect(log.filter((e) => e.startsWith("post"))).toHaveLength(2);
+  });
+
+  it("a write that failed does not hold up the next", async () => {
+    const { api } = slow();
+    const [failed, next] = await Promise.allSettled([
+      api.links.create(BRAIN, jump(THOUGHT, OTHER, { name: "fails" })),
+      api.links.create(BRAIN, jump(OTHER, THOUGHT)),
+    ]);
+    expect(failed).toMatchObject({ status: "rejected", reason: { kind: "bad_request" } });
+    expect(next).toEqual({ status: "fulfilled", value: LINK });
+  });
+
+  it("a tag's attachment takes the pair's turn too", async () => {
+    // One after the other the second attachment of a tag is the first's
+    // identifier; at once they could be two.
+    const { api, log } = slow();
+    const pair = [THOUGHT, TAG].map(short).sort().join("+");
+    await Promise.all([
+      api.links.attachTag(BRAIN, THOUGHT, TAG),
+      api.links.attachTag(BRAIN, THOUGHT, TAG),
+      api.links.create(BRAIN, jump(TAG, THOUGHT)),
+    ]);
+    expect(at(log, `post ${pair}`, 1)).toBeGreaterThan(at(log, `answer ${pair}`));
+    expect(at(log, `post ${pair}`, 2)).toBeGreaterThan(at(log, `answer ${pair}`, 1));
+  });
+});
+
 describe("updating a link: flat fields become JSON Patch", () => {
   const LINK = "eeeeeeee-0000-4000-8000-000000000005";
 
