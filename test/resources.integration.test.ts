@@ -896,21 +896,29 @@ suite("resource layer against the live API", () => {
     // thought's own attachment list had it each time. The note's read had the
     // new text at its first read 200 times of 200. Read at that moment, the
     // thought was indexed as one with no note.
+    //
+    // This asked for one such read in 25 changes, whatever the app was doing.
+    // Measured again on 2026-10-14, 40 changes each: no read without the note
+    // after 9 of them with the app to itself, and after 22 with another
+    // contract run at work in it. So it changes the note until one change
+    // shows the gap, and gives up at forty: were seven changes in ten to show
+    // none, which nothing measured came near, all forty would be one run in
+    // a million. Every change it makes still has to read back.
     const id = await make("note-graph-gap");
     await api.notes.set(brainId, id, "one");
     const listsNote = (g: { attachments: Array<{ isNotes: boolean }> }): boolean =>
       g.attachments.some((a) => a.isNotes);
     await eventually(() => api.thoughts.getGraph(brainId, id), listsNote);
 
-    const CHANGES = 25;
+    const TRIES = 40;
     const WATCH_MS = 250;
-    let without = 0;
-    for (let i = 0; i < CHANGES; i++) {
+    let gap = -1;
+    for (let i = 0; i < TRIES && gap < 0; i++) {
       await api.notes.set(brainId, id, `text ${i}`);
       const changed = performance.now();
       while (performance.now() - changed < WATCH_MS) {
         if (!listsNote(await api.thoughts.getGraph(brainId, id))) {
-          without += 1;
+          gap = i;
           // The copy the graph answers from, not the thought: its own list has the note.
           const own = await api.attachments.ofThought(brainId, id);
           expect(own.some((a) => a.isNotes)).toBe(true);
@@ -921,17 +929,20 @@ suite("resource layer against the live API", () => {
       const text = await eventually(
         () => api.notes.get(brainId, id),
         (t) => t === `text ${i}`,
-        { timeoutMs: 2000, stepMs: 20 },
+        { stepMs: 20 },
       );
       expect(text).toBe(`text ${i}`);
       // And the graph lists it again once the moment has passed.
       const again = await eventually(() => api.thoughts.getGraph(brainId, id), listsNote, {
-        timeoutMs: 2000,
         stepMs: 20,
       });
       expect(listsNote(again)).toBe(true);
     }
-    expect(without).toBeGreaterThan(0);
+    expect(
+      gap,
+      `the graph listed the note at every read after ${TRIES} changes of ${TRIES}: either the ` +
+        "app was busy at every one of them, or the graph is no longer behind a note (L32)",
+    ).toBeGreaterThanOrEqual(0);
   }, 60_000);
 
   describe("a run of note changes in the log", () => {
@@ -2908,23 +2919,32 @@ suite("resource layer against the live API", () => {
     });
 
     it("/types and /tags list a new one a moment after its create, not always at once", async () => {
-      let atOnce = 0;
-      const rounds = 6;
-      for (let i = 0; i < rounds; i++) {
+      // Measured: 10 of 66 at the first read, the last listed 417 ms on; and
+      // on 2026-10-14 a type 4 times of 40 with the app to itself and once in
+      // 40 with another contract run at work in it. This asked for one of
+      // twelve to be late; it makes a type and a tag a round until one is,
+      // forty at the most, which seven in ten listed at once would fail one
+      // run in a million.
+      const TRIES = 20;
+      let late = -1;
+      for (let i = 0; i < TRIES && late < 0; i++) {
         for (const kind of [Type, Tag]) {
           const id = await rawCreate({ name: named(`listed-${kind}-${i}`), kind });
-          if ((await listOf(kind)).some((t) => t.id === id)) atOnce += 1;
+          if (!(await listOf(kind)).some((t) => t.id === id) && late < 0) late = i;
           const later = await eventually(
             () => listOf(kind),
             (list) => list.some((t) => t.id === id),
-            { timeoutMs: 5000, stepMs: 20 },
+            { stepMs: 20 },
           );
           expect(later.some((t) => t.id === id)).toBe(true);
         }
       }
-      // Measured: 10 of 66 at the first read, the last listed 417 ms on.
-      expect(atOnce).toBeLessThan(2 * rounds);
-    });
+      expect(
+        late,
+        `${2 * TRIES} creates of ${2 * TRIES} were listed at once: either the app was busy at ` +
+          "every one of them, or the lists are no longer a copy behind a create (L39)",
+      ).toBeGreaterThanOrEqual(0);
+    }, 60_000);
 
     it("a tag made again under its name is the one there: at once, after another write, in another case, and nothing of it changes", async () => {
       const name = named("again");
@@ -3483,15 +3503,19 @@ suite("resource layer against the live API", () => {
       expect(await locations(id)).toContain(first);
       await settle(PACE);
 
-      const ROUNDS = 5;
-      let listedAtOnce = 0;
-      for (let i = 0; i < ROUNDS; i++) {
+      // Until one is not listed at once, forty at the most. Measured again on
+      // 2026-10-14, 40 of 40 were behind at the first read with the app to
+      // itself and 40 of 40 with another contract run at work in it; the
+      // five rounds this had were enough, and the form is the other tests'.
+      const TRIES = 40;
+      let behind = -1;
+      for (let i = 0; i < TRIES && behind < 0; i++) {
         const url = `https://example.com/${PREFIX}lag-${Date.now()}-${i}`;
         await attach(id, url);
         expect(await found(url)).toBe(true);
 
         const listed = async (): Promise<boolean> => (await locations(id)).includes(url);
-        if (await listed()) listedAtOnce += 1;
+        if (!(await listed())) behind = i;
         // Every round lasts as long, whatever that read said. Left to end as
         // soon as the list had the attachment, a round listed at once ended
         // straight after a refresh, and the write that followed was listed at
@@ -3502,10 +3526,13 @@ suite("resource layer against the live API", () => {
         expect(shown).toBe(true);
       }
       // One read in nineteen, and no more often after another: of 60 runs 45
-      // had none at once, 14 had one and 1 had two. All five at once is one
-      // run in a million.
-      expect(listedAtOnce).toBeLessThan(ROUNDS);
-    });
+      // had none at once, 14 had one and 1 had two.
+      expect(
+        behind,
+        `${TRIES} attachments of ${TRIES} were listed at once: either the app was busy at every ` +
+          "one of them, or the thought's own list is no longer a copy (L17)",
+      ).toBeGreaterThanOrEqual(0);
+    }, 60_000);
 
     it("attachUrl finds the copy under another host case, and tells paths apart", async () => {
       const id = await make("attach-dedupe");
@@ -3678,17 +3705,30 @@ suite("resource layer against the live API", () => {
     it("a read straight after a type's link is deleted still returns the type", async () => {
       // Measured over 13 removals: the first read had the type every time, and
       // lost it 20–210 ms later. `removeType` waits for that read.
+      //
+      // This asked for one such read in five. Measured again on 2026-10-14,
+      // 40 removals each: the first read had lost the type already 2 times
+      // with the app to itself and 15 with another contract run at work in
+      // it, where five in a row is one run in 140. So it removes until one
+      // first read still has the type, and gives up at forty: were seven
+      // first reads in ten to have lost it already, which nothing measured
+      // came near, all forty would be one run in a million.
+      const TRIES = 40;
       const typeId = await make("lag-type", ThoughtKind.Type);
-      let stale = 0;
-      for (let i = 0; i < 5; i++) {
+      let stale = -1;
+      for (let i = 0; i < TRIES && stale < 0; i++) {
         const id = await makeWith(`lag-typed-${i}`, { typeId });
         await read(id, (t) => t.typeId === typeId);
         expect(await api.links.detachType(brainId, id, typeId)).toBe(true);
-        if ((await api.thoughts.get(brainId, id)).typeId === typeId) stale += 1;
+        if ((await api.thoughts.get(brainId, id)).typeId === typeId) stale = i;
         expect((await read(id, (t) => t.typeId === null)).typeId).toBeNull();
       }
-      expect(stale).toBeGreaterThan(0);
-    }, 30_000);
+      expect(
+        stale,
+        `the type was gone at the first read after ${TRIES} removals of ${TRIES}: either the ` +
+          "app was busy at every one of them, or a read is no longer behind the removal",
+      ).toBeGreaterThanOrEqual(0);
+    }, 60_000);
 
     it("a refused patch keeps what it wrote before the operation it refused", async () => {
       // So an update that throws may have landed in part.
@@ -3913,20 +3953,29 @@ suite("resource layer against the live API", () => {
     it("a read straight after a patch sets a type usually does not show it yet", async () => {
       // Measured over 160 sets on a quiet brain: the first read had the type 24
       // times; otherwise it showed up to 107 ms later. `update` waits for it.
+      // Again on 2026-10-14, 40 sets each: at the first read 0 times with the
+      // app to itself and 5 with another contract run at work in it. It sets
+      // until one first read lacks the type, forty at the most, which seven
+      // first reads in ten with the type would fail one run in a million.
+      const TRIES = 40;
       const typeId = await make("lag-set-type", ThoughtKind.Type);
-      let stale = 0;
-      for (let i = 0; i < 8; i++) {
+      let stale = -1;
+      for (let i = 0; i < TRIES && stale < 0; i++) {
         const id = await make(`lag-set-${i}`);
         expect(await patchType(id, typeId)).toBeNull();
-        if ((await typeOf(id)) === null) stale += 1;
+        if ((await typeOf(id)) === null) stale = i;
         const seen = await eventually(
           () => typeOf(id),
           (t) => t === typeId,
         );
         expect(seen).toBe(typeId);
       }
-      expect(stale).toBeGreaterThan(0);
-    }, 30_000);
+      expect(
+        stale,
+        `the type read back at once after ${TRIES} patches of ${TRIES}: either the app was ` +
+          "busy at every one of them, or a read is no longer behind a patch of the type",
+      ).toBeGreaterThanOrEqual(0);
+    }, 60_000);
 
     it("straight after a burst of writes a type takes several times longer to read back", async () => {
       // Writes queue up. Measured, for the first patch after thoughts created
@@ -6200,8 +6249,17 @@ suite("resource layer against the live API", () => {
       // before it 37 in 600, and a second before it 0 in 36. So the graph
       // is read straight before the create here. Next to a thought whose
       // graph nothing had read, the same read had it 60 times of 60.
-      let lacked = 0;
-      for (const relation of [...RELATIONS, ...RELATIONS]) {
+      //
+      // This asked for one such read in six, a child, a parent and a jump
+      // twice over. On 2026-10-14, 40 children each, the read had the new one
+      // 15 times with the app to itself and 12 with another contract run at
+      // work in it: six in a row one run in 360. So it goes round the three
+      // until one read lacks it, forty at the most, which seven reads in ten
+      // with it would fail one run in a million.
+      const TRIES = 40;
+      let lacked = -1;
+      for (let i = 0; i < TRIES && lacked < 0; i++) {
+        const relation = RELATIONS[i % RELATIONS.length]!;
         const source = await make(`sr-read-${relation}`);
         await api.thoughts.getGraph(brainId, source);
         const id = await api.thoughts.create(brainId, {
@@ -6212,14 +6270,17 @@ suite("resource layer against the live API", () => {
         created.push(id);
         const listed = (g: CleanGraph): boolean => g[LIST[relation]].some((t) => t.id === id);
 
-        if (!listed(await api.thoughts.getGraph(brainId, source))) lacked += 1;
+        if (!listed(await api.thoughts.getGraph(brainId, source))) lacked = i;
         const later = await eventually(() => api.thoughts.getGraph(brainId, source), listed, {
-          timeoutMs: 2000,
           stepMs: 10,
         });
         expect(listed(later), relation).toBe(true);
       }
-      expect(lacked).toBeGreaterThan(0);
+      expect(
+        lacked,
+        `the graph had the new thought at once after ${TRIES} creates of ${TRIES}: either the ` +
+          "app was busy at every one of them, or a graph read before is no longer a copy (L27)",
+      ).toBeGreaterThanOrEqual(0);
 
       for (const relation of RELATIONS) {
         const source = await make(`sr-unread-${relation}`);
@@ -6233,7 +6294,7 @@ suite("resource layer against the live API", () => {
           LIST[relation],
         ]);
       }
-    });
+    }, 60_000);
 
     it("ingest finds what a run made under every relation, next to an existing thought and next to a tempId, sent straight after it", async () => {
       const root = await make("sr-root");
@@ -6576,16 +6637,27 @@ suite("resource layer against the live API", () => {
       // never from 200 ms on (0 of 60). A note that replaced another read
       // back at once, 12 of 12. Ingest reads a note no sooner than 300 ms
       // after this client's last write.
-      let stale = 0;
-      for (let i = 0; i < 8; i += 1) {
+      //
+      // Again on 2026-10-14, 40 notes each: the read straight after had the
+      // text 4 times with the app to itself and 5 with another contract run
+      // at work in it. It writes until one such read answers "no note",
+      // forty at the most, which seven reads in ten with the text would fail
+      // one run in a million.
+      const TRIES = 40;
+      let stale = -1;
+      for (let i = 0; i < TRIES && stale < 0; i += 1) {
         const id = await make(`note-first-${i}`);
         expect(await api.notes.get(brainId, id)).toBe("");
         await api.notes.set(brainId, id, "first text");
-        if ((await api.notes.get(brainId, id)) === "") stale += 1;
+        if ((await api.notes.get(brainId, id)) === "") stale = i;
         expect(await read(id, "first text")).toBe("first text");
       }
-      expect(stale).toBeGreaterThan(0);
-    }, 30_000);
+      expect(
+        stale,
+        `a first note read back at once ${TRIES} times of ${TRIES}: either the app was busy at ` +
+          "every one of them, or the read of a note is no longer behind its first write",
+      ).toBeGreaterThanOrEqual(0);
+    }, 60_000);
 
     it("ingest keeps a note that is there and writes one where there is none, under each relation, and a second run changes neither", async () => {
       const NUMBER = { child: Relation.Child, parent: Relation.Parent, jump: Relation.Jump };
@@ -9277,21 +9349,30 @@ suite("resource layer against the live API", () => {
       await requireAliases(ctx);
       // Measured over 82 writes: the first read already had the new list 7
       // times; otherwise it showed up 50–100 ms later, 0.2 s at the most. A
-      // rename behaves the same.
+      // rename behaves the same. Again on 2026-10-14, 40 writes each: the new
+      // list at once 2 times with the app to itself and 2 with another
+      // contract run at work in it. It writes until one first read has the
+      // old list, forty at the most, which seven reads in ten with the new
+      // one would fail one run in a million.
+      const TRIES = 40;
       const id = await make("alias-lag");
       let previous: string[] = [];
-      let stale = 0;
-      for (let i = 0; i < 10; i++) {
+      let stale = -1;
+      for (let i = 0; i < TRIES && stale < 0; i++) {
         const next = [`${PREFIX}lag-${i}`];
         await api.thoughts.update(brainId, id, { aliases: next });
         const atOnce = aliasesOf(await api.thoughts.get(brainId, id));
-        if (sameSet(previous)(atOnce)) stale += 1;
+        if (sameSet(previous)(atOnce)) stale = i;
         else expect(atOnce).toEqual(next);
         expect(await stored(id, sameSet(next))).toEqual(next);
         previous = next;
       }
-      expect(stale).toBeGreaterThan(0);
-    });
+      expect(
+        stale,
+        `the new list read back at once ${TRIES} times of ${TRIES}: either the app was busy at ` +
+          "every one of them, or a read is no longer behind a write of aliases",
+      ).toBeGreaterThanOrEqual(0);
+    }, 60_000);
 
     it("two changeAliases calls in a row both land", async (ctx) => {
       await requireAliases(ctx);
