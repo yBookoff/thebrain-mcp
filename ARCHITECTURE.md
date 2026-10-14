@@ -1369,17 +1369,13 @@ the same way, and its line says that it may have been carried out and to
 read the thought before sending it again. The plan sent again finds such a
 note there, and keeps it.
 
-**Nor is a write answered with the catch-all 403, or one whose answer broke
-off.** Under concurrent writes TheBrain now and then answers a create with
-the router's 403 and makes the thought all the same, 4 of 4 (docs/api-map.md,
-L45). The same words are its answer to some writes it refuses, and every one
-of those measured is refused here before it is sent, so `mayHaveLanded()`
-takes that 403 to anything but a `GET` for a write that may have landed: a
-read costs less than a second thought. An answer whose body could not be
+**Nor is a write whose answer broke off.** An answer whose body could not be
 read after its status, a create's 200 among them, escaped the client as no
 `TheBrainError` and read as a failure; it is a `network` failure now, with
-the status kept. Each tool says which of the three it was (`landedWhy()`):
-no answer, an answer that broke off, or a 403 that does not say.
+the status kept. Each tool says which of the two it was (`landedWhy()`): no
+answer, or an answer that broke off. The catch-all 403 to a write is a
+refusal: a create carried out under it was seen only in bursts of concurrent
+creates, which this server is not designed for (docs/api-map.md, L45).
 
 **A line under "Failed" is explained as a call's own failure is.**
 `describeError()` (§5) is what a call that fails whole is answered with, and
@@ -3594,11 +3590,11 @@ rounds, four or five seconds a run. `test/sweep.ts` holds the rules and
 **A burst is not a promise of 100 answers.** Now and then one create of a
 burst is answered with the catch-all 403, and its thought is made all the
 same (4 of 4: the log had a `101` for every request; docs/api-map.md, L45).
-A test that needs a burst counts such an answer, asks `mayHaveLanded()` of
-it, and says it aloud (`makeInBurst()`); it fails for what it is about. It
-is not made to fail on the 403 itself: that is the app's, the client now
-takes it for a write that may have landed, and a test of the log that went
-red on it would go red about one run in forty for nothing the test checks.
+A test that needs a burst counts such an answer and says it aloud
+(`makeInBurst()`); it fails for what it is about. It is not made to fail on
+the 403 itself: that is the app's, under a load the server is not designed
+for, and a test of the log that went red on it would go red about one run in
+forty for nothing the test checks.
 
 Two testing habits worth stating, because both caught real bugs:
 

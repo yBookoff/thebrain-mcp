@@ -12,7 +12,6 @@
 import {
   TheBrainError,
   extractErrorMessage,
-  isCatchAll,
   kindForStatus,
   looksLikeHtml,
 } from "./errors.js";
@@ -415,24 +414,17 @@ function isConnectionRefused(error: unknown): boolean {
  * An answer whose body broke off after its status is one too: the status
  * may well be a 200.
  *
- * And so is the catch-all 403 to a write (docs/api-map.md, L45). Under
- * concurrent writes TheBrain now and then answers a create with it and
- * makes the thought all the same: 4 of 4, a `101` in the log for every
- * request of the burst. The same 403 is its answer to some writes it does
- * refuse, and nothing in it tells the two apart. Every refusal of a write
- * measured in those words is one the code refuses before sending, so the
- * write that gets them is taken for one that may have been carried out:
- * never repeated, and told to be looked for first.
- *
  * A read that got no answer is not one: carried out or not, it wrote
  * nothing. A write is preceded by reads, of a type, a tag or a parent, and
  * one of those timing out used to pass for a thought that may be there.
  */
 export function mayHaveLanded(error: unknown): boolean {
-  if (!(error instanceof TheBrainError) || error.method === "GET") return false;
-  // With no request named, nothing says it was a write.
-  if (isCatchAll(error)) return error.method !== undefined;
-  return error.kind === "network" && !isConnectionRefused(error.cause);
+  return (
+    error instanceof TheBrainError &&
+    error.kind === "network" &&
+    error.method !== "GET" &&
+    !isConnectionRefused(error.cause)
+  );
 }
 
 function routeMissMessage(): string {

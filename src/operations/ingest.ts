@@ -256,8 +256,8 @@ export interface IngestOutcome {
    * is the failure in the API's words or this module's, and `error` what was
    * thrown, for a caller that explains failures in its own. `unanswered`
    * marks a write that may have been carried out (`mayHaveLanded()`): it got
-   * no answer, one that broke off, or the catch-all 403, and a thought may be
-   * there with no identifier to report.
+   * no answer, or one that broke off, and a thought may be there with no
+   * identifier to report.
    */
   failures: Array<{
     of: "thought" | "note" | "tag" | "aliases" | "link";

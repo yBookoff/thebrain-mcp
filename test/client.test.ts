@@ -451,42 +451,13 @@ describe("finding TheBrain", () => {
       .catch((e: unknown) => e);
     expect(answered).toMatchObject({ kind: "not_found" });
     expect(mayHaveLanded(answered)).toBe(false);
-    expect(mayHaveLanded(new Error("anything else"))).toBe(false);
-  });
-
-  it("a write answered with the catch-all 403 may have landed, and is not sent again", async () => {
-    // Under concurrent writes TheBrain now and then answers a create so and
-    // makes the thought all the same: 4 of 4 (docs/api-map.md, L45).
-    const { client, fetchImpl } = clientReturning(ROUTER_403, {
-      status: 403,
-      contentType: "text/plain",
-    });
-    const create = await client
-      .post(`/api/thoughts/${BRAIN}`, { json: { name: "A" } })
-      .catch((e: unknown) => e);
-    expect(create).toMatchObject({ kind: "forbidden", status: 403, method: "POST" });
-    expect(mayHaveLanded(create)).toBe(true);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    // Any write: the 403 says nothing of what was done.
-    for (const write of [
-      client.patch(`/api/thoughts/${BRAIN}/${BRAIN}`, { jsonPatch: [] }),
-      client.delete(`/api/links/${BRAIN}/${BRAIN}`),
-    ]) {
-      expect(mayHaveLanded(await write.catch((e: unknown) => e))).toBe(true);
-    }
-    // A read wrote nothing either way.
-    const read = await client.get(`/api/thoughts/${BRAIN}/${BRAIN}/graph`).catch((e: unknown) => e);
-    expect(read).toMatchObject({ kind: "forbidden" });
-    expect(mayHaveLanded(read)).toBe(false);
-
-    // A 403 in other words names a cause; and with no request named,
-    // nothing says it was a write.
-    const worded = await clientReturning('"Refused for a reason"', { status: 403 })
+    // The catch-all 403 is an answer too, to a write as to a read.
+    const forbidden = await clientReturning(ROUTER_403, { status: 403, contentType: "text/plain" })
       .client.post(`/api/thoughts/${BRAIN}`, { json: { name: "A" } })
       .catch((e: unknown) => e);
-    expect(worded).toMatchObject({ kind: "forbidden" });
-    expect(mayHaveLanded(worded)).toBe(false);
-    expect(mayHaveLanded(new TheBrainError("forbidden", ROUTER_403))).toBe(false);
+    expect(forbidden).toMatchObject({ kind: "forbidden", status: 403, method: "POST" });
+    expect(mayHaveLanded(forbidden)).toBe(false);
+    expect(mayHaveLanded(new Error("anything else"))).toBe(false);
   });
 
   // `response.text()` failing used to leave the client as it was thrown: no

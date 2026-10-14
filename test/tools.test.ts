@@ -6977,18 +6977,13 @@ describe("a link changed or removed", () => {
 
     it("a create that may have landed says so, and that the call sent again looks first", async () => {
       // It used to be the error alone, with no word that the two might be
-      // linked: what every other tool that writes once says (L45).
+      // linked: what every other tool that writes once says (L26).
       const next =
         "so TheBrain may have linked the two all the same. Sent again as it is, this call " +
         "looks the two up first: it adds nothing where a link joins them, and says what that " +
         "link is.";
       for (const [answer, opening, why] of [
         [noAnswer, NO_ANSWER_HERE, "No answer came to the create"],
-        [
-          generic403,
-          "TheBrain answered 403 and named no cause",
-          "The 403 does not say whether the create was carried out",
-        ],
         [
           brokenOff,
           "TheBrain answered 200, and the connection failed",
@@ -8183,41 +8178,25 @@ describe("a call that fails after it has written", () => {
       );
     });
 
-    it("a create answered with the catch-all 403, or whose answer broke off, is one that may have landed", async () => {
-      // The 403 to a create under concurrent writes made the thought 4 times
-      // of 4 (docs/api-map.md, L45), and was told as an identifier that names
-      // nothing. A 200 whose body broke off was no TheBrainError at all.
-      const next = (why: string): string =>
-        `\n\n## Next\n${why}, so TheBrain may have made "RAG" all the same, and there is ` +
-        "no identifier to give for it. Before creating it again, look for it next to " +
-        `${PARENT} with brain_get_thought.`;
-      for (const [answer, text] of [
-        [
-          generic403,
-          `TheBrain answered 403 and named no cause (POST /api/thoughts/${BRAIN}). It answers ` +
-            "a write so when it refuses it, as for an identifier that names nothing in this " +
-            "brain, and now and then when it has carried it out." +
-            next("The 403 does not say whether the create was carried out"),
-        ],
-        [
-          brokenOff,
-          "TheBrain answered 200, and the connection failed before the rest of the answer " +
-            "came (other side closed). Check that the TheBrain desktop app is running and its " +
-            "local API is enabled." +
-            next("The answer to the create broke off after its status"),
-        ],
-      ] as const) {
-        const { call, calls } = await connect(routes([["POST /api/thoughts/", answer]]));
-        const result = await call("brain_create_thought", {
-          brainId: BRAIN,
-          name: "RAG",
-          parentId: PARENT,
-        });
-        expect(result.isError).toBe(true);
-        expect(result.text).toBe(text);
-        // Sent once: a second create would make a second thought.
-        expect(writes(calls)).toEqual([`POST /api/thoughts/${BRAIN}`]);
-      }
+    it("a create whose answer broke off is one that may have landed", async () => {
+      // A 200 whose body broke off was no TheBrainError at all.
+      const { call, calls } = await connect(routes([["POST /api/thoughts/", brokenOff]]));
+      const result = await call("brain_create_thought", {
+        brainId: BRAIN,
+        name: "RAG",
+        parentId: PARENT,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        "TheBrain answered 200, and the connection failed before the rest of the answer " +
+          "came (other side closed). Check that the TheBrain desktop app is running and its " +
+          "local API is enabled.\n\n## Next\nThe answer to the create broke off after its " +
+          'status, so TheBrain may have made "RAG" all the same, and there is no identifier ' +
+          `to give for it. Before creating it again, look for it next to ${PARENT} with ` +
+          "brain_get_thought.",
+      );
+      // Sent once: a second create would make a second thought.
+      expect(writes(calls)).toEqual([`POST /api/thoughts/${BRAIN}`]);
     });
 
     it("a create that is refused is the error it was, and one refused for no cause says what to read", async () => {
@@ -9353,14 +9332,9 @@ describe("what brain_ingest says of a batch written in part", () => {
     expect(result.text).toContain(
       [
         "## Failed",
-        // A create answered with the catch-all 403 may have been carried out
-        // (docs/api-map.md, L45): its line says so, and where to look.
         '- thought "Refused" (refused): TheBrain answered 403 and named no cause ' +
-          `(POST /api/thoughts/${BRAIN}). It answers a write so when it refuses it, as for ` +
-          "an identifier that names nothing in this brain, and now and then when it has " +
-          "carried it out. The 403 does not say whether it was carried out, so TheBrain may " +
-          "have created it all the same: before creating it again, look for it next to its " +
-          "parent with brain_get_thought.",
+          `(POST /api/thoughts/${BRAIN}). That is its answer when an identifier in the call ` +
+          `names nothing in this brain.${NOBODY_HAS_IT}`,
         '- thought "Bare" (bare): Could not create thought. TheBrain named no cause ' +
           `(POST /api/thoughts/${BRAIN}). It answers so when the parent named for the new ` +
           "thought was deleted a moment ago, or the type named for it is no thought of this " +

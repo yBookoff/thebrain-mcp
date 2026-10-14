@@ -1660,7 +1660,7 @@ function aboutTheCall(error: unknown): boolean {
 
 /**
  * What follows a create that may have been carried out (`mayHaveLanded()`):
- * no answer, one that broke off, or the catch-all 403. The thought may be there with no
+ * no answer, or one that broke off. The thought may be there with no
  * identifier to give, so this says where to look before it is created again:
  * next to its parent, or, for a thought created with none, by name. The
  * index knows a new thought only after a sync, and a search that missed it

@@ -179,21 +179,6 @@ export function extractErrorMessage(body: string, contentType: string | null): s
   return trimmed.length > 300 ? `${trimmed.slice(0, 300)}…` : trimmed;
 }
 
-/**
- * The router's words, which the API answers with a 403 for a path outside
- * `/api` and as its catch-all (docs/api-map.md, L3, L45). They name no cause.
- */
-const CATCH_ALL = /^To use the TheBrain API, make requests to \/api\b/;
-
-/** Is this the API's catch-all 403, in the router's words? */
-export function isCatchAll(error: unknown): boolean {
-  return (
-    error instanceof TheBrainError &&
-    error.kind === "forbidden" &&
-    CATCH_ALL.test(error.message.trim())
-  );
-}
-
 /** The 401 that is about the brain in the path, where the others are about the key. */
 const NO_SUCH_BRAIN = /^Access to brain \S+ is unauthorized/;
 
