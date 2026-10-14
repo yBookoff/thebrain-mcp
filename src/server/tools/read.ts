@@ -303,13 +303,13 @@ function kept<T>(read: Promise<T>): Promise<Read<T>> {
  * What `brain_get_thought` says under the types of a thought with two. A
  * patch of `typeId` leaves two links: asked for the other of the two it
  * changes nothing, and asked for a third, one of the two goes and the third
- * comes in its place (docs/api-map.md, L44). Deleting the links is what
- * takes either away, and `removeType` deletes both.
+ * comes in its place (docs/api-map.md, L44), so `update()` refuses a type
+ * while both are there. Deleting the links is what takes either away, and
+ * `removeType` deletes both.
  */
 const TWO_TYPES =
   "TheBrain links this thought under both. typeId null in brain_update_thought removes " +
-  "both, and a typeId set while both are there replaces one of them at most: to keep " +
-  "one, remove both, then set it.";
+  "both, and a type is set only once they are gone: to keep one, remove both, then set it.";
 
 /**
  * What `brain_get_thought` prints where the note goes when the note's read

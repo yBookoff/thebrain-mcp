@@ -64,6 +64,22 @@ export function describeError(error: unknown, alone = true): string {
           "with it, and gets no parent. To attach a tag pass it to brain_tag, or as tagIds to " +
           "brain_create_thought or brain_ingest; for a parent name an ordinary thought."
         );
+      case "type_on_tag":
+        return (
+          `${error.message}.${nothing} A type goes on an ordinary thought or on a type; ` +
+          "to put this tag on a thought, pass both to brain_tag."
+        );
+      case "type_cycle":
+        return (
+          `${error.message}.${nothing} To make that type this thought's type, first take ` +
+          "this thought away as its type, with typeId null in a brain_update_thought call " +
+          "for that type."
+        );
+      case "two_types":
+        return (
+          `${error.message}.${nothing} To leave it one type, send typeId null first, which ` +
+          "removes them all, then this typeId in a second brain_update_thought call."
+        );
       case "auth":
         return "TheBrain rejected the key. Check THEBRAIN_API_KEY: find it under Settings > User > Local API Key.";
       case "unknown_brain":

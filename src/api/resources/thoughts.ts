@@ -553,9 +553,10 @@ export class ThoughtsResource {
    * changes nothing, so a type goes through `removeType` instead.
    *
    * A `typeId` has to name a type other than the thought itself, and is read
-   * before anything is sent (`requireType`). Once the patch is in, the call
-   * waits for the thought to read back with the type, and throws when it does
-   * not.
+   * before anything is sent (`requireType`). So is the thought's graph, for a
+   * type the patch would not set as asked (`#requireTypeable`). Once the
+   * patch is in, the call waits for the thought to read back with the type,
+   * and throws when it does not.
    *
    * The API applies a patch one operation at a time and keeps what it wrote
    * before the one it refuses: an update that throws may have landed in part.
@@ -580,6 +581,7 @@ export class ThoughtsResource {
       );
     }
     const type = typeof typeId === "string" ? await this.requireType(brainId, typeId) : null;
+    if (type !== null) await this.#requireTypeable(brainId, thoughtId, type);
 
     const ops: JsonPatchOp[] = Object.entries(fields)
       .filter(([, value]) => value !== undefined)
@@ -648,6 +650,87 @@ export class ThoughtsResource {
    */
   async requireType(brainId: string, typeId: string): Promise<ThoughtDto> {
     return requireKind(this.client, brainId, typeId, ThoughtKind.Type);
+  }
+
+  /**
+   * Refuses, ahead of the write, a type that the patch would not set as
+   * asked. The API answers each of these with a 200 (docs/api-map.md, L44):
+   *
+   * - `type_on_tag`: a tag given a type has none, and no link;
+   * - `type_cycle`: a type given for its type a type whose own type it is
+   *   has none either;
+   * - `two_types`: a thought linked under two types keeps one of them
+   *   whatever is set. The other of the two, or `typeId` again, changes
+   *   nothing, and a third comes in with one of the two left beside it.
+   *
+   * Left to the write, the first two waited out the read-back and were told,
+   * two seconds later, that the type might yet show; the last answered
+   * "Done" for a thought that was not of that type alone. All three are told
+   * by the thought's graph, one read.
+   *
+   * That graph is a copy, a moment behind a write. Read straight after two
+   * type links of a thought were deleted, it listed both 19 times of 20; after
+   * `removeType`, which waits for its read-back, none of 20. Taken at its
+   * word, a copy that far behind would refuse the very call this refusal asks
+   * for. So two types are counted by the lookup of each pair, which is not
+   * behind a write (L43), and that costs requests only when the graph lists
+   * two. A type set a moment ago may be missing from the copy, and the patch
+   * then goes ahead as it did.
+   */
+  async #requireTypeable(brainId: string, thoughtId: string, type: ThoughtDto): Promise<void> {
+    const graph = await this.#graphOfOne(brainId, thoughtId);
+    const { thought } = graph;
+    if (thought.kind === ThoughtKind.Tag) {
+      throw new TheBrainError(
+        "type_on_tag",
+        `thoughtId ${thoughtId} is the tag "${shownName(thought.name)}", and a tag takes no ` +
+          "type: TheBrain answers a typeId on a tag and sets nothing",
+      );
+    }
+    const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+    // A type's link from this thought to the type named: this is that type's type.
+    if (
+      graph.links.some(
+        (l) => isTypeLink(l) && same(l.thoughtIdA, thoughtId) && same(l.thoughtIdB, type.id),
+      )
+    ) {
+      throw new TheBrainError(
+        "type_cycle",
+        `typeId ${type.id} is the type "${shownName(type.name)}", and this thought is its ` +
+          "type: TheBrain answers a typeId that would make two types each other's and sets nothing",
+      );
+    }
+    const listed = [graph.type, ...graph.otherTypes].filter((t): t is ThoughtDto => t !== null);
+    if (listed.length < 2) return;
+    const linked: ThoughtDto[] = [];
+    for (const t of listed) {
+      const link = await this.links.between(brainId, t.id, thoughtId);
+      if (link !== null && isTypeLink(link) && same(link.thoughtIdA, t.id)) linked.push(t);
+    }
+    if (linked.length < 2) return;
+    const names = linked.map((t) => `"${shownName(t.name)}" ${t.id}`);
+    throw new TheBrainError(
+      "two_types",
+      `thoughtId ${thoughtId} is linked under ${linked.length === 2 ? "two" : linked.length} ` +
+        `types, ${names.slice(0, -1).join(", ")} and ${names.at(-1)}, and a typeId set while ` +
+        "they are there leaves one of them in place",
+    );
+  }
+
+  /**
+   * The graph of a thought, where a thought nobody has is the 404 of its own
+   * read. Its graph is the catch-all 403, which names no cause (L3), and the
+   * patch, which used to be the first request about it, a 404 that names it.
+   */
+  async #graphOfOne(brainId: string, thoughtId: string): Promise<CleanGraph> {
+    try {
+      return await this.getGraph(brainId, thoughtId);
+    } catch (error) {
+      if (error instanceof TheBrainError && error.kind === "forbidden") {
+        await this.get(brainId, thoughtId);
+      }
+      throw error;
+    }
   }
 
   /**

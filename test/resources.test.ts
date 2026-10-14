@@ -779,11 +779,13 @@ describe("a typeId that is not a type", () => {
     await api.thoughts.create(BRAIN, { name: "new", typeId: TYPE });
 
     const sent = calls.map((c) => `${c.method} ${c.url.pathname}`);
-    expect(sent.slice(0, 2)).toEqual([
+    // The thought's graph as well, on an update: see "a type the patch would not set".
+    expect(sent.slice(0, 3)).toEqual([
       `GET /api/thoughts/${BRAIN}/${TYPE}`,
+      `GET /api/thoughts/${BRAIN}/${THOUGHT}/graph`,
       `PATCH /api/thoughts/${BRAIN}/${THOUGHT}`,
     ]);
-    expect(calls[1]!.body).toEqual([{ op: "replace", path: "/typeId", value: TYPE }]);
+    expect(calls[2]!.body).toEqual([{ op: "replace", path: "/typeId", value: TYPE }]);
     expect(sent.slice(-2)).toEqual([
       `GET /api/thoughts/${BRAIN}/${TYPE}`,
       `POST /api/thoughts/${BRAIN}`,
@@ -848,6 +850,193 @@ describe("a typeId that is not a type", () => {
     // Only "no such thought" means "not a type". A rejected key is not that.
     const { api } = apiWith([["/api/thoughts/", () => 401]]);
     await expect(api.thoughts.requireType(BRAIN, TYPE)).rejects.toMatchObject({ kind: "auth" });
+  });
+});
+
+describe("a type the patch would not set", () => {
+  const OTHER = "cdcdcdcd-0000-4000-8000-00000000000c";
+  const THIRD = "abababab-0000-4000-8000-00000000000a";
+  const LINK = "eeeeeeee-0000-4000-8000-000000000005";
+  const types: Record<string, ThoughtDto> = {
+    [TYPE]: TYPE_THOUGHT,
+    [OTHER]: thought(OTHER, "Pattern", { kind: 2 }),
+    [THIRD]: thought(THIRD, "Method", { kind: 2 }),
+  };
+  const typeLink = (above: string, below: string) => ({
+    id: `${LINK.slice(0, -2)}${above.slice(0, 2)}`,
+    thoughtIdA: above,
+    thoughtIdB: below,
+    relation: 1,
+    meaning: 2,
+  });
+
+  /**
+   * THOUGHT as `self`, its graph listing `listed` for its types, the API's
+   * own `type` the first of them, and the lookup of a pair answering for
+   * `linked` alone: a type's link deleted a moment ago is in the graph's copy
+   * and not in the lookup. `below` is a link that hangs on THOUGHT itself.
+   */
+  const brain = (options: {
+    self?: ThoughtDto;
+    listed?: string[];
+    linked?: string[];
+    below?: Record<string, unknown>[];
+  }) => {
+    const { self = thought(THOUGHT, "RAG"), listed = [], below = [] } = options;
+    const linked = options.linked ?? listed;
+    // What a patch sets reads back at once, so that a call that sends one returns.
+    let now = self;
+    return apiWith([
+      [
+        "/graph",
+        () =>
+          graphOf(self, {
+            type: listed.length > 0 ? types[listed[0]!] : null,
+            parents: listed.map((id) => types[id]),
+            links: [...listed.map((id) => typeLink(id, THOUGHT)), ...below],
+          }),
+      ],
+      ["/api/thoughts/", (url) => types[url.pathname.split("/").pop()!] ?? now],
+      [
+        "PATCH /api/thoughts/",
+        (_url, init) => {
+          const ops = JSON.parse(String(init?.body)) as Array<{ path: string; value?: string }>;
+          for (const op of ops) {
+            if (op.path === "/typeId") now = { ...now, typeId: op.value ?? null };
+          }
+          return 200;
+        },
+      ],
+      [
+        "/api/links/",
+        (url) => {
+          const [above = "", of = ""] = url.pathname.split("/").slice(-2);
+          return of === THOUGHT && linked.includes(above) ? typeLink(above, THOUGHT) : 404;
+        },
+      ],
+    ]);
+  };
+  const writes = (calls: Array<{ method: string }>): string[] =>
+    calls.filter((c) => c.method !== "GET").map((c) => c.method);
+
+  it("a type on a tag is refused after two reads, and nothing is sent", async () => {
+    // Measured: a 200 that sets nothing and links nothing. The call used to
+    // wait out the read-back and answer that the type might yet show.
+    const { api, calls } = brain({ self: thought(THOUGHT, "gotcha", { kind: 4 }) });
+    await expect(
+      api.thoughts.update(BRAIN, THOUGHT, { name: "renamed", typeId: TYPE }),
+    ).rejects.toMatchObject({
+      kind: "type_on_tag",
+      message:
+        `thoughtId ${THOUGHT} is the tag "gotcha", and a tag takes no type: TheBrain ` +
+        "answers a typeId on a tag and sets nothing",
+    });
+    expect(calls.map((c) => `${c.method} ${c.url.pathname}`)).toEqual([
+      `GET /api/thoughts/${BRAIN}/${TYPE}`,
+      `GET /api/thoughts/${BRAIN}/${THOUGHT}/graph`,
+    ]);
+  });
+
+  it("a thought of two types is refused, both named, whatever type is asked for", async () => {
+    // Measured: the other of the two and typeId again change nothing, and a
+    // third leaves one of the two beside it. The first waited out the
+    // read-back; the other two answered "Done".
+    for (const typeId of [OTHER, TYPE, THIRD]) {
+      const { api, calls } = brain({
+        self: thought(THOUGHT, "RAG", { typeId: TYPE }),
+        listed: [OTHER, TYPE],
+      });
+      await expect(api.thoughts.update(BRAIN, THOUGHT, { typeId })).rejects.toMatchObject({
+        kind: "two_types",
+        message:
+          `thoughtId ${THOUGHT} is linked under two types, "Constraint" ${TYPE} and ` +
+          `"Pattern" ${OTHER}, and a typeId set while they are there leaves one of them in place`,
+      });
+      expect(writes(calls), typeId).toEqual([]);
+      // The type, the graph and the lookup of each pair.
+      expect(calls, typeId).toHaveLength(4);
+    }
+  });
+
+  it("two types the graph lists and the lookup of the pair does not are no refusal", async () => {
+    // The graph is a copy, and lists a type's link for a moment after it is
+    // deleted: straight after `typeId: null` it refused the call that the
+    // refusal asks for.
+    for (const linked of [[], [OTHER]]) {
+      const { api, calls } = brain({ listed: [OTHER, TYPE], linked });
+      await api.thoughts.update(BRAIN, THOUGHT, { typeId: THIRD });
+      expect(writes(calls), linked.join()).toEqual(["PATCH"]);
+    }
+  });
+
+  it("one type, or one that typeId does not name, is the patch's: its type is replaced", async () => {
+    // Measured: a type that reads as none, what deleting one of two leaves,
+    // is replaced by the type set, 3 of 3.
+    for (const self of [thought(THOUGHT, "RAG", { typeId: TYPE }), thought(THOUGHT, "RAG")]) {
+      const { api, calls } = brain({ self, listed: [TYPE] });
+      await api.thoughts.update(BRAIN, THOUGHT, { typeId: THIRD });
+      expect(writes(calls)).toEqual(["PATCH"]);
+      // No lookup of a pair: the graph lists one type.
+      expect(calls.filter((c) => c.url.pathname.includes("/api/links/"))).toEqual([]);
+    }
+  });
+
+  it("a type whose own type is the thought is refused", async () => {
+    // Measured: a 200 that sets nothing. The call waited out the read-back.
+    const { api, calls } = brain({
+      self: thought(THOUGHT, "Method family", { kind: 2 }),
+      below: [{ ...typeLink(THOUGHT, THIRD), meaning: 3 }],
+    });
+    await expect(api.thoughts.update(BRAIN, THOUGHT, { typeId: THIRD })).rejects.toMatchObject({
+      kind: "type_cycle",
+      message:
+        `typeId ${THIRD} is the type "Method", and this thought is its type: TheBrain answers ` +
+        "a typeId that would make two types each other's and sets nothing",
+    });
+    expect(writes(calls)).toEqual([]);
+    // A type below it that has another type is not that.
+    const fine = brain({
+      self: thought(THOUGHT, "Method family", { kind: 2 }),
+      below: [{ ...typeLink(THOUGHT, OTHER), meaning: 3 }],
+    });
+    await fine.api.thoughts.update(BRAIN, THOUGHT, { typeId: THIRD });
+    expect(writes(fine.calls)).toEqual(["PATCH"]);
+  });
+
+  it("a thought nobody has is the 404 of its read, not its graph's 403", async () => {
+    // The patch, which used to be the first request about the thought, was
+    // a 404 that named it. Its graph is the catch-all 403.
+    const { api, calls } = apiWith([
+      ["/graph", () => 403],
+      [`/api/thoughts/${BRAIN}/${TYPE}`, () => TYPE_THOUGHT],
+      ["/api/thoughts/", () => 404],
+    ]);
+    await expect(api.thoughts.update(BRAIN, THOUGHT, { typeId: TYPE })).rejects.toMatchObject({
+      kind: "not_found",
+      method: "GET",
+      path: `/api/thoughts/${BRAIN}/${THOUGHT}`,
+    });
+    expect(writes(calls)).toEqual([]);
+
+    // A thought that is there: the graph's 403 is the answer, and nothing is sent.
+    const there = apiWith([
+      ["/graph", () => 403],
+      [`/api/thoughts/${BRAIN}/${TYPE}`, () => TYPE_THOUGHT],
+      ["/api/thoughts/", () => thought(THOUGHT, "RAG")],
+    ]);
+    await expect(
+      there.api.thoughts.update(BRAIN, THOUGHT, { typeId: TYPE }),
+    ).rejects.toMatchObject({ kind: "forbidden", path: `/api/thoughts/${BRAIN}/${THOUGHT}/graph` });
+    expect(writes(there.calls)).toEqual([]);
+  });
+
+  it("typeId null reads no graph more than it did", async () => {
+    const { api, calls } = brain({
+      self: thought(THOUGHT, "RAG", { typeId: TYPE }),
+      listed: [TYPE],
+    });
+    await api.thoughts.update(BRAIN, THOUGHT, { typeId: null }).catch(() => undefined);
+    expect(calls.filter((c) => c.url.pathname.endsWith("/graph"))).toHaveLength(1);
   });
 });
 

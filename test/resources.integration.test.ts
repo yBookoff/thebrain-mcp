@@ -5410,6 +5410,157 @@ suite("resource layer against the live API", () => {
   });
 
   /**
+   * A type the patch would not set as asked, and `update()` refusing it ahead
+   * of the patch: on a tag, on a type that is the named type's own type, and
+   * on a thought linked under two types. Measured on 15.0.640
+   * (docs/api-map.md, L44); the two raw facts of a tag and of two types the
+   * block above pins already.
+   */
+  describe("a type the patch would not set", () => {
+    const stamp = `nottaken${Date.now()}`;
+    const patchTypeId = (id: string, typeId: string) =>
+      api.client.patch(`/api/thoughts/${brainId}/${id}`, {
+        jsonPatch: [{ op: "replace", path: "/typeId", value: typeId }],
+      });
+    const read = (id: string, ok: (t: ThoughtDto) => boolean): Promise<ThoughtDto> =>
+      eventually(() => api.thoughts.get(brainId, id), ok);
+    /** The types of `types` a type's link joins to `id`, from the type. */
+    const typeLinks = async (id: string, types: readonly string[]): Promise<string[]> => {
+      const found: string[] = [];
+      for (const t of types) {
+        const link = await api.links.between(brainId, t, id);
+        if (link !== null && isTypeLink(link) && link.thoughtIdA === t) found.push(t);
+      }
+      return found;
+    };
+
+    it("of two types, typeId again changes nothing; update refuses any type until typeId null has taken both", async () => {
+      const [first, second, third] = [
+        await make(`${stamp}-1`, ThoughtKind.Type),
+        await make(`${stamp}-2`, ThoughtKind.Type),
+        await make(`${stamp}-3`, ThoughtKind.Type),
+      ];
+      // Created under one type with another for its typeId: a link from each.
+      const { id } = await api.client.post<{ id: string }>(`/api/thoughts/${brainId}`, {
+        json: {
+          name: `${PREFIX}${stamp}-both`,
+          kind: ThoughtKind.Normal,
+          acType: 0,
+          sourceThoughtId: first,
+          relation: Relation.Child,
+          typeId: second,
+        },
+      });
+      created.push(id);
+      await read(id, (t) => t.typeId === second);
+      expect(await typeLinks(id, [first, second])).toEqual([first, second]);
+
+      // `typeId` sent again: a 200 that changes nothing, as the other of the
+      // two does (above). Through the client it answered "Done".
+      await patchTypeId(id, second);
+      await settle(600);
+      expect((await api.thoughts.get(brainId, id)).typeId).toBe(second);
+      expect(await typeLinks(id, [first, second, third])).toEqual([first, second]);
+
+      // Refused, both named, whichever type is asked for, and nothing sent.
+      for (const typeId of [first, second, third]) {
+        await expect(
+          api.thoughts.update(brainId, id, { name: `${PREFIX}${stamp}-renamed`, typeId }),
+        ).rejects.toMatchObject({
+          kind: "two_types",
+          message: expect.stringContaining(`two types, "${PREFIX}${stamp}-2" ${second} and`),
+        });
+      }
+      await settle(600);
+      const kept = await api.thoughts.get(brainId, id);
+      expect([kept.name, kept.typeId]).toEqual([`${PREFIX}${stamp}-both`, second]);
+      expect(await typeLinks(id, [first, second, third])).toEqual([first, second]);
+
+      // The way the refusal gives. A type set at once after the removal
+      // failed to read back once in 26 tries, with its link made: not what
+      // this test is about, so the two calls are apart.
+      await api.thoughts.update(brainId, id, { typeId: null });
+      await settle(600);
+      await api.thoughts.update(brainId, id, { typeId: third });
+      expect((await api.thoughts.get(brainId, id)).typeId).toBe(third);
+      await settle(600);
+      expect(await typeLinks(id, [first, second, third])).toEqual([third]);
+    }, 30_000);
+
+    it("a type set over a type that reads as none replaces it, and update lets it through", async () => {
+      // What deleting one of two types leaves: `typeId` null, and the other
+      // type's link. A third patched over it replaces it, 3 of 3 through the
+      // handler as well. The graph read just before the deletion is a copy
+      // that may list both still (19 times of 20 straight after two were
+      // deleted): update counts the types by the lookup of each pair.
+      const [first, second, third] = [
+        await make(`${stamp}-h1`, ThoughtKind.Type),
+        await make(`${stamp}-h2`, ThoughtKind.Type),
+        await make(`${stamp}-h3`, ThoughtKind.Type),
+      ];
+      const { id } = await api.client.post<{ id: string }>(`/api/thoughts/${brainId}`, {
+        json: {
+          name: `${PREFIX}${stamp}-hidden`,
+          kind: ThoughtKind.Normal,
+          acType: 0,
+          sourceThoughtId: first,
+          relation: Relation.Child,
+          typeId: second,
+        },
+      });
+      created.push(id);
+      await read(id, (t) => t.typeId === second);
+      await api.thoughts.getGraph(brainId, id);
+      await api.client.delete(
+        `/api/links/${brainId}/${(await api.links.between(brainId, second, id))!.id}`,
+      );
+      await read(id, (t) => t.typeId === null);
+      expect(await typeLinks(id, [first, second])).toEqual([first]);
+
+      await api.thoughts.update(brainId, id, { typeId: third });
+      expect((await api.thoughts.get(brainId, id)).typeId).toBe(third);
+      await settle(600);
+      expect(await typeLinks(id, [first, second, third])).toEqual([third]);
+    }, 30_000);
+
+    it("a type for a tag, or for the type of its own type, is a 200 that sets nothing, and update refuses it", async () => {
+      // A tag: the 200 that sets nothing is pinned in the block above.
+      const tag = await make(`${stamp}-tag`, ThoughtKind.Tag);
+      const type = await make(`${stamp}-for-tag`, ThoughtKind.Type);
+      await expect(api.thoughts.update(brainId, tag, { typeId: type })).rejects.toMatchObject({
+        kind: "type_on_tag",
+      });
+
+      // A type whose type is the other: the other given it for its type.
+      const upper = await make(`${stamp}-upper`, ThoughtKind.Type);
+      const lower = await make(`${stamp}-lower`, ThoughtKind.Type);
+      await api.thoughts.update(brainId, lower, { typeId: upper });
+      const link = async (): Promise<unknown[]> => {
+        const found = await api.links.between(brainId, upper, lower);
+        return [found?.id, found?.thoughtIdA, found?.thoughtIdB, found?.meaning];
+      };
+      const own = await link();
+      expect(own.slice(1)).toEqual([upper, lower, LinkMeaning.SubType]);
+      await patchTypeId(upper, lower);
+      await settle(600);
+      expect((await api.thoughts.get(brainId, upper)).typeId).toBeNull();
+      expect(await link()).toEqual(own);
+
+      // The upper one's graph lists the link, and update refuses by it.
+      await eventually(
+        () => api.thoughts.getGraph(brainId, upper),
+        (g) => g.links.some((l) => l.id === own[0]),
+      );
+      await expect(api.thoughts.update(brainId, upper, { typeId: lower })).rejects.toMatchObject({
+        kind: "type_cycle",
+      });
+      await settle(600);
+      expect((await api.thoughts.get(brainId, upper)).typeId).toBeNull();
+      expect(await link()).toEqual(own);
+    }, 30_000);
+  });
+
+  /**
    * What `links.create`, `thoughts.create` and ingest do about a type named as
    * a parent, and what they let through. The API facts are in the block above.
    */

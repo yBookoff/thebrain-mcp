@@ -412,8 +412,8 @@ describe("a thought's kind in what the read tools print", () => {
       expect(text).toBe(
         `# RAG\n${THOUGHT}\n\n## Types\n- Pattern — ${TYPE}\n- Method — ${SECOND}\n` +
           "TheBrain links this thought under both. typeId null in brain_update_thought removes " +
-          "both, and a typeId set while both are there replaces one of them at most: to keep " +
-          `one, remove both, then set it.\n\n## Parents\n- Retrieval — ${PARENT}`,
+          "both, and a type is set only once they are gone: to keep one, remove both, then " +
+          `set it.\n\n## Parents\n- Retrieval — ${PARENT}`,
       );
     });
   });
@@ -3052,6 +3052,131 @@ describe("a typeId that is not a type", () => {
     ]) {
       expect(argument?.description).toContain("brain_list_types_and_tags");
     }
+  });
+});
+
+describe("a type the patch would not set", () => {
+  const TYPE = "eeeeeeee-0000-4000-8000-000000000005";
+  const SECOND = "abababab-0000-4000-8000-00000000000a";
+  const types: Record<string, { name: string; kind: number }> = {
+    [TYPE]: { name: "Pattern", kind: 2 },
+    [SECOND]: { name: "Method", kind: 2 },
+  };
+  const at = (id: string) => ({ ...thought("", { aliases: [] }), id, ...types[id] });
+  const down = (above: string, below: string, meaning = 2) => ({
+    id: `${LINK.slice(0, -2)}${above.slice(0, 2)}`,
+    thoughtIdA: above,
+    thoughtIdB: below,
+    relation: 1,
+    meaning,
+  });
+
+  /** THOUGHT as `self`, with the links its graph and the lookup of a pair both have. */
+  const routes = (self: Record<string, unknown>, links: ReturnType<typeof down>[]): Route[] => [
+    [
+      "GET /graph",
+      () => ({
+        ...graph(self),
+        type: links.some((l) => l.thoughtIdB === THOUGHT) ? at(links[0]!.thoughtIdA) : null,
+        parents: links.filter((l) => l.thoughtIdB === THOUGHT).map((l) => at(l.thoughtIdA)),
+        children: links.filter((l) => l.thoughtIdA === THOUGHT).map((l) => at(l.thoughtIdB)),
+        links,
+      }),
+    ],
+    [
+      "GET /api/links/",
+      (url) => {
+        const [a, b] = url.pathname.split("/").slice(-2);
+        return (
+          links.find(
+            (l) =>
+              (l.thoughtIdA === a && l.thoughtIdB === b) ||
+              (l.thoughtIdA === b && l.thoughtIdB === a),
+          ) ?? 404
+        );
+      },
+    ],
+    [
+      "GET /api/thoughts/",
+      (url) => {
+        const id = url.pathname.split("/").pop()!;
+        return id in types ? at(id) : self;
+      },
+    ],
+    ["PATCH /api/thoughts/", () => 200],
+  ];
+
+  /**
+   * The call with the type alone, and with every field beside it: the type
+   * goes first, so a refusal of it stops the call before any write.
+   */
+  const refusal = async (connected: Awaited<ReturnType<typeof connect>>, typeId: string) => {
+    const { call, calls } = connected;
+    const alone = await call("brain_update_thought", { brainId: BRAIN, thoughtId: THOUGHT, typeId });
+    const all = await call("brain_update_thought", {
+      brainId: BRAIN,
+      thoughtId: THOUGHT,
+      name: "renamed",
+      typeId,
+      addAliases: ["R.A.G."],
+    });
+    expect(all.isError).toBe(true);
+    expect(all.text).toContain(alone.text);
+    expect(all.text).toMatch(/## Skipped\n- name = "renamed"\n- aliases\n/);
+    expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+    return alone;
+  };
+
+  it("brain_update_thought refuses a type on a tag, and writes nothing", async () => {
+    // Measured: a 200 that sets nothing. The call waited two seconds for the
+    // type to read back and answered that it might yet.
+    const result = await refusal(await connect(routes(thought("gotcha", { kind: 4 }), [])), TYPE);
+    expect(result).toEqual({
+      isError: true,
+      text:
+        `thoughtId ${THOUGHT} is the tag "gotcha", and a tag takes no type: TheBrain answers ` +
+        "a typeId on a tag and sets nothing. Nothing was written. A type goes on an ordinary " +
+        "thought or on a type; to put this tag on a thought, pass both to brain_tag.",
+    });
+  });
+
+  it("brain_update_thought refuses any type for a thought of two, naming both, and writes nothing", async () => {
+    // Measured: the other of the two waited two seconds and answered that it
+    // might yet read back; a third, and typeId again, answered "Done" with
+    // one of the two still beside it.
+    for (const typeId of [SECOND, TYPE, PARENT]) {
+      const self = thought("RAG", { typeId: TYPE, aliases: [] });
+      const connected = await connect([
+        // PARENT stands for a third type here.
+        [`GET /api/thoughts/${BRAIN}/${PARENT}`, () => ({ ...at(SECOND), id: PARENT, name: "Idea" })],
+        ...routes(self, [down(TYPE, THOUGHT), down(SECOND, THOUGHT)]),
+      ]);
+      const result = await refusal(connected, typeId);
+      expect(result, typeId).toEqual({
+        isError: true,
+        text:
+          `thoughtId ${THOUGHT} is linked under two types, "Pattern" ${TYPE} and "Method" ` +
+          `${SECOND}, and a typeId set while they are there leaves one of them in place. ` +
+          "Nothing was written. To leave it one type, send typeId null first, which removes " +
+          "them all, then this typeId in a second brain_update_thought call.",
+      });
+    }
+  });
+
+  it("brain_update_thought refuses a type whose type is the thought, and writes nothing", async () => {
+    // Measured: a 200 that sets nothing, and two seconds of waiting.
+    const connected = await connect(
+      routes(thought("Method family", { kind: 2, aliases: [] }), [down(THOUGHT, SECOND, 3)]),
+    );
+    const result = await refusal(connected, SECOND);
+    expect(result).toEqual({
+      isError: true,
+      text:
+        `typeId ${SECOND} is the type "Method", and this thought is its type: TheBrain ` +
+        "answers a typeId that would make two types each other's and sets nothing. Nothing " +
+        "was written. To make that type this thought's type, first take this thought away as " +
+        "its type, with typeId null in a brain_update_thought call for that type.",
+    });
   });
 });
 
@@ -7982,6 +8107,7 @@ describe("a call that fails after it has written", () => {
       vi.useFakeTimers();
       try {
         const { call, sent } = await connect([
+          ["GET /graph", () => graph(thought("RAG", { aliases: [] }))],
           [
             "GET /api/thoughts/",
             (url) =>
@@ -8030,6 +8156,7 @@ describe("a call that fails after it has written", () => {
         let patched = false;
         const { call } = await connect([
           [`GET /api/thoughts/${BRAIN}/${TYPE}`, () => thought("Pattern", { id: TYPE, kind: 2 })],
+          ["GET /graph", () => graph(thought("RAG"))],
           ["GET /api/thoughts/", () => (patched ? boom() : thought("RAG"))],
           ["PATCH /api/thoughts/", () => ((patched = true), 200)],
         ]);

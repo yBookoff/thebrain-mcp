@@ -421,22 +421,33 @@ two types, `typeId`'s first:
 ## Types
 - Pattern — 9e00b6a1-52c3-4f0e-9a7d-0c8f3e1d2b45
 - Method — 35e1c2d4-7a8b-4c9d-8e0f-1a2b3c4d5e6f
-TheBrain links this thought under both. typeId null in brain_update_thought removes both, and a typeId set while both are there replaces one of them at most: to keep one, remove both, then set it.
+TheBrain links this thought under both. typeId null in brain_update_thought removes both, and a type is set only once they are gone: to keep one, remove both, then set it.
 ```
 
-The line is there because the obvious next call goes wrong: set to the other
-of the two, `typeId` is a 200 that changes nothing, and the tool answers two
-seconds later that the type has not read back; set to a third, one of the two
-stays beside it (L44). It costs 193 characters on a thought of two types; a
-tag on a tag is 68 shorter, and every other result is what it was, to the
+The line is there because the obvious next call would go wrong, and is now
+refused (below). It costs 168 characters on a thought of two types; a tag on
+a tag is 68 shorter, and every other result is what it was, to the
 character. `tools/list` did not change.
 
-**Not done.** A type set on a thought of two types is still one patch: the
-tool answers "Done" with the type set and one of the old two still there. A
-type set on a tag is a 200 that sets nothing, and the tool answers after two
-seconds that it has not read back yet. Neither reports a removal that did not
-happen. Telling either apart costs a read of the thought ahead of the patch,
-and is a decision of its own.
+**A type the patch would not set is refused.** Three `typeId`s are a 200
+that does not do what was asked (L44): on a tag it sets nothing; on a type
+that is the named type's own type, nothing either; on a thought of two types
+the other of the two, or `typeId` again, changes nothing, and a third comes
+in beside one of the two. The tool answered the first two and the other of
+the two after two seconds, that the type had not read back yet, and the rest
+"Done". `update()` now reads the thought's graph after the type and ahead of
+any write, and refuses each: `type_on_tag`, `type_cycle`, and `two_types`,
+which names both types and says to send `typeId: null` first and the type
+after. Doing both in the one call was not taken: it would take away a type
+the caller may not know of, for a state the tools no longer make. The
+graph's copy, read straight after two type links were deleted, listed both
+19 times of 20 (after `removeType`, none of 20), so two types are counted by
+`links.between()`, which is not behind. A type that reads as none beside
+another's link is one type, which a third replaces (3 of 3), and is let
+through. The cost is one read more on every type set, four requests at the
+least; a refusal is two requests, four for two types, with no write and no
+wait. A longer chain of types back to the thought is not looked for, and not
+measured.
 
 ### What changed, and to which thought
 
@@ -2170,7 +2181,9 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     `isTypeLink()` takes meaning 3, `removeType()` deletes every type's link
     the thought has, and `getGraph()` keeps a parent only for an ordinary link,
     with a second type in `otherTypes` (§4, *What stands above a type or a
-    tag*; `docs/api-map.md`, L44).
+    tag*; `docs/api-map.md`, L44). A type set on a tag, on the type's own
+    type, or over two types is a 200 that does not do it, and `update()`
+    refuses each ahead of the patch, by the thought's graph.
 26. **A type is given its name for a label, and a rename leaves the label
     where it was.** A thought with no label reads with its name for one
     while it is a type, and with none again when it stops being one, as

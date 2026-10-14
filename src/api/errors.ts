@@ -62,6 +62,22 @@ export type ApiErrorKind =
    */
   | "tag_as_parent"
   /**
+   * A type set on a tag. The API answers 200 and sets nothing, no link
+   * either. Raised ahead of the write.
+   */
+  | "type_on_tag"
+  /**
+   * A type set on a type that is the named type's own type. The API answers
+   * 200 and sets nothing. Raised ahead of the write.
+   */
+  | "type_cycle"
+  /**
+   * A type set on a thought linked under two types. The API answers 200 and
+   * one of the two stays, beside the new type or alone. Raised ahead of the
+   * write. `typeId: null` takes both away, and a type is set after that.
+   */
+  | "two_types"
+  /**
    * HTTP 200 with an identifier of zeros for what was to be created. It is the
    * API's answer for a link it does not make, and nothing is written then: a
    * thought with itself, a tag under a type.
