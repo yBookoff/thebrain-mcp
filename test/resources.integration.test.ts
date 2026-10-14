@@ -2931,6 +2931,7 @@ suite("resource layer against the live API", () => {
     });
 
     it("a sync gives a type and a tag made through createTypeOrTag rows of their kind, and a default search leaves them out", async () => {
+      const since = new Date().toISOString();
       const plain = await make(`vocab-${run}-index-plain`);
       const embedder: Embedder = {
         id: "contract@v1",
@@ -2938,10 +2939,11 @@ suite("resource layer against the live API", () => {
         embedDocuments: async (texts) => texts.map(() => new Float32Array([1])),
         embedQuery: async () => new Float32Array([1]),
       };
-      const store = new VectorStore(":memory:");
-      const indexer = new SemanticIndexer(api, store, embedder);
+      // Filled from the test's start, not rebuilt: the claim is the sync's.
+      const { store, indexer } = await indexedSince(since, embedder);
       const search = new SemanticSearch(api, store, embedder);
-      await indexer.rebuild(brainId);
+      // Past the log, so that the creates below are all the sync goes by.
+      await caughtUp(store);
 
       const tag = await api.thoughts.createTypeOrTag(brainId, { name: named("index-tag"), kind: Tag });
       const type = await api.thoughts.createTypeOrTag(brainId, {
