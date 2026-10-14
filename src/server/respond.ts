@@ -291,6 +291,54 @@ export function kindMark(kind: number): string {
 }
 
 /**
+ * A thought's label as a result prints it, or null where it prints none: for
+ * a thought with no label, and for one whose label is its name, which says
+ * nothing. TheBrain gives a type its name for a label when it becomes one
+ * (docs/api-map.md, L38), so every type has one, and printed it would cost
+ * every type in a result its name twice. A label with no character that
+ * shows is spelled out, as a name is.
+ *
+ * Every thought the API returns carries its label, in a graph's lists and in
+ * `/types` and `/tags` alike (contract tests), so no request is spent on it.
+ */
+export function labelOf(thought: {
+  name: string | null;
+  label?: string | null | undefined;
+}): string | null {
+  const { label } = thought;
+  if (label === null || label === undefined || label === "" || label === thought.name) {
+    return null;
+  }
+  return shownName(label);
+}
+
+/**
+ * The label after a thought's identifier in a list, where it cannot be read
+ * as part of the name: `, label "…"`, or nothing. Quoted as a link's label
+ * is, unless it is spelled out.
+ */
+export function labelMark(thought: {
+  name: string | null;
+  label?: string | null | undefined;
+}): string {
+  const shown = labelOf(thought);
+  if (shown === null) return "";
+  return `, label ${shown === thought.label ? JSON.stringify(shown) : shown}`;
+}
+
+/**
+ * What a result says under a type whose label is not its name. TheBrain
+ * writes the name a thought has into its label when it becomes a type, and a
+ * rename leaves it there: a renamed type reads with the name it had, and
+ * TheBrain's search finds it by that name, as the semantic index does (L38).
+ * A read cannot tell such a label from a caption someone wrote, so it is
+ * said to be a name the type may have had.
+ */
+export const TYPE_LABEL =
+  "A type's label may be a name it had, which TheBrain keeps there through a rename and " +
+  "finds the type by. label null in brain_update_thought clears it.";
+
+/**
  * The title for what a graph lists as `children`. Under a type those are the
  * thoughts of that type, and under a tag the thoughts the tag is on: a link
  * with a type or a tag above is the type's or the tag's, never a parent's

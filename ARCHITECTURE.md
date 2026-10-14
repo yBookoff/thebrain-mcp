@@ -262,6 +262,55 @@ beside the document*).
 > index's. The mark still costs no request of its own. What the index's kind
 > still decides is which rows a default search leaves out as types and tags.
 
+**A label, read back.** `brain_create_thought` writes a thought's label and
+`brain_update_thought` writes and clears one, and no read tool printed it:
+what was written could not be read back. And a renamed type keeps the name
+it had for a label, which TheBrain's search and the semantic index find it
+by (§7, item 26), with nothing to show that it does. The label is on every
+thought the API returns, in a graph's lists and in `/types` and `/tags`
+(contract test), so printing it takes no request.
+
+`brain_get_thought` prints the thought's label under `## Label`, right under
+the title, and a neighbour's after its identifier and its mark, quoted as a
+link's label is: `- Mercury — {id}, label "element"`. Two thoughts of one
+name in one list are told apart by it, where it took a read of each.
+`brain_list_types_and_tags` prints a type's and a tag's the same way. A label
+that is the name is not printed: every type has one, its name, and it says
+nothing the name does not, at the cost of a type's name twice wherever a
+result names a type. A label with no character that shows is spelled out, as
+a name is (below).
+
+Under a type whose label is not its name, in `brain_get_thought`, and once
+under the list of types in `brain_list_types_and_tags` when a type there has
+such a label, a sentence follows: "A type's label may be a name it had, which TheBrain keeps there
+through a rename and finds the type by. label null in brain_update_thought
+clears it." A read cannot tell such a label from a caption someone wrote
+(§8, *The label of a type*), so the sentence says "may", and whether to clear
+it is the caller's.
+
+Measured through the real handlers on 15.0.640, in a throwaway brain. A
+thought with a type, two tags, a parent, four children, two jumps and a note
+is 797 characters with no label anywhere, the same lines as before; with a
+label on it and on two of its jumps, 850. A type renamed once, with two
+thoughts of it, one of them labelled, went from 184 to 374, the sentence 149
+of that. The list of two types, one of them renamed, and two tags went from
+222 to 395. A result with no label in it, or only labels that are the name,
+is what it was, to the character. `tools/list` did not change: no
+description mentions the label.
+
+Left as they were. The type and the tags of the thought read: a type's label
+is the vocabulary's, and on the line of a renamed type it would be paid on
+every read of every thought of that type, while `brain_get_thought` on the
+type and `brain_list_types_and_tags` show it. `brain_traverse` and
+`brain_search`: their nodes and hits carry no label as far as the tools, it
+would take a field through `src/operations/` and `src/semantic/`, and the
+index keeps none for a hit whose read failed; a thought chosen from either
+is read with `brain_get_thought`. And a rename of a type does not say that
+the type keeps its old name for a label: `brain_update_thought` reads
+nothing before a rename, so it does not know that it renames a type, and a
+sentence in the description of `name` would be paid by every session for a
+call that is rare.
+
 **A name that does not show is spelled out, not refused.** A thought can be
 named with one zero width space, a byte order mark or a Hangul filler: the
 API stores such a name as it stores any other (§7, item 23). Every tool
@@ -2080,7 +2129,8 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     renamed type reads with the name it became a type under, keeps that as
     an ordinary thought after, and is found by it in TheBrain's own search.
     `remove` clears it. None of the giving and taking is in the log. The
-    index embeds the label as it reads (§8, *The label of a type*).
+    index embeds the label as it reads (§8, *The label of a type*), and the
+    read tools print it where it is not the name (§4, *A label, read back*).
 27. **A graph lists a thought once.** A sibling that is also the thought's
     parent, child or jump is under that list and not under `siblings`. So
     `siblings` is not every thought that shares a parent, and nothing here
@@ -3251,8 +3301,10 @@ of a renamed type. It is left there, and `DOCUMENT_FORMAT` stays at 3:
 
 What takes the old name out is the label's removal, `label: null` through
 `brain_update_thought`: the `202` it logs is among the entries a sync reads,
-and the row is the new name alone after it. No tool prints a thought's
-label, so nothing shows a caller that a type has one to remove. Should the
+and the row is the new name alone after it. No tool printed a thought's
+label then, so nothing showed a caller that a type had one to remove;
+`brain_get_thought` and `brain_list_types_and_tags` print it now, with what
+clears it (§4, *A label, read back*). Should the
 format change for another reason, whether a type's label equal to a name it
 no longer has belongs in the document is worth asking again then.
 

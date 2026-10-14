@@ -670,6 +670,93 @@ suite("resource layer against the live API", () => {
     expect(found[id]).toBe(ThoughtKind.Normal);
   }, 40_000);
 
+  it("every thought a graph lists, and every type and tag the brain lists, carries its label", async () => {
+    // brain_get_thought prints a neighbour's label, and brain_list_types_and_tags
+    // a type's and a tag's, from this, at no request of their own.
+    const stamp = `label${Date.now()}`;
+    const labelled = async (
+      name: string,
+      label: string,
+      under: { sourceThoughtId: string; relation?: Relation; typeId?: string },
+    ): Promise<string> => {
+      const made = await api.thoughts.create(brainId, {
+        name: `${PREFIX}${stamp} ${name}`,
+        label,
+        ...under,
+      });
+      created.push(made);
+      return made;
+    };
+    // A type renamed: the label is the name it was made under (L38). Given
+    // in the create, which waits for no read-back of the thought's own.
+    const typeName = `${PREFIX}${stamp} type`;
+    const typeId = await make(`${stamp} type`, ThoughtKind.Type);
+    await api.thoughts.update(brainId, typeId, { name: `${typeName} renamed` });
+    await eventually(
+      () => api.thoughts.get(brainId, typeId),
+      (t) => t.name === `${typeName} renamed`,
+    );
+    const parentId = await make(`${stamp} parent`);
+    const id = await labelled("thought", "its caption", { sourceThoughtId: parentId, typeId });
+    const childId = await labelled("child", "a child's caption", { sourceThoughtId: id });
+    const siblingId = await labelled("sibling", "a sibling's caption", {
+      sourceThoughtId: parentId,
+    });
+    const jumpId = await labelled("jump", "a jump's caption", {
+      sourceThoughtId: id,
+      relation: Relation.Jump,
+    });
+    // A tag is given no label, and takes one written to it.
+    const tagId = await make(`${stamp} tag`, ThoughtKind.Tag);
+    await api.thoughts.update(brainId, tagId, { label: "a tag's caption" });
+    await api.links.attachTag(brainId, id, tagId);
+
+    const labels = (list: readonly ThoughtDto[]): Record<string, string | null> =>
+      Object.fromEntries(list.map((t) => [t.id, t.label]));
+    const graph = await eventually(
+      () => api.thoughts.getGraph(brainId, id, { includeSiblings: true }),
+      (g) =>
+        g.children.length === 1 &&
+        g.jumps.length === 1 &&
+        g.siblings.length === 1 &&
+        g.tags[0]?.label === "a tag's caption" &&
+        g.type?.name === `${typeName} renamed`,
+      { timeoutMs: 20_000, stepMs: 250 },
+    );
+    expect(graph.thought.label).toBe("its caption");
+    expect(labels(graph.parents)).toEqual({ [parentId]: null });
+    expect(labels(graph.children)).toEqual({ [childId]: "a child's caption" });
+    expect(labels(graph.jumps)).toEqual({ [jumpId]: "a jump's caption" });
+    expect(labels(graph.siblings)).toEqual({ [siblingId]: "a sibling's caption" });
+    expect(labels(graph.tags)).toEqual({ [tagId]: "a tag's caption" });
+    expect(graph.type?.label).toBe(typeName);
+    const above = await eventually(
+      () => api.thoughts.getGraph(brainId, parentId),
+      (g) => g.children.length === 2,
+      { timeoutMs: 20_000, stepMs: 250 },
+    );
+    expect(labels(above.children)).toEqual({
+      [id]: "its caption",
+      [siblingId]: "a sibling's caption",
+    });
+
+    // The lists of the brain's vocabulary, a copy behind a write (L39), and
+    // further behind with another session at work in TheBrain: in one full
+    // run beside it, /types did not list the type within 12 s.
+    const types = await eventually(
+      () => api.thoughts.listTypes(brainId),
+      (list) => list.some((t) => t.id === typeId && t.name === `${typeName} renamed`),
+      { timeoutMs: 20_000, stepMs: 250 },
+    );
+    expect(types.find((t) => t.id === typeId)?.label).toBe(typeName);
+    const tags = await eventually(
+      () => api.thoughts.listTags(brainId),
+      (list) => list.some((t) => t.id === tagId && t.label !== null),
+      { timeoutMs: 20_000, stepMs: 250 },
+    );
+    expect(tags.find((t) => t.id === tagId)?.label).toBe("a tag's caption");
+  }, 90_000);
+
   it("append creates the note when absent and extends it afterwards", async () => {
     const id = await make("with-note");
 

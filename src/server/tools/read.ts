@@ -12,7 +12,12 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { TheBrainError } from "../../api/errors.js";
 import { compareLogTime, logTime } from "../../api/log.js";
-import { ThoughtKind, aliasesOf, type ModificationLogDto } from "../../api/types.js";
+import {
+  ThoughtKind,
+  aliasesOf,
+  type ModificationLogDto,
+  type ThoughtDto,
+} from "../../api/types.js";
 import {
   describeChange,
   isSettingNoise,
@@ -44,11 +49,14 @@ import {
   join,
   kindLabel,
   kindMark,
+  labelMark,
+  labelOf,
   ok,
   section,
   sentence,
   shownName,
   table,
+  TYPE_LABEL,
 } from "../respond.js";
 
 const brainId = z
@@ -621,10 +629,20 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       ]);
 
       // A type or a tag among them is marked: any of these lists can hold one,
-      // and a write refuses it where an ordinary thought was meant.
-      const names = (
-        list: ReadonlyArray<{ name: string | null; id: string; kind: number }>,
-      ): string[] => list.map((t) => `${shownName(t.name)} — ${t.id}${kindMark(t.kind)}`);
+      // and a write refuses it where an ordinary thought was meant. A label
+      // that is not the name follows: it is what tells two of one name apart.
+      const names = (list: readonly ThoughtDto[]): string[] =>
+        list.map((t) => `${shownName(t.name)} — ${t.id}${kindMark(t.kind)}${labelMark(t)}`);
+
+      // The thought's own label, read back as it was written. A type's may be
+      // a name it had, which TheBrain keeps there through a rename (L38).
+      const label = labelOf(graph.thought);
+      const labelBody =
+        label === null
+          ? null
+          : graph.thought.kind === ThoughtKind.Type
+            ? `${label}\n${TYPE_LABEL}`
+            : label;
 
       // With its identifier: that is what a typeId takes. A thought made
       // under one type with another for its typeId has two, and the second
@@ -638,6 +656,8 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       return ("error" in note ? fail : ok)(
         join([
           `# ${shownName(graph.thought.name)}\n${graph.thought.id}${kindMark(graph.thought.kind)}`,
+          // Not through section(): a label can be "(empty)", which it drops.
+          labelBody === null ? null : `## Label\n${labelBody}`,
           // One per line: an alias may hold a comma, and the list gets edited by value.
           section("Aliases", bullet(aliasesOf(graph.thought))),
           types.length > 1
@@ -866,10 +886,15 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
         ctx.api.thoughts.listTypes(bid),
         ctx.api.thoughts.listTags(bid),
       ]);
+      // A label that is not the name follows the identifier. Every type has
+      // one, its name, and a renamed type keeps the name it had there (L38):
+      // the vocabulary is where that shows across the brain.
+      const line = (t: ThoughtDto): string => `${shownName(t.name)} — ${t.id}${labelMark(t)}`;
+      const relabelled = types.some((t) => labelOf(t) !== null);
       return ok(
         join([
-          section("Types", bullet(types.map((t) => `${shownName(t.name)} — ${t.id}`))),
-          section("Tags", bullet(tags.map((t) => `${shownName(t.name)} — ${t.id}`))),
+          section("Types", bullet(types.map(line)) + (relabelled ? `\n${TYPE_LABEL}` : "")),
+          section("Tags", bullet(tags.map(line))),
           types.length === 0 && tags.length === 0
             ? section("Note", "This brain has no types or tags yet.")
             : null,

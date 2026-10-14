@@ -746,6 +746,153 @@ describe("a thought's kind in what the read tools print", () => {
   });
 });
 
+describe("a thought's label in what the read tools print", () => {
+  // The label is on every thought the API returns, in a graph's lists and in
+  // /types and /tags alike (contract test), and no read tool printed it: the
+  // tools wrote and cleared a label nothing read back. A type is given its
+  // name for one, and a rename leaves it there (docs/api-map.md, L38).
+  const TYPE = "eeeeeeee-0000-4000-8000-000000000005";
+  const TAG = "ffffffff-0000-4000-8000-000000000006";
+  const OTHER = "abababab-0000-4000-8000-000000000007";
+  const SECOND = "cdcdcdcd-0000-4000-8000-00000000000c";
+
+  const at = (id: string, name: string, kind = 1, label: string | null = null) =>
+    thought(name, { id, kind, label });
+  const TYPE_LABEL =
+    "A type's label may be a name it had, which TheBrain keeps there through a rename and " +
+    "finds the type by. label null in brain_update_thought clears it.";
+
+  describe("brain_get_thought", () => {
+    const view = async (
+      shown: Record<string, unknown>,
+      args: Record<string, unknown> = {},
+    ): Promise<string> => {
+      const { call } = await connect([
+        ["GET /graph", () => shown],
+        ["GET /api/notes", () => noNote],
+      ]);
+      const result = await call("brain_get_thought", {
+        brainId: BRAIN,
+        thoughtId: THOUGHT,
+        ...args,
+      });
+      expect(result.isError).toBe(false);
+      return result.text;
+    };
+
+    it("a thought's label is read back under its title", async () => {
+      expect(await view(graph(at(THOUGHT, "Mercury", 1, "planet")))).toBe(
+        `# Mercury\n${THOUGHT}\n\n## Label\nplanet`,
+      );
+      // Whatever it reads: a section of "(empty)" alone is one that is dropped.
+      expect(await view(graph(at(THOUGHT, "Mercury", 1, "(empty)")))).toBe(
+        `# Mercury\n${THOUGHT}\n\n## Label\n(empty)`,
+      );
+      // A tag's too, with nothing more said: a tag is given none.
+      expect(await view(graph(at(THOUGHT, "gotcha", 4, "a pitfall")))).toBe(
+        `# gotcha\n${THOUGHT} [tag]\n\n## Label\na pitfall`,
+      );
+    });
+
+    it("a label that is the name, or none, leaves the result as it was, to the character", async () => {
+      // Every type has its name for a label, and a type read as it did.
+      expect(await view(graph(at(THOUGHT, "Pattern", 2, "Pattern")))).toBe(
+        `# Pattern\n${THOUGHT} [type]`,
+      );
+      expect(await view(graph(at(THOUGHT, "RAG", 1, "RAG")))).toBe(`# RAG\n${THOUGHT}`);
+      expect(await view(graph(at(THOUGHT, "RAG", 1, "")))).toBe(`# RAG\n${THOUGHT}`);
+      expect(await view(graph(thought("RAG", { label: undefined })))).toBe(`# RAG\n${THOUGHT}`);
+    });
+
+    it("a type whose label is not its name is said to carry a name it may have had, and what clears it", async () => {
+      expect(await view({ ...graph(at(THOUGHT, "Person", 2, "Persn")), children: [at(OTHER, "Ada")] })).toBe(
+        `# Person\n${THOUGHT} [type]\n\n## Label\nPersn\n${TYPE_LABEL}\n\n` +
+          `## Thoughts of this type\n- Ada — ${OTHER}`,
+      );
+    });
+
+    it("a neighbour's label follows its identifier and its mark, when it is not its name", async () => {
+      const text = await view(
+        {
+          ...graph(thought("Planets")),
+          parents: [at(PARENT, "Astronomy")],
+          // Two of one name, told apart by their labels alone.
+          children: [at(OTHER, "Mercury", 1, "planet"), at(SECOND, "Mercury", 1, "element")],
+          jumps: [at(TYPE, "Body", 2, "Body"), at(TAG, "Celestial", 2, "Heavenly")],
+          siblings: [at(LINK, "Moons", 1, "Moons")],
+        },
+        { includeSiblings: true },
+      );
+      expect(text).toBe(
+        `# Planets\n${THOUGHT}\n\n## Parents\n- Astronomy — ${PARENT}\n\n` +
+          `## Children\n- Mercury — ${OTHER}, label "planet"\n- Mercury — ${SECOND}, label "element"\n\n` +
+          `## Jumps\n- Body — ${TYPE} [type]\n- Celestial — ${TAG} [type], label "Heavenly"\n\n` +
+          `## Siblings\n- Moons — ${LINK}`,
+      );
+    });
+
+    it("the label of the thought's type and of its tags is the vocabulary's, and not printed here", async () => {
+      const text = await view({
+        ...graph(thought("Ada", { typeId: TYPE })),
+        type: at(TYPE, "Person", 2, "Persn"),
+        tags: [at(TAG, "gotcha", 4, "a pitfall")],
+      });
+      expect(text).toBe(`# Ada\n${THOUGHT}\n\n## Type\nPerson — ${TYPE}\n\n## Tags\ngotcha`);
+    });
+
+    it("a label with no character that shows is spelled out, as a name is", async () => {
+      const text = await view({
+        ...graph(at(THOUGHT, "Mercury", 1, "\u200b")),
+        children: [at(OTHER, "Venus", 1, "\ufeff"), at(SECOND, "Mars", 1, 'the "red" one')],
+      });
+      expect(text).toBe(
+        `# Mercury\n${THOUGHT}\n\n## Label\n(no visible character: U+200B)\n\n` +
+          `## Children\n- Venus — ${OTHER}, label (no visible character: U+FEFF)\n` +
+          `- Mars — ${SECOND}, label "the \\"red\\" one"`,
+      );
+    });
+  });
+
+  describe("brain_list_types_and_tags", () => {
+    const list = async (types: unknown[], tags: unknown[]): Promise<string> => {
+      const { call } = await connect([
+        [`GET /api/thoughts/${BRAIN}/types`, () => types],
+        [`GET /api/thoughts/${BRAIN}/tags`, () => tags],
+      ]);
+      const result = await call("brain_list_types_and_tags", { brainId: BRAIN });
+      expect(result.isError).toBe(false);
+      return result.text;
+    };
+
+    it("types that read with their names for labels, and tags with none, read as they did", async () => {
+      expect(
+        await list([at(TYPE, "Pattern", 2, "Pattern")], [at(TAG, "gotcha", 4)]),
+      ).toBe(`## Types\n- Pattern — ${TYPE}\n\n## Tags\n- gotcha — ${TAG}`);
+    });
+
+    it("a type whose label is not its name shows it, and the list says once what that may be", async () => {
+      expect(
+        await list(
+          [
+            at(TYPE, "Person", 2, "Persn"),
+            at(OTHER, "Pattern", 2, "Pattern"),
+            at(SECOND, "Place", 2, "Locale"),
+          ],
+          [at(TAG, "gotcha", 4, "a pitfall")],
+        ),
+      ).toBe(
+        `## Types\n- Person — ${TYPE}, label "Persn"\n- Pattern — ${OTHER}\n` +
+          `- Place — ${SECOND}, label "Locale"\n${TYPE_LABEL}\n\n` +
+          `## Tags\n- gotcha — ${TAG}, label "a pitfall"`,
+      );
+      // A tag's label alone says nothing of types.
+      expect(await list([at(TYPE, "Pattern", 2, "Pattern")], [at(TAG, "gotcha", 4, "x")])).toBe(
+        `## Types\n- Pattern — ${TYPE}\n\n## Tags\n- gotcha — ${TAG}, label "x"`,
+      );
+    });
+  });
+});
+
 describe("brain_recent_changes and a thought it has no name for", () => {
   const GONE = "eeeeeeee-0000-4000-8000-000000000005";
   const NOBODY = "00000000-0000-0000-0000-000000000000";
