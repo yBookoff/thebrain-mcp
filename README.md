@@ -195,7 +195,8 @@ THEBRAIN_API_KEY=… THEBRAIN_TEST_BRAIN_ID=<uuid> npm test    # + writes
 ```
 
 The write tests require a **separate, throwaway brain** and refuse to touch any
-brain with more than 500 thoughts.
+brain with more than 500 thoughts. The read-only tests that need a brain read
+that one too, and skip without it: no test reads another brain.
 
 ## Documentation
 

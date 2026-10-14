@@ -695,7 +695,7 @@ suite("resource layer against the live API", () => {
     }).toEqual({ parents: false, children: true, jumps: false, tags: false });
   }, 30_000);
 
-  it("every thought a graph lists or a search finds carries its kind", async () => {
+  it("every thought a graph lists or a search finds carries its kind, and each a graph lists its aliases as a list", async () => {
     // The read tools mark a type or a tag from this, at no request of their
     // own: a list that came without kinds would pass both off as ordinary.
     const stamp = `kind${Date.now()}`;
@@ -740,6 +740,15 @@ suite("resource layer against the live API", () => {
       [id]: ThoughtKind.Normal,
       [strayTypeId]: ThoughtKind.Type,
     });
+    // And its aliases, as a list: `[]` where there are none, never null and
+    // never absent. Builds before 15.0.621 have no aliases and send no field.
+    // The read-only suite checks the home thought, which in a throwaway brain
+    // has nothing around it.
+    if ("aliases" in graph.thought) {
+      const listed = [graph.thought, graph.type!, ...graph.tags, ...graph.parents];
+      listed.push(...graph.jumps, ...graph.siblings, ...above.children);
+      for (const t of listed) expect(t.aliases, t.id).toEqual([]);
+    }
 
     // TheBrain's own search, which is what brain_search runs on with no index.
     const wanted = [typeId, tagId, id];
@@ -952,7 +961,9 @@ suite("resource layer against the live API", () => {
     // "Newest" counts every brain the app holds: an entry logged in another
     // brain ends the run as surely as one in this brain. So a run here can be
     // cut short by someone working in TheBrain meanwhile, and each test that
-    // needs a whole run tries again when another brain got in the way.
+    // needs a whole run tries again when it was. The tests read no other
+    // brain, so they do not see that entry: they check that this brain logged
+    // nothing in between, which leaves only one elsewhere (L20).
     const ATTEMPTS = 8;
 
     const changesIn = (entries: ModificationLogDto[]): ModificationLogDto[] =>
@@ -994,24 +1005,21 @@ suite("resource layer against the live API", () => {
       return id;
     };
 
-    /** Whether any other brain logged an entry between two entries of this one. */
-    const loggedElsewhere = async (
+    /** What this brain logged between two of its entries, neither of them included. */
+    const loggedBetween = async (
       after: ModificationLogDto,
       before: ModificationLogDto,
-    ): Promise<boolean> => {
-      for (const brain of await api.brains.list()) {
-        if (brain.id === brainId) continue;
-        const range = await api.brains.modifications(brain.id, {
-          maxLogs: 10,
-          since: logTime(after),
-          until: logTime(before),
-        });
-        const inside = (l: ModificationLogDto): boolean =>
+    ): Promise<ModificationLogDto[]> => {
+      const range = await api.brains.modifications(brainId, {
+        maxLogs: 10,
+        since: logTime(after),
+        until: logTime(before),
+      });
+      return range.filter(
+        (l) =>
           compareLogTime(logTime(l), logTime(after)) > 0 &&
-          compareLogTime(logTime(l), logTime(before)) < 0;
-        if (range.some(inside)) return true;
-      }
-      return false;
+          compareLogTime(logTime(l), logTime(before)) < 0,
+      );
     };
 
     it("changes with nothing logged between them share one 803, filed again under the time of the last", async () => {
@@ -1056,7 +1064,7 @@ suite("resource layer against the live API", () => {
           if (now.length > changes.length) {
             // A new entry: then something was logged in between, and nothing
             // in this brain was. The entry left behind stays as it was.
-            expect(await loggedElsewhere(previous, moved), what).toBe(true);
+            expect(await loggedBetween(previous, moved), what).toEqual([]);
             expect(now.slice(0, -1), what).toEqual(changes);
           } else {
             gathered = true;
@@ -1169,7 +1177,7 @@ suite("resource layer against the live API", () => {
         // The case this test is for: the same entry, moved past the watermark.
         // A new one means another brain logged in between; then try again.
         moved = now.length === changes.length;
-        if (!moved) expect(await loggedElsewhere(passed, now.at(-1)!)).toBe(true);
+        if (!moved) expect(await loggedBetween(passed, now.at(-1)!)).toEqual([]);
         changes = now;
         await eventually(
           () => api.notes.get(brainId, id),
@@ -4121,7 +4129,10 @@ suite("resource layer against the live API", () => {
     });
 
     it("a thought of another brain is nobody here", async (ctx) => {
-      // Read through this brain only: the other one is not written to, nor asked.
+      // Read through this brain only: the other one is not written to, nor
+      // asked. Its home thought's identifier is in the list of brains, and
+      // the list's word that the thought is there is taken as it stands:
+      // reading it in its own brain would be reading that brain.
       const other = (await api.brains.list()).find((b) => b.id !== brainId);
       if (other === undefined) return ctx.skip();
       expect(await answer(api.thoughts.get(brainId, other.homeThoughtId))).toBe(BARE_404);
@@ -9167,7 +9178,8 @@ suite("resource layer against the live API", () => {
   /**
    * Measured on TheBrain 15.0.640. Most of it is what the OpenAPI description
    * says; the read-back delay and the keying of the log entry are not in it.
-   * How aliases read when there are none is in test/integration.test.ts.
+   * How aliases read when there are none is in test/integration.test.ts, for
+   * the home thought, and in *every thought a graph lists…*, for a graph.
    */
   describe("aliases", () => {
     let supported: boolean | undefined;

@@ -31,7 +31,8 @@ THEBRAIN_API_KEY=… THEBRAIN_TEST_BRAIN_ID=<uuid> npm test    # + write contrac
 **The write tests need a separate, throwaway brain.** `THEBRAIN_TEST_BRAIN_ID` is
 required and is never inferred, and the suite refuses any brain holding more than
 500 thoughts. Test thoughts are prefixed `zz-it-` and cleaned up afterwards,
-including leftovers from earlier crashed runs.
+including leftovers from earlier crashed runs. The read-only tests that need a
+brain read that one too, and skip without it: no test reads another brain.
 
 ## What a change is expected to carry
 

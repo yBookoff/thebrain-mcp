@@ -3356,7 +3356,7 @@ Three levels, all under `test/`, none shipped to users (`files: ["dist"]` plus a
 | Level | Requires | Covers |
 |---|---|---|
 | Unit | nothing | Error normalisation, response parsing, vector arithmetic and storage, ingest planning, degradation logic |
-| Read-only contract | `THEBRAIN_API_KEY` | That the live API still behaves as documented in §7 |
+| Read-only contract | `THEBRAIN_API_KEY`; `THEBRAIN_TEST_BRAIN_ID` for the tests that read a brain | That the live API still behaves as documented in §7 |
 | Write contract | `THEBRAIN_API_KEY` + `THEBRAIN_TEST_BRAIN_ID` | Create/update/link/tag/note round-trips against a real brain |
 
 Without the environment variables the corresponding suites skip, so `npm test` is
@@ -3368,16 +3368,18 @@ one this project actually made once. A second safety refuses any brain with more
 than 500 thoughts. Test thoughts are prefixed `zz-it-`; `afterAll` removes both
 this run's and leftovers from previous crashed runs.
 
-**They keep to that brain, and to their own run.** No write test searches
-another brain: `GET /api/search/accessible`, which one test sent twice a run,
-searched every brain the key opens and is gone from the suite, and what it
-showed stands in row L34 as a measurement made once. Two reads of other
-brains are left, and are the owner's to rule on: when a run of note changes
-is cut short, the log entries the other brains wrote in the seconds between
-two changes, to tell an interruption from a failure (L20), and the list of
-brains, for one home thought's identifier that is then read through the test
-brain alone. The read-only suite, which is given no brain, reads the home
-thought and the types of every brain.
+**They keep to that brain, and to their own run.** No test reads another
+brain: of the others they read only the list of brains, for one home
+thought's identifier that is then asked of the test brain alone, and
+`app/state`, which names the thought open in the app. The
+read-only suite reads the test brain too, and without `THEBRAIN_TEST_BRAIN_ID`
+skips what needs a brain. `GET /api/search/accessible`, which searched every
+brain the key opens, is gone, and what it showed stands in row L34 as a
+measurement made once. A run of note changes cut short is no longer
+explained from the other brains' logs: the test checks that its own brain
+logged nothing in between and tries again. So that an entry in another brain
+ends a run stands in L20 as measured, and a run cut for some other reason is
+tried again, not failed, unless every try is cut.
 
 A test brain's log only grows, by about 2,800 entries a run, and a test must
 give the same verdict on a brain made today and on one used for a month. A
