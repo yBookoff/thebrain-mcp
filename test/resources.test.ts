@@ -4,6 +4,7 @@ import { TheBrainApi } from "../src/api/index.js";
 import {
   LOG_PAGE_SIZE,
   MAX_NAME_LENGTH,
+  READ_BACK,
   codePoints,
   compareLogTime,
   linkNameAsStored,
@@ -31,6 +32,9 @@ import { neighbourIds } from "../src/semantic/indexer.js";
 const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
 const THOUGHT = "bbbbbbbb-0000-4000-8000-000000000002";
 const TYPE = "cccccccc-0000-4000-8000-000000000003";
+
+/** Past the wait for a write to read back, by a margin. */
+const PAST_READ_BACK = READ_BACK.timeoutMs + 1000;
 const TAG = "dddddddd-0000-4000-8000-000000000004";
 
 type Route = (url: URL, init: RequestInit | undefined) => unknown;
@@ -542,10 +546,12 @@ describe("removing a type", () => {
       const { api } = typed({ staleReads: Infinity });
       const pending = api.thoughts.update(BRAIN, THOUGHT, { typeId: null });
       const outcome = expect(pending).rejects.toMatchObject({
-        kind: "server",
-        message: expect.stringMatching(/still reads back with its type/),
+        kind: "not_read_back",
+        message: expect.stringMatching(
+          /^TheBrain deleted the link that carries the type, and the thought did not read back without it within 6 s: .*Do not send the removal again/,
+        ),
       });
-      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
       await outcome;
     } finally {
       vi.useRealTimers();
@@ -562,7 +568,7 @@ describe("removing a type", () => {
           kind: "server",
           message: expect.stringMatching(/still in place/),
         });
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
         await outcome;
         expect(sent(calls, "DELETE")).toEqual([]);
       }
@@ -810,10 +816,12 @@ describe("a typeId that is not a type", () => {
       const { api } = brain({ staleReads: Infinity });
       const pending = api.thoughts.update(BRAIN, THOUGHT, { typeId: TYPE });
       const outcome = expect(pending).rejects.toMatchObject({
-        kind: "server",
-        message: expect.stringMatching(/does not read back with it/),
+        kind: "not_read_back",
+        message: expect.stringMatching(
+          /^TheBrain accepted the type, and the thought did not read back with it within 6 s: .*Do not send it again/,
+        ),
       });
-      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
       await outcome;
     } finally {
       vi.useRealTimers();
@@ -1066,7 +1074,7 @@ describe("aliases", () => {
     try {
       const { api } = withThought(thought(THOUGHT, "RAG", { aliases: [] }), Infinity);
       const pending = api.thoughts.changeAliases(BRAIN, THOUGHT, { add: ["one"] });
-      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
       await expect(pending).resolves.toMatchObject({ added: ["one"], readBack: false });
     } finally {
       vi.useRealTimers();
@@ -1130,6 +1138,210 @@ describe("aliases", () => {
       "RAG",
       "Retrieval",
     ]);
+  });
+});
+
+describe("a write that has not read back", () => {
+  const LINK = "eeeeeeee-0000-4000-8000-000000000005";
+  const TYPE_LINK = { id: LINK, thoughtIdA: TYPE, thoughtIdB: THOUGHT, relation: 1, meaning: 2 };
+  /**
+   * A thought whose reads show what was written only from `catchUp()` on,
+   * as after a burst of writes; its graph and the lookup of a pair are live.
+   */
+  const lagging = (dto: ThoughtDto) => {
+    let written = dto;
+    let shown = dto;
+    const fake = apiWith([
+      [
+        "/graph",
+        () =>
+          graphOf(
+            shown,
+            shown.typeId ? { type: TYPE_THOUGHT, parents: [TYPE_THOUGHT], links: [TYPE_LINK] } : {},
+          ),
+      ],
+      ["/api/thoughts/", (url) => (url.pathname.endsWith(TYPE) ? TYPE_THOUGHT : shown)],
+      [
+        "PATCH /api/thoughts/",
+        (_url, init) => {
+          const ops = JSON.parse(String(init?.body)) as Array<{ path: string; value?: unknown }>;
+          for (const op of ops) written = { ...written, [op.path.slice(1)]: op.value };
+          return 200;
+        },
+      ],
+      ["/api/links/", () => (written.typeId ? TYPE_LINK : 404)],
+      ["DELETE /api/links/", () => ((written = { ...written, typeId: null }), 200)],
+    ]);
+    return {
+      ...fake,
+      catchUp: () => void (shown = written),
+      /** Someone else's write, which reads at once. */
+      change: (extra: Partial<ThoughtDto>) => void (written = shown = { ...written, ...extra }),
+    };
+  };
+  const writes = (calls: Array<{ method: string; body: unknown }>): unknown[] =>
+    calls.filter((c) => c.method !== "GET").map((c) => c.body ?? c.method);
+  /** `changeAliases` adding `add` to a thought whose list does not read back. */
+  const aliasedUnread = async (add: string) => {
+    const fake = lagging(thought(THOUGHT, "RAG", { aliases: [] }));
+    const first = fake.api.thoughts.changeAliases(BRAIN, THOUGHT, { add: [add] });
+    await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+    await expect(first).resolves.toMatchObject({ added: [add], readBack: false });
+    return fake;
+  };
+
+  it("the wait asks about as many reads as two seconds at 25 ms did, and no more", async () => {
+    vi.useFakeTimers();
+    try {
+      const { calls } = await aliasedUnread("one");
+      const reads = calls.filter((c) => c.method === "GET").length;
+      expect(reads).toBeGreaterThan(80);
+      expect(reads).toBeLessThan(95);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an alias edit after one that did not read back waits for it, and builds on it", async () => {
+    // Built on the read, the second edit wrote ["two"]: "one" was undone.
+    vi.useFakeTimers();
+    try {
+      const { api, calls, catchUp } = await aliasedUnread("one");
+      const second = api.thoughts.changeAliases(BRAIN, THOUGHT, { add: ["two"] });
+      await vi.advanceTimersByTimeAsync(3000);
+      catchUp();
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+      // Its own list does not read back either, and that is said.
+      await expect(second).resolves.toMatchObject({ aliases: ["one", "two"], readBack: false });
+      expect(writes(calls).at(-1)).toEqual([
+        { op: "replace", path: "/aliases", value: ["one", "two"] },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("and is not sent while the read still shows the list from before", async () => {
+    vi.useFakeTimers();
+    try {
+      const { api, calls } = await aliasedUnread("one");
+      const before = writes(calls).length;
+      const second = api.thoughts.changeAliases(BRAIN, THOUGHT, { add: ["two"] });
+      const outcome = expect(second).rejects.toMatchObject({
+        kind: "not_read_back",
+        message: expect.stringMatching(
+          /^this server's write to the thought's aliases \d+ s ago does not read back yet: .*so this one was not sent\. Send it again once brain_get_thought shows the aliases \["one"\]$/,
+        ),
+      });
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+      await outcome;
+      expect(writes(calls)).toHaveLength(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a list someone else changed since is taken as it reads, at once", async () => {
+    vi.useFakeTimers();
+    try {
+      const { api, calls, change } = await aliasedUnread("one");
+      change({ aliases: ["theirs"] });
+      const second = api.thoughts.changeAliases(BRAIN, THOUGHT, { add: ["two"] });
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+      await expect(second).resolves.toMatchObject({ aliases: ["theirs", "two"] });
+      expect(writes(calls).at(-1)).toEqual([
+        { op: "replace", path: "/aliases", value: ["theirs", "two"] },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("past a minute the read is taken as it comes", async () => {
+    vi.useFakeTimers();
+    try {
+      const { api, calls } = await aliasedUnread("one");
+      await vi.advanceTimersByTimeAsync(60_000);
+      const second = api.thoughts.changeAliases(BRAIN, THOUGHT, { add: ["two"] });
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+      await expect(second).resolves.toMatchObject({ aliases: ["two"] });
+      expect(writes(calls).at(-1)).toEqual([{ op: "replace", path: "/aliases", value: ["two"] }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a removal after a type that did not read back waits for it, and removes it", async () => {
+    // Its first read had no type: it removed nothing and returned false,
+    // and the type showed up a moment later.
+    vi.useFakeTimers();
+    try {
+      const { api, calls, catchUp } = lagging(thought(THOUGHT, "typed"));
+      const set = api.thoughts.update(BRAIN, THOUGHT, { typeId: TYPE });
+      const refused = expect(set).rejects.toMatchObject({ kind: "not_read_back" });
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+      await refused;
+
+      const removal = api.thoughts.removeType(BRAIN, THOUGHT);
+      // The removal does not read back either, and says so.
+      const outcome = expect(removal).rejects.toMatchObject({
+        kind: "not_read_back",
+        message: expect.stringMatching(/^TheBrain deleted the link that carries the type/),
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+      catchUp();
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+      await outcome;
+      expect(writes(calls).at(-1)).toBe("DELETE");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("and is not sent while the thought still reads without the type", async () => {
+    vi.useFakeTimers();
+    try {
+      const { api, calls } = lagging(thought(THOUGHT, "typed"));
+      const set = api.thoughts.update(BRAIN, THOUGHT, { typeId: TYPE });
+      const refused = expect(set).rejects.toMatchObject({ kind: "not_read_back" });
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+      await refused;
+
+      const removal = api.thoughts.removeType(BRAIN, THOUGHT);
+      const outcome = expect(removal).rejects.toMatchObject({
+        kind: "not_read_back",
+        message: expect.stringMatching(
+          new RegExp(`^this server's write to the thought's type .*shows the type ${TYPE}$`),
+        ),
+      });
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+      await outcome;
+      expect(writes(calls).filter((w) => w === "DELETE")).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a removal sent again before the first reads back is told so, not that the type stays", async () => {
+    vi.useFakeTimers();
+    try {
+      const { api, calls } = lagging(thought(THOUGHT, "typed", { typeId: TYPE }));
+      const first = api.thoughts.removeType(BRAIN, THOUGHT);
+      const refused = expect(first).rejects.toMatchObject({ kind: "not_read_back" });
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+      await refused;
+
+      const again = api.thoughts.removeType(BRAIN, THOUGHT);
+      const outcome = expect(again).rejects.toMatchObject({
+        kind: "not_read_back",
+        message: expect.stringMatching(/shows no type$/),
+      });
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+      await outcome;
+      expect(writes(calls).filter((w) => w === "DELETE")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

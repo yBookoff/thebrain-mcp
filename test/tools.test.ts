@@ -14,7 +14,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ElicitRequestSchema, type ElicitResult } from "@modelcontextprotocol/sdk/types.js";
 
-import { TheBrainApi } from "../src/api/index.js";
+import { READ_BACK, TheBrainApi } from "../src/api/index.js";
 import { indexModelId } from "../src/semantic/document.js";
 import { EmbedderUnavailableError, type Embedder } from "../src/semantic/embedder.js";
 import { SemanticIndexer } from "../src/semantic/indexer.js";
@@ -29,6 +29,9 @@ const BRAIN = "aaaaaaaa-0000-4000-8000-000000000001";
 const THOUGHT = "bbbbbbbb-0000-4000-8000-000000000002";
 const PARENT = "cccccccc-0000-4000-8000-000000000003";
 const LINK = "dddddddd-0000-4000-8000-000000000004";
+
+/** Past the wait for a write to read back, by a margin. */
+const PAST_READ_BACK = READ_BACK.timeoutMs + 1000;
 
 type Route = [needle: string, respond: (url: URL, body: unknown) => unknown];
 
@@ -1601,7 +1604,7 @@ describe("brain_update_thought", () => {
         thoughtId: THOUGHT,
         typeId: null,
       });
-      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
       const result = await pending;
 
       expect(result.isError).toBe(true);
@@ -7919,9 +7922,10 @@ describe("a call that fails after it has written", () => {
       ]);
     });
 
-    it("aliases written whose read-back fails are listed as written, not as failed", async () => {
+    it("aliases written whose read-back fails are told as accepted, not as the read's error", async () => {
       // The read that waits for the new list failed, and its error used to
-      // be the step's: "Failed" for aliases that were in the brain.
+      // be the step's: "Failed" for aliases that were in the brain. They were
+      // then listed under Done, which reads as a list to build on.
       vi.useFakeTimers();
       try {
         let reads = 0;
@@ -7939,12 +7943,16 @@ describe("a call that fails after it has written", () => {
           label: "caption",
           addAliases: ["R.A.G."],
         });
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
         const result = await pending;
 
-        expect(result.isError).toBe(false);
-        expect(result.text).toContain('- aliases added: ["R.A.G."]');
-        expect(result.text).toContain("the new aliases are written but do not read back yet");
+        expect(result.isError).toBe(true);
+        expect(result.text).toContain('## Done\n- label = "caption"\n');
+        expect(result.text).toContain(
+          '## Failed\n- aliases: TheBrain accepted the aliases (added ["R.A.G."]; the list is ' +
+            'now ["R.A.G."]), and the thought did not read back with them within 6 s',
+        );
+        expect(result.text).not.toContain("boom");
         expect(sent("PATCH")).toHaveLength(2);
       } finally {
         vi.useRealTimers();
@@ -7989,16 +7997,17 @@ describe("a call that fails after it has written", () => {
           name: "renamed",
           typeId: TYPE,
         });
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
         const result = await pending;
 
         expect(result.isError).toBe(true);
         expect(result.text).toBe(
           [
             "## Failed",
-            `- typeId = "${TYPE}": the type was accepted, but the thought does not read back ` +
-              "with it yet. After a burst of writes that can take seconds: read the thought " +
-              "before setting the type again",
+            `- typeId = "${TYPE}": TheBrain accepted the type, and the thought did not read ` +
+              "back with it within 6 s: reads lag behind writes for seconds after a burst of " +
+              "them, and longer while writes keep coming. Do not send it again: " +
+              "brain_get_thought shows it once TheBrain catches up",
             "",
             "## Skipped",
             '- name = "renamed"',
@@ -8029,11 +8038,11 @@ describe("a call that fails after it has written", () => {
           thoughtId: THOUGHT,
           typeId: TYPE,
         });
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
         const result = await pending;
 
         expect(result.isError).toBe(true);
-        expect(result.text).toMatch(/^the type was accepted, but the thought does not read back/);
+        expect(result.text).toMatch(/^TheBrain accepted the type, and the thought did not read back/);
       } finally {
         vi.useRealTimers();
       }

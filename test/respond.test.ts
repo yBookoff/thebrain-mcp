@@ -17,7 +17,7 @@ import {
   shownName,
   table,
 } from "../src/server/respond.js";
-import { describeAliasOutcome } from "../src/server/tools/write.js";
+import { aliasesNotReadBack, describeAliasOutcome } from "../src/server/tools/write.js";
 
 describe("response shape", () => {
   it("success is not flagged as an error", () => {
@@ -452,9 +452,15 @@ describe("a failure that is TheBrain's own, and a query it will not take", () =>
   });
 
   it("a sentence of this server's own under that kind is left whole", () => {
-    // thoughts.update() raises one with no status when a type does not read back.
-    const own = "the type was accepted, but the thought does not read back with it yet";
+    // thoughts.removeType() raises one with no status when no link carries the type.
+    const own = "the thought has a type, but the link that carries it was not found";
     expect(describeError(new TheBrainError("server", own))).toBe(own);
+  });
+
+  it("a write that does not read back is told in the resource's words, whole", () => {
+    const own = "TheBrain accepted the type, and the thought did not read back with it";
+    expect(describeError(new TheBrainError("not_read_back", own))).toBe(own);
+    expect(describeError(new TheBrainError("not_read_back", own), false)).toBe(own);
   });
 
   it("a query too long is told in the resource's words, and as a sentence", () => {
@@ -628,14 +634,17 @@ describe("reporting an alias edit", () => {
     expect(lines.at(-1)).toBe('aliases now: ["b"]');
   });
 
-  it("a write that does not read back yet warns against editing again", () => {
-    const lines = describeAliasOutcome({
-      aliases: ["b"],
-      added: ["b"],
-      removed: [],
-      readBack: false,
-    });
-    expect(lines.at(-1)).toMatch(/do not read back yet.*brain_get_thought/);
+  it("a write that does not read back yet says what was accepted, and not to send it again", () => {
+    expect(
+      aliasesNotReadBack({ aliases: ["a", "b"], added: ["b"], removed: ["c"], readBack: false }),
+    ).toBe(
+      'TheBrain accepted the aliases (added ["b"], removed ["c"]; the list is now ["a","b"]), ' +
+        "and the thought did not read back with them within 6 s: reads lag behind writes for " +
+        "seconds after a burst of them, and longer while writes keep coming. Do not send them " +
+        "again: brain_get_thought shows them once TheBrain catches up. An alias edit of this " +
+        "thought sent before then waits for them, and is not sent while they do not show, " +
+        "since built on the old list it would undo them",
+    );
   });
 });
 

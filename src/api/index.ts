@@ -66,6 +66,8 @@ export * from "./types.js";
 export {
   ALIASES_UNSUPPORTED,
   MAX_ALIASES,
+  READ_BACK,
+  READ_LAG,
   normalizeAliases,
   replayThoughtIds,
   type AliasChanges,

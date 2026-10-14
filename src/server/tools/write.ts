@@ -12,6 +12,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Relation, ThoughtKind, type LinkDto } from "../../api/types.js";
 import {
   MAX_ALIASES,
+  READ_BACK,
+  READ_LAG,
   TheBrainError,
   assertUuid,
   isStructuralLink,
@@ -324,14 +326,18 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
             // With the name this call has just written: the read behind an
             // alias edit still returns the old one, and the old name kept as
             // an alias was dropped as equal to the name.
-            aliasLines = describeAliasOutcome(
-              await ctx.api.thoughts.changeAliases(
-                bid,
-                thoughtId,
-                { add: addAliases, remove: removeAliases },
-                { name: stored },
-              ),
+            const outcome = await ctx.api.thoughts.changeAliases(
+              bid,
+              thoughtId,
+              { add: addAliases, remove: removeAliases },
+              { name: stored },
             );
+            // Written and not shown: no "Done", which reads as a list to
+            // build on, and no failure to send again.
+            if (!outcome.readBack) {
+              throw new TheBrainError("not_read_back", aliasesNotReadBack(outcome));
+            }
+            aliasLines = describeAliasOutcome(outcome);
             return aliasLines;
           },
         });
@@ -1492,13 +1498,26 @@ export function describeAliasOutcome(outcome: AliasOutcome): string[] {
     lines.push("aliases unchanged: nothing new to add, nothing found to remove");
   }
   lines.push(`aliases now: ${JSON.stringify(outcome.aliases)}`);
-  if (!outcome.readBack) {
-    lines.push(
-      "the new aliases are written but do not read back yet: check them with " +
-        "brain_get_thought before editing this thought's aliases again, or the edit will undo them",
-    );
-  }
   return lines;
+}
+
+/**
+ * An alias edit the API accepted and a read did not show in time. A next
+ * edit in this process waits for it, or is refused (`changeAliases`).
+ */
+export function aliasesNotReadBack(outcome: AliasOutcome): string {
+  const changes = [
+    ...(outcome.added.length > 0 ? [`added ${JSON.stringify(outcome.added)}`] : []),
+    ...(outcome.removed.length > 0 ? [`removed ${JSON.stringify(outcome.removed)}`] : []),
+  ];
+  return (
+    `TheBrain accepted the aliases (${changes.join(", ")}; the list is now ` +
+    `${JSON.stringify(outcome.aliases)}), and the thought did not read back with them within ` +
+    `${READ_BACK.timeoutMs / 1000} s: ${READ_LAG}. Do not send them again: brain_get_thought ` +
+    "shows them once TheBrain catches up. An alias edit of this thought sent before then " +
+    "waits for them, and is not sent while they do not show, since built on the old list " +
+    "it would undo them"
+  );
 }
 
 export { ThoughtKind };

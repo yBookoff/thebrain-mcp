@@ -75,6 +75,14 @@ export type ApiErrorKind =
    * L30).
    */
   | "query_too_long"
+  /**
+   * A write the API accepted that a read of the thought did not show within
+   * the wait (`READ_BACK`): this call's own, which was carried out, or an
+   * earlier one of this process that a change now would build over, in which
+   * case the change was not sent. Reads lag behind writes, by seconds after a
+   * burst and with no bound under steady load.
+   */
+  | "not_read_back"
   /** Connection failed or dropped. */
   | "network"
   /** A response arrived but could not be parsed. */

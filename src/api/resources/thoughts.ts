@@ -106,10 +106,47 @@ const RELATIONS: readonly number[] = Object.values(Relation);
  *
  * That is a quiet brain. Writes queue up: the first patch after 150 thoughts
  * created in a burst took 0.6–0.8 s to read back, and after thoughts created
- * with a type 2.6 s for 300 and 5.3 s for 600, which is past the timeout.
- * Three seconds after the burst it was 0.1 s again.
+ * with a type 2.6 s for 300 and 5.3 s for 600. Three seconds after the burst
+ * it was 0.1 s again. Beside bursts kept up in another brain a rename read
+ * back 1–30 s late, later with each burst: no wait is long enough always.
+ *
+ * So the wait is a bound, and a write it does not see is told as accepted
+ * and not read back (`not_read_back`), not as failed. Six seconds is past
+ * the 600 creates, three times the thoughts one `brain_ingest` makes; two
+ * were short of a burst of 300. It costs nothing where the write
+ * reads back, and its whole length only where a read never shows it. The
+ * pause doubles each second, 25 ms to 200: some 85 reads, where two seconds
+ * at 25 ms were 80.
  */
-const READ_BACK = { stepMs: 25, timeoutMs: 2000 };
+export const READ_BACK = { stepMs: 25, maxStepMs: 200, timeoutMs: 6000 };
+
+/** The middle of each sentence about a write that has not read back, after its colon. */
+export const READ_LAG =
+  "reads lag behind writes for seconds after a burst of them, and longer while writes keep coming";
+
+/**
+ * How long a write that did not read back holds off a change of the same
+ * field built on a read from before it (`#pastUnread`): twice the 30 s a
+ * rename was seen to lag. Past that the read is taken as it comes.
+ */
+const UNREAD_KEPT_MS = 60_000;
+
+/** A field whose write is a read, then a write of the whole. */
+type UnreadField = "aliases" | "type";
+
+function unreadKey(field: UnreadField, brainId: string, thoughtId: string): string {
+  return `${field} ${brainId.toLowerCase()} ${thoughtId.toLowerCase()}`;
+}
+
+/** A write of this process, accepted by the API, that a read has not shown. */
+interface Unread {
+  /** When it was answered. */
+  at: number;
+  /** What it shows once it reads back, for a sentence: `the type <id>`, `no type`. */
+  shown: string;
+  /** Whether a read is still from before it. */
+  behind: (thought: ThoughtDto) => boolean;
+}
 
 export interface AliasChanges {
   add?: readonly string[] | undefined;
@@ -170,6 +207,8 @@ export class ThoughtsResource {
   #aliasesSeen = false;
   /** The last `createTypeOrTag` of each brain, settled or not: the next one waits for it. */
   #typesAndTags = new Map<string, Promise<void>>();
+  /** By field, brain and thought: see `#pastUnread`. */
+  #unread = new Map<string, Unread>();
 
   constructor(
     private readonly client: TheBrainClient,
@@ -574,16 +613,25 @@ export class ThoughtsResource {
       }
     }
     // Not for certainty alone: a removal made before this reads back would
-    // find no type to remove.
-    if (
-      type !== null &&
-      !(await this.#readsBack(brainId, thoughtId, (t) => t.typeId === type.id))
-    ) {
-      throw new TheBrainError(
-        "server",
-        "the type was accepted, but the thought does not read back with it yet. After a " +
-          "burst of writes that can take seconds: read the thought before setting the type again",
-      );
+    // find no type to remove. Past the wait `removeType` waits for it again.
+    if (type !== null) {
+      const answered = Date.now();
+      const shows = (t: ThoughtDto): boolean => t.typeId === type.id;
+      if ((await this.#readsBack(brainId, thoughtId, shows)) !== null) {
+        this.#unread.delete(unreadKey("type", brainId, thoughtId));
+      } else {
+        this.#markUnread("type", brainId, thoughtId, {
+          at: answered,
+          shown: `the type ${type.id}`,
+          behind: (t) => !shows(t),
+        });
+        throw new TheBrainError(
+          "not_read_back",
+          "TheBrain accepted the type, and the thought did not read back with it within " +
+            `${READ_BACK.timeoutMs / 1000} s: ${READ_LAG}. Do not send it again: ` +
+            "brain_get_thought shows it once TheBrain catches up",
+        );
+      }
     }
     if (typeId === null) await this.removeType(brainId, thoughtId);
   }
@@ -621,9 +669,18 @@ export class ThoughtsResource {
    * the other stays its type in the graph and in TheBrain: the second one
    * passed for removed. No patch takes one of the two away (docs/api-map.md,
    * L44). Only a type's link from the type is deleted (`detachType`).
+   *
+   * A type this process set or removed that has not read back is waited for
+   * before the first read is trusted, and the call is refused when it still
+   * does not (`#pastUnread`): that read would find no type to remove.
    */
   async removeType(brainId: string, thoughtId: string): Promise<boolean> {
-    const { typeId } = await this.get(brainId, thoughtId);
+    const { typeId } = await this.#pastUnread(
+      "type",
+      brainId,
+      thoughtId,
+      await this.get(brainId, thoughtId),
+    );
     const graph = await this.getGraph(brainId, thoughtId);
     const types: string[] = [];
     for (const id of [typeId, graph.type?.id, ...graph.otherTypes.map((t) => t.id)]) {
@@ -637,13 +694,29 @@ export class ThoughtsResource {
     }
     // Also when there was no link to delete: this read may be a stale one that
     // follows an earlier removal.
-    if (await this.#readsBack(brainId, thoughtId, (t) => !t.typeId)) return detached;
-    throw new TheBrainError(
-      "server",
-      detached
-        ? "the type's link was deleted, but the thought still reads back with its type"
-        : "the thought has a type, but the link that carries it was not found: " +
+    const answered = Date.now();
+    if ((await this.#readsBack(brainId, thoughtId, (t) => !t.typeId)) !== null) {
+      this.#unread.delete(unreadKey("type", brainId, thoughtId));
+      return detached;
+    }
+    if (!detached) {
+      throw new TheBrainError(
+        "server",
+        "the thought has a type, but the link that carries it was not found: " +
           "nothing was deleted and the type is still in place",
+      );
+    }
+    this.#markUnread("type", brainId, thoughtId, {
+      at: answered,
+      shown: "no type",
+      behind: (t) => Boolean(t.typeId),
+    });
+    throw new TheBrainError(
+      "not_read_back",
+      "TheBrain deleted the link that carries the type, and the thought did not read back " +
+        `without it within ${READ_BACK.timeoutMs / 1000} s: ${READ_LAG}. Do not send the ` +
+        "removal again: brain_get_thought shows the thought without a type once TheBrain " +
+        "catches up",
     );
   }
 
@@ -665,6 +738,12 @@ export class ThoughtsResource {
    * to it was dropped as the name's own: a rename that kept the old name as
    * an alias lost it, and reported nothing to add. The API keeps such an
    * alias, sent straight after the rename, 20 times of 20.
+   *
+   * A list that does not read back within the wait is returned with
+   * `readBack: false`, and the next edit of this thought's aliases in this
+   * process waits for it before it reads the list to change, and is refused
+   * with nothing sent when it still does not show (`#pastUnread`). Built on
+   * the old list, it would undo the one written.
    */
   async changeAliases(
     brainId: string,
@@ -672,7 +751,12 @@ export class ThoughtsResource {
     changes: AliasChanges,
     known: { name?: string | undefined } = {},
   ): Promise<AliasOutcome> {
-    const thought = await this.get(brainId, thoughtId);
+    const thought = await this.#pastUnread(
+      "aliases",
+      brainId,
+      thoughtId,
+      await this.get(brainId, thoughtId),
+    );
     const current = aliasesOf(thought);
     const drop = new Set(normalizeAliases(changes.remove ?? []).map(aliasKey));
     const kept = current.filter((a) => !drop.has(aliasKey(a)));
@@ -699,17 +783,30 @@ export class ThoughtsResource {
       );
     }
     await this.update(brainId, thoughtId, { aliases });
+    const answered = Date.now();
     const listed = (list: readonly string[]): string => list.map(aliasKey).sort().join("\n");
-    const readBack = await this.#readsBack(
-      brainId,
-      thoughtId,
-      (t) => listed(aliasesOf(t)) === listed(aliases),
-    );
+    const before = listed(current);
+    const readBack =
+      (await this.#readsBack(
+        brainId,
+        thoughtId,
+        (t) => listed(aliasesOf(t)) === listed(aliases),
+      )) !== null;
+    if (readBack) {
+      this.#unread.delete(unreadKey("aliases", brainId, thoughtId));
+    } else {
+      this.#markUnread("aliases", brainId, thoughtId, {
+        at: answered,
+        shown: `the aliases ${JSON.stringify(aliases)}`,
+        behind: (t) => listed(aliasesOf(t)) === before,
+      });
+    }
     return { aliases, added, removed, readBack };
   }
 
   /**
-   * Waits for a write to show up on a read of the thought.
+   * Waits for a write to show up on a read of the thought, and returns that
+   * read; null when none showed it within `READ_BACK`.
    *
    * A read that fails has not shown the write, and no more than that: thrown
    * from here, its error passed for the write's own, and a write that had
@@ -719,14 +816,70 @@ export class ThoughtsResource {
     brainId: string,
     thoughtId: string,
     landed: (thought: ThoughtDto) => boolean,
-  ): Promise<boolean> {
-    const deadline = Date.now() + READ_BACK.timeoutMs;
+  ): Promise<ThoughtDto | null> {
+    const started = Date.now();
+    const deadline = started + READ_BACK.timeoutMs;
     for (;;) {
       const thought = await this.get(brainId, thoughtId).catch(() => null);
-      if (thought !== null && landed(thought)) return true;
-      if (Date.now() >= deadline) return false;
-      await new Promise((resolve) => setTimeout(resolve, READ_BACK.stepMs));
+      if (thought !== null && landed(thought)) return thought;
+      const now = Date.now();
+      if (now >= deadline) return null;
+      const pause = Math.min(
+        READ_BACK.stepMs * 2 ** Math.floor((now - started) / 1000),
+        READ_BACK.maxStepMs,
+        deadline - now,
+      );
+      await new Promise((resolve) => setTimeout(resolve, pause));
     }
+  }
+
+  /**
+   * `thought`, or a later read of it, past a write of `field` this process
+   * made and has not seen read back.
+   *
+   * A field written whole is changed by a read, then a write: the alias
+   * list, and the type, whose removal trusts its first read. Built on a read
+   * from before a write that has not shown yet, the change undoes that write
+   * (aliases), or finds nothing to change and passes for done (a type). So
+   * while `thought` still reads as before such a write, this waits for a
+   * read past it, and throws `not_read_back` when none comes: the change is
+   * not sent. An alias list that is neither the one before the write nor the
+   * one written is someone else's change since, and is taken; of a type only
+   * the one written is known. Any read is taken past `UNREAD_KEPT_MS`.
+   * Another process's writes are not known here.
+   */
+  async #pastUnread(
+    field: UnreadField,
+    brainId: string,
+    thoughtId: string,
+    thought: ThoughtDto,
+  ): Promise<ThoughtDto> {
+    const key = unreadKey(field, brainId, thoughtId);
+    const unread = this.#unread.get(key);
+    if (unread === undefined) return thought;
+    if (Date.now() - unread.at > UNREAD_KEPT_MS || !unread.behind(thought)) {
+      this.#unread.delete(key);
+      return thought;
+    }
+    const past = await this.#readsBack(brainId, thoughtId, (t) => !unread.behind(t));
+    if (past === null) {
+      const ago = Math.round((Date.now() - unread.at) / 1000);
+      throw new TheBrainError(
+        "not_read_back",
+        `this server's write to the thought's ${field} ${ago} s ago does not read back yet: ` +
+          `${READ_LAG}. A change built on what the thought reads now would undo that write, ` +
+          `so this one was not sent. Send it again once brain_get_thought shows ${unread.shown}`,
+      );
+    }
+    this.#unread.delete(key);
+    return past;
+  }
+
+  #markUnread(field: UnreadField, brainId: string, thoughtId: string, unread: Unread): void {
+    for (const [key, { at }] of this.#unread) {
+      if (unread.at - at > UNREAD_KEPT_MS) this.#unread.delete(key);
+    }
+    this.#unread.set(unreadKey(field, brainId, thoughtId), unread);
   }
 
   async delete(brainId: string, thoughtId: string): Promise<void> {

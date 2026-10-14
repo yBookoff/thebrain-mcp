@@ -1506,16 +1506,42 @@ read of the call.
 
 **"Failed" is hedged, and a step is listed there only when its write was.**
 A step can fail after its write went through. A write that got no answer may
-have been carried out, and its line says so. A type can be accepted and not
-read back in time, and its error says that. A 5xx says nothing of what it
+have been carried out, and its line says so. A type or aliases can be
+accepted and not read back in time, and the line says that. A 5xx says nothing of what it
 wrote, and its line, in `describeError()`'s words, says to check what the
 write left. So "Next" says that what is under "Failed" was not done *unless
 its line says otherwise*. And the read that
 waits for a write no longer fails the write: a read-back that threw used to
 pass its error on as the step's, and aliases that were in the brain stood
 under "Failed". A failed read has not shown the write, and no more: the wait
-goes on to its two seconds, and the aliases are then listed as written and
-not read back yet, the type as accepted.
+goes on to its end, and the write is then told as accepted.
+
+**Accepted, and not read back.** A type set or removed and an alias list
+are waited for until a read of the thought shows them (`READ_BACK`), and
+reads queue behind writes, the app's own and any other client's: 0.1 s on
+a quiet app, 2.6 s after 300 creates, 5.3 s after 600, 1–30 s beside bursts
+kept up in another brain (§7, *Write visibility*). No bound is right always,
+so the wait is six seconds, past the 600, and a write it does not see is
+`not_read_back`: "TheBrain accepted …, and the thought did not read back
+with it within 6 s … Do not send it again". That is no write that may have
+landed, which says to look first: this one landed, and a look would show the
+old value. It stands under "Failed", or is the whole result, and never under
+"Done": aliases listed there read as a list to build on. Two seconds were
+short of a burst of 300. Six cost nothing where the write reads back, and
+the pause between reads doubles each second, so a wait asks some 85 reads
+where two seconds asked 80.
+
+The danger is the next edit. The alias list and the removal of a type are a
+read, then a write, and a read from before the unread write builds over it:
+the second alias edit wrote the old list with its own alias, and a removal
+found no type and passed for done. So `ThoughtsResource` keeps, for a
+minute, each such write of its own that did not read back, and an alias edit
+or a type removal of that thought first waits for a read past it. When none
+comes the change is not sent, and its error says so. An alias list that is
+neither the one before nor the one written is someone else's edit, and is
+built on. Another process's writes are not known, and a write of the same
+field by someone else that brings the old value back is waited on for that
+minute.
 
 **A call stops at its first failure, where a batch goes on.** A batch's
 writes are in flight together, and what it leaves for a second call can be
@@ -2281,7 +2307,8 @@ in `thoughts.changeAliases()`.
 usually still returns the old list: measured over 82 writes, the new one showed
 up 50–100 ms later, 0.2 s at the most. Two edits in a row built on that stale
 read left only the second alias. `changeAliases` polls until the list it wrote
-is the list it reads, and reports it when two seconds were not enough. It also
+is the list it reads, says so when six seconds were not enough, and holds the
+next edit back until it does (§4, *Accepted, and not read back*). It also
 refuses a list that would pass 100: the API keeps the first hundred of a longer
 one and says nothing.
 
