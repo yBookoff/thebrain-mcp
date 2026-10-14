@@ -63,7 +63,10 @@ silent wrong behaviour rather than a loud failure:
   the same 404 for a thought nobody has as for two thoughts with no link, so
   `brain_tag` reads the thought before it answers that a tag "was not on the
   thought".
-- **`/types` and `/tags` return 400 when empty.** Wrap in `emptyOn400()`.
+- **`/types`, `/tags` and `/pins` answer an empty list with a 400** in a
+  sentence that reads like a failure. `emptyOn400()` takes those three
+  sentences for `[]` and passes any other 400 on; a list the API could not
+  read, told in the same words, would still read as empty.
 - **`notes/append` on a thought with no note is a silent no-op.** Read first.
 - **A note is an attachment.** `graph.attachments` flags it with `isNotes`; its
   log events carry the attachment in `sourceId` and the thought in `extraAId`.
@@ -85,7 +88,14 @@ silent wrong behaviour rather than a loud failure:
   TheBrain changes what a measurement here sees. Only the newest entry moves,
   so paging back and reading from a watermark both hold. Never count edits by
   entries, or expect an entry to stay where it was read.
-- **A thought's type also appears in `parents`.** Filter it in traversal.
+- **A graph's `parents` holds every thought above, by whatever link.** A
+  thought's type, the tag a tag carries (meaning 7) and the second of two
+  types are all there. `getGraph()` keeps a parent only where the link the two
+  share in the graph's `links` is ordinary; with none listed, only the type is
+  set apart. The upper tag stays in `tags`, `type` is the one `typeId` names,
+  and any other type is in `otherTypes`, which `neighbourIds()` follows.
+- **A graph lists a thought once:** a sibling that is also a parent, child or
+  jump is in that list, not in `siblings`.
 - **A name of white space alone is a 400 for a new thought and a 200 that
   renames nothing, and white space is Unicode's `White_Space`, not what
   `trim()` drops.** A next line (U+0085) is of it and a byte order mark is
@@ -97,7 +107,8 @@ silent wrong behaviour rather than a loud failure:
   not show is stored like any other and is not refused: print a thought's
   name through `shownName()`, which spells out one whose every code point is
   `White_Space`, `Default_Ignorable_Code_Point` or `Cc`. `table()` does that
-  for a cell.
+  for a cell. A link's name is stored by the same rule, the cut at 1,024
+  included: compare a label through `linkNameAsStored()`.
 - **Aliases only replace as a whole list, and a read straight after the write
   usually returns the old one.** Add and remove through
   `thoughts.changeAliases()`, which waits for the write to read back: two
@@ -111,7 +122,8 @@ silent wrong behaviour rather than a loud failure:
 - **`null` clears nothing through `replace`.** On a label it is a 403, on a
   colour a 400, and on `typeId` a 200 that leaves the type in place. Clear
   through `thoughts.update()`: it sends `remove`, and for a type deletes the
-  link from the type and waits for the thought to read back without one. On a
+  link from every type the thought has and waits for it to read back with no
+  `typeId`. On a
   link's name it is a 200 that leaves the name, on its colour a 400;
   `links.update()` sends `remove` for both. A link's thickness reads back a
   hundred times what was written, and nothing clears it.
@@ -124,6 +136,14 @@ silent wrong behaviour rather than a loud failure:
   thought becomes a parent, and the type stays as it was. `thoughts.update()`
   and `create()` read the kind first and throw `not_a_type`; keep new writes
   behind `requireType()`. A parent link towards a type sets the type as well.
+- **A type on a type is a link of meaning 3, and a thought can have two
+  types.** `isTypeLink()` takes 2 and 3 (`LinkMeaning.SubType`), and
+  `detachType()` deletes only a type's link with the type at `thoughtIdA`. A
+  create with a type for `sourceThoughtId` and another for `typeId` links
+  both; deleting either reads back as `typeId: null` with the other still the
+  thought's type, no patch takes one away, and the graph's own `type` names
+  either, changing between reads. So `removeType()` reads the graph as well
+  and deletes every type's link.
 - **A type is never a parent.** A parent/child link with a type above, and a
   thought created under one, is a 200 that sets the lower thought's type and
   replaces the one it had. `links.create()` and `thoughts.create()` read the
@@ -183,7 +203,9 @@ silent wrong behaviour rather than a loud failure:
   `Example.com/p` does not find `example.com/p`. Attach through
   `attachments.attachUrl()`, which also checks the thought's own list with the
   host case set aside. That list is a copy refreshed about every 0.1 s, up to
-  0.2 s behind a write; `by-location` is not.
+  0.2 s behind a write; `by-location` is not. So the same address in another
+  host case, attached straight after, is attached twice (17 of 20); not
+  guarded.
 - **Tags attach via `POST /api/links` with `relation: 2` against a `kind=4`
   thought.** The server rewrites it to `relation=1, meaning=5`. Against a type
   the same request sets the thought's type and against an ordinary thought it
@@ -214,8 +236,10 @@ silent wrong behaviour rather than a loud failure:
   name, and the last entry of the change. Each link under the thought turns
   with it and logs a `404`: children become the thoughts a tag is on or the
   instances of a type, with a `203` for a type gained or lost. A thought with
-  no label of its own reads with its name for a `label` while it is a type,
-  and no `202` says so. The kind is beside the document, so the hash cannot
+  no label is given its name for one when it becomes a type, and loses it
+  with the kind only while it is still the name; a rename leaves it, so a
+  renamed type reads, is found by TheBrain's search and is embedded under its
+  old name too. No `202` says any of it; `label: null` clears it. The kind is beside the document, so the hash cannot
   see it: `#indexThoughts` compares it apart and `VectorStore.setKinds()`
   corrects the row with its vector kept. Never fold the kind into the hash or
   the document.
@@ -315,6 +339,16 @@ silent wrong behaviour rather than a loud failure:
 - **Two thoughts of one name in one list of a graph are in no order to rely
   on.** They change places from read to read. `ingest()` fails a plan thought
   with two candidates and names both.
+- **`statistics` counts thoughts, links, notes and web links at the first
+  read; `thoughtTypes` and `tags` lag**, by seconds after a burst. Never
+  compare those two at one read.
+- **A log request with no `startTime` costs time by the length of the whole
+  log**, however few entries it asks for: 135 ms for the newest 50 of
+  171,000, 15 ms from an hour back. Name a start wherever there is one;
+  `modificationPages()` takes `since` and `until`. In contract tests read
+  through `newestLogs()`, fill an index with `indexedSince()`, and call
+  `caughtUp()` before the write a sync test is about: a thought seconds old is
+  reread for its own `101`.
 - **Search is prefix-based.** This is why `src/semantic/` exists.
 - **A search hit is the search index's copy, not the thought, and that index
   is about five seconds behind.** Until its next refresh `search/{brainId}`
@@ -394,7 +428,9 @@ THEBRAIN_API_KEY=… THEBRAIN_TEST_BRAIN_ID=<uuid> npm test    # + write contrac
 ```
 
 Write tests demand an explicit throwaway brain and refuse any brain over 500
-thoughts. Suites skip cleanly when the variables are absent.
+thoughts. Suites skip cleanly when the variables are absent. They search no
+other brain. A run sweeps what it made by identifier from the log, and the
+next run sweeps for one that died (a per-brain file in the OS temp directory).
 
 When a claim about the API goes into a document, it should have a test behind it.
 Two documented claims in this project's history turned out to be wrong precisely
