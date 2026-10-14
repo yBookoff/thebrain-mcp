@@ -15,6 +15,7 @@ import {
   type IngestOutcome,
 } from "../../operations/ingest.js";
 import type { ServerContext } from "../context.js";
+import { brainId, identifier } from "../identifier.js";
 import {
   TAKE_IDENTIFIERS,
   bullet,
@@ -52,9 +53,7 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
         "Search with brain_search first: some of the thoughts may already exist, and " +
         "linking to them beats creating duplicates.",
       inputSchema: {
-        brainId: z
-          .string()
-          .describe("Brain identifier. Take it from brain_list — never guess it."),
+        brainId,
         thoughts: z
           .array(
             z.object({
@@ -79,9 +78,9 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
                     "makes it again. Not a type or a tag: those go in typeId and tagIds.",
                 ),
               relation: relation.optional(),
-              typeId: z.string().optional().describe("Type from brain_list_types_and_tags."),
+              typeId: identifier().optional().describe("Type from brain_list_types_and_tags."),
               tagIds: z
-                .array(z.string())
+                .array(identifier())
                 .optional()
                 .describe("Tag identifiers from brain_list_types_and_tags, not tempIds."),
               label: z.string().optional(),

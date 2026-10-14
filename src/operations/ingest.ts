@@ -70,6 +70,7 @@ import {
   isTagLink,
   isTypeLink,
   linkNameAsStored,
+  lowerUuid,
   mayHaveLanded,
   nameRefusal,
   normalizeAliases,
@@ -329,6 +330,29 @@ export class IngestBehindError extends Error {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * The plan with each reference to an existing thought in lower case
+ * (`lowerUuid()`): a `parent`, `from` or `to` that is no `tempId`. A tool
+ * lowers the identifiers it takes, but these are a `tempId` or a UUID, and
+ * which is known only from the whole plan. One in capitals was another
+ * thought to what keys by it: a thought under it and one under its lower
+ * case, of one name, were each made. A `tempId` stays as sent, whatever it
+ * looks like.
+ */
+function referencesLowered(plan: IngestPlan): IngestPlan {
+  const tempIds = new Set(plan.thoughts.map((t) => t.tempId));
+  const lowered = (ref: string): string => (tempIds.has(ref) ? ref : lowerUuid(ref));
+  return {
+    ...plan,
+    thoughts: plan.thoughts.map((t) =>
+      t.parent === undefined ? t : { ...t, parent: lowered(t.parent) },
+    ),
+    ...(plan.links !== undefined
+      ? { links: plan.links.map((l) => ({ ...l, from: lowered(l.from), to: lowered(l.to) })) }
+      : {}),
+  };
+}
+
+/**
  * Validates the plan and lays thoughts out in dependency levels.
  *
  * Plan errors surface before the first write: a half-created graph caused by a
@@ -448,8 +472,9 @@ export function planLevels(plan: IngestPlan): IngestThought[][] {
 export async function ingest(
   api: TheBrainApi,
   brainId: string,
-  plan: IngestPlan,
+  sent: IngestPlan,
 ): Promise<IngestOutcome> {
+  const plan = referencesLowered(sent);
   const levels = planLevels(plan);
   const dedupe = plan.deduplicate !== false;
 

@@ -23,6 +23,10 @@ import { join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it, vi, type TestContext } from "vitest";
 
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
 import {
   EntityType,
   LinkMeaning,
@@ -79,6 +83,8 @@ import {
 } from "../src/semantic/indexer.js";
 import { SemanticSearch } from "../src/semantic/search.js";
 import { VectorStore } from "../src/semantic/store.js";
+import type { ServerContext } from "../src/server/context.js";
+import { registerReadTools } from "../src/server/tools/read.js";
 import { linkedIn, roundsApart, sweepFrom, sweepTargets } from "./sweep.js";
 
 const apiKey = process.env["THEBRAIN_API_KEY"];
@@ -4175,6 +4181,56 @@ suite("resource layer against the live API", () => {
    * refused writes, which add nothing to the brain; the note the API accepts
    * is removed after. Measured on TheBrain 15.0.640.
    */
+  describe("an identifier in capitals", () => {
+    it("brain_traverse from a root in capitals lists it once, with the names of its links", async () => {
+      // The API takes an identifier in capitals and names every thought in
+      // lower case. The walk keyed its root as given, came back to it from
+      // its child as to another thought, and looked for the root's link under
+      // the capitals: the root was listed twice, and its link's name lost.
+      const server = new McpServer({ name: "thebrain-mcp-test", version: "0" });
+      registerReadTools(server, { api } as unknown as ServerContext);
+      const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "test-client", version: "0" });
+      await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
+
+      const said: string[] = [];
+      const expected: string[] = [];
+      for (let round = 0; round < 3; round += 1) {
+        const root = await make(`caps-root-${round}`);
+        const child = await make(`caps-child-${round}`);
+        await api.links.create(brainId, {
+          thoughtIdA: root,
+          thoughtIdB: child,
+          relation: Relation.Child,
+          name: "motivates",
+        });
+        // Both graphs are a copy, behind the link by up to 0.2 s.
+        const named = (g: CleanGraph): boolean => g.links.some((l) => l.name === "motivates");
+        await eventually(
+          () => api.thoughts.getGraph(brainId, root),
+          (g) => named(g) && g.children.some((t) => t.id === child),
+        );
+        await eventually(
+          () => api.thoughts.getGraph(brainId, child),
+          (g) => named(g) && g.parents.some((t) => t.id === root),
+        );
+        const result = await client.callTool({
+          name: "brain_traverse",
+          arguments: { brainId: brainId.toUpperCase(), thoughtId: root.toUpperCase(), depth: 2 },
+        });
+        said.push((result.content as Array<{ text: string }>).map((c) => c.text).join("\n"));
+        const [r, c] = [`${PREFIX}caps-root-${round}`, `${PREFIX}caps-child-${round}`];
+        expected.push(
+          `# Neighbourhood of: ${r}\n\n## Hop 1\n- ${c} — ${child}  (via ${r})\n\n` +
+            `## Labelled links\n- ${r} -> motivates -> ${c}\n- ${c} -> motivates -> ${r}\n\n` +
+            "## Totals\nthoughts 2, links 2",
+        );
+      }
+      await client.close();
+      expect(said).toEqual(expected);
+    }, 60_000);
+  });
+
   describe("an identifier nobody has, and a brainId that is no brain", () => {
     const CATCH_ALL =
       "To use the TheBrain API, make requests to /api (e.g. /api/brains). " +

@@ -419,7 +419,14 @@ and the graph's 403 like a random one, 5 of 5 each: the all-zero GUID, one of
 all `f`, the identifier of a link, the brain's own, a thought deleted half a
 second before, and the home thought of another brain. A thought is found only
 through its own brain. An identifier in capitals, the brain's too, reads the
-thought as usual. The all-zero one is like a random one in these two reads
+thought as usual, and the answers name it in lower case: a graph's lists, and
+`by-location` and a thought's attachments (L17). `brain_traverse` from a root
+in capitals came back to the root from its child as to another thought and
+lost the name of the root's link, 3 times of 3 on 15.0.640, 2026-10-14; and
+`brain_index` named the index file after the `brainId` as sent, which on macOS
+opened the same file and took it for another brain's. So each tool lowers the
+identifiers it takes (`identifier()`, `src/server/identifier.ts`), and
+`ingest()` a plan's references to thoughts that are there. The all-zero one is like a random one in these two reads
 and not in a create, which takes it for no identifier given and answers 200
 (L29); the client refuses it before any request.
 

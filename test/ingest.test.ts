@@ -4043,8 +4043,10 @@ describe("two links of a plan between the same two thoughts", () => {
       ],
     });
     expect(outcome.linksCreated).toBe(1);
+    // A reference to an existing thought is taken in lower case, as the API
+    // names it, and is given back so.
     expect(outcome.linksNotAdded).toEqual([
-      { from: Q.toUpperCase(), to: P.toUpperCase(), note: notSent(`${P} -> ${Q}`, "y") },
+      { from: Q, to: P, note: notSent(`${P} -> ${Q}`, "y") },
       { from: Q, to: P, note: notSent(`${P} -> ${Q}`) },
     ]);
     expect(between(links, P, Q)).toEqual([{ a: P, b: Q, relation: 1 }]);

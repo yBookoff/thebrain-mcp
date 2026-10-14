@@ -37,6 +37,7 @@ import {
 import { linkFound } from "../../operations/ingest.js";
 import { confirmDestructive, confirmationInstructions } from "../confirm.js";
 import type { ServerContext } from "../context.js";
+import { brainId, identifier, identifierOrNull } from "../identifier.js";
 import {
   bullet,
   childrenTitle,
@@ -53,9 +54,6 @@ import {
   type ToolResponse,
 } from "../respond.js";
 
-const brainId = z
-  .string()
-  .describe("Brain identifier. Take it from brain_list — never guess it.");
 
 /**
  * What the first alias costs, in the words of TheBrain's own spec. It goes on
@@ -87,8 +85,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       inputSchema: {
         brainId,
         name: z.string().min(1).describe("Thought title. Short and to the point."),
-        parentId: z
-          .string()
+        parentId: identifier()
           .optional()
           .describe(
             "What to attach it to. Without this the thought is left orphaned. " +
@@ -103,12 +100,11 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
               "of a thought, give that thought's parent as parentId. Refused without parentId.",
           ),
         note: z.string().optional().describe("Note body in Markdown."),
-        typeId: z
-          .string()
+        typeId: identifier()
           .optional()
           .describe("Type identifier from brain_list_types_and_tags."),
         tagIds: z
-          .array(z.string())
+          .array(identifier())
           .optional()
           .describe("Tag identifiers from brain_list_types_and_tags."),
         label: z.string().optional().describe("Short caption under the title."),
@@ -253,12 +249,10 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         "use brain_set_note or brain_append_note for that.",
       inputSchema: {
         brainId,
-        thoughtId: z.string().describe("Which thought to change."),
+        thoughtId: identifier().describe("Which thought to change."),
         name: z.string().optional().describe("New title."),
         label: z.string().nullable().optional().describe("Caption; null clears it."),
-        typeId: z
-          .string()
-          .nullable()
+        typeId: identifierOrNull()
           .optional()
           .describe("Type identifier from brain_list_types_and_tags; null removes the type."),
         foregroundColor: z
@@ -366,7 +360,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         "Read an existing note with brain_get_thought before overwriting it.",
       inputSchema: {
         brainId,
-        thoughtId: z.string(),
+        thoughtId: identifier(),
         markdown: z.string().describe("The complete new note body, in Markdown."),
       },
     },
@@ -435,7 +429,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         "If no note exists yet, one is created.",
       inputSchema: {
         brainId,
-        thoughtId: z.string(),
+        thoughtId: identifier(),
         markdown: z.string().describe("What to append, in Markdown."),
       },
     },
@@ -495,8 +489,8 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         "and the result says what is there.",
       inputSchema: {
         brainId,
-        fromId: z.string().describe("Source thought."),
-        toId: z.string().describe("Target thought."),
+        fromId: identifier().describe("Source thought."),
+        toId: identifier().describe("Target thought."),
         relation: z
           .enum(["child", "parent", "jump"])
           .optional()
@@ -666,10 +660,9 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         "kind; a tag goes with brain_tag, a type with brain_update_thought.",
       inputSchema: {
         brainId,
-        fromId: z.string().describe("One end of the link."),
-        toId: z.string().describe("The other end."),
-        linkId: z
-          .string()
+        fromId: identifier().describe("One end of the link."),
+        toId: identifier().describe("The other end."),
+        linkId: identifier()
           .optional()
           .describe("Which link, when more than one joins the two: a call without it lists them."),
         confirm: z.boolean().optional().describe(CONFIRM),
@@ -826,9 +819,9 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         "via brain_create_type_or_tag. A single call can both add and remove.",
       inputSchema: {
         brainId,
-        thoughtId: z.string(),
-        add: z.array(z.string()).optional().describe("Tag identifiers to attach."),
-        remove: z.array(z.string()).optional().describe("Tag identifiers to remove."),
+        thoughtId: identifier(),
+        add: z.array(identifier()).optional().describe("Tag identifiers to attach."),
+        remove: z.array(identifier()).optional().describe("Tag identifiers to remove."),
       },
     },
     guard(async ({ brainId: bid, thoughtId, add, remove }) => {
@@ -1092,7 +1085,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         "attached and avoids duplicates. Leave name empty to take the title from the page.",
       inputSchema: {
         brainId,
-        thoughtId: z.string(),
+        thoughtId: identifier(),
         url: z.string().url().describe("Page address."),
         name: z.string().optional().describe("Attachment name; empty means use the page title."),
       },
@@ -1122,7 +1115,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         "Opens a thought in the user's TheBrain app on screen. " +
         "Call it to show the person a result — for instance a structure you have just " +
         "created, so they can see it in the graph.",
-      inputSchema: { brainId, thoughtId: z.string() },
+      inputSchema: { brainId, thoughtId: identifier() },
     },
     guard(async ({ brainId: bid, thoughtId }) => {
       await ctx.api.app.activateThought(bid, thoughtId);
@@ -1139,7 +1132,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         "only when the user explicitly asked for a deletion.",
       inputSchema: {
         brainId,
-        thoughtId: z.string(),
+        thoughtId: identifier(),
         confirm: z.boolean().optional().describe(CONFIRM),
       },
     },

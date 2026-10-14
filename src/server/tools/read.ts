@@ -40,6 +40,7 @@ import {
 } from "../../semantic/search.js";
 import { IndexBusyError, IndexRunningError } from "../../semantic/store.js";
 import type { ServerContext } from "../context.js";
+import { brainId, identifier } from "../identifier.js";
 import {
   bullet,
   childrenTitle,
@@ -59,9 +60,6 @@ import {
   TYPE_LABEL,
 } from "../respond.js";
 
-const brainId = z
-  .string()
-  .describe("Brain identifier. Take it from brain_list — never guess it.");
 
 /**
  * Cap on how many thoughts `brain_recent_changes` reads in a call: beyond this
@@ -610,7 +608,7 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
         "what a thought is about and how it connects, before changing or extending it.",
       inputSchema: {
         brainId,
-        thoughtId: z.string().describe("Thought identifier."),
+        thoughtId: identifier().describe("Thought identifier."),
         includeSiblings: z
           .boolean()
           .optional()
@@ -805,7 +803,7 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
         "material should slot in, what already sits nearby. Viewing a thought shows one hop only.",
       inputSchema: {
         brainId,
-        thoughtId: z.string().describe("Where to start."),
+        thoughtId: identifier().describe("Where to start."),
         depth: z.number().int().min(1).max(4).optional().describe("Hops. Defaults to 2."),
         follow: z
           .array(z.enum(["child", "parent", "jump"]))

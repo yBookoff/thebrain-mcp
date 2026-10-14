@@ -25,6 +25,24 @@ export function isUuid(value: string): boolean {
 }
 
 /**
+ * A UUID in lower case, the API's own spelling of it, and anything else as
+ * it is.
+ *
+ * The API takes an identifier in capitals and answers in lower case, in
+ * every answer looked at (docs/api-map.md, *Other identifiers that name no
+ * thought*). One kept as it was sent is compared with those answers, and
+ * keyed beside them, as another thought's: `brain_traverse` from a root in
+ * capitals came back to it as to another thought, and `brain_index` took the
+ * index of a brain named so for another brain's. A tool lowers each
+ * identifier it is given once, where it takes it (`src/server/identifier.ts`),
+ * and a plan its references (`ingest()`). What is no UUID stays as it was,
+ * for `assertUuid()` to refuse in the caller's spelling.
+ */
+export function lowerUuid(value: string): string {
+  return isUuid(value) ? value.toLowerCase() : value;
+}
+
+/**
  * The identifier of zeros. The API returns it, with a 200, for a link it did
  * not make (`createdId`). Sent to the API, it is taken for no identifier at
  * all wherever one can be done without (`assertUuid`).

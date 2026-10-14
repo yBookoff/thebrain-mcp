@@ -10994,3 +10994,132 @@ describe("brain_create_type_or_tag", () => {
     expect(Object.keys(plan.thoughts.items.properties)).not.toContain("kind");
   });
 });
+
+describe("an identifier in capitals", () => {
+  // The API takes one and answers in lower case (BRMCP-62). Taken as given,
+  // it went on to be compared with the API's spelling, and keyed beside it.
+  const CHILD = "abababab-0000-4000-8000-000000000007";
+  const TYPE = "eeeeeeee-0000-4000-8000-000000000005";
+  const TAG = "ffffffff-0000-4000-8000-000000000006";
+  const up = (id: string): string => id.toUpperCase();
+
+  it("is the root of brain_traverse once, and the names of its links are kept", async () => {
+    // The root was keyed as given and every neighbour as the API spells it:
+    // the walk came back to the root as to another thought, and the link from
+    // it was looked for under the capitals and lost its name.
+    const link = {
+      id: LINK,
+      thoughtIdA: THOUGHT,
+      thoughtIdB: CHILD,
+      relation: 1,
+      meaning: 1,
+      name: "motivates",
+    };
+    const rag = thought("RAG");
+    const embeddings = thought("Embeddings", { id: CHILD });
+    const { call } = await connect([
+      [
+        "GET /graph",
+        (url) =>
+          url.pathname.toLowerCase().includes(THOUGHT)
+            ? { ...graph(rag), children: [embeddings], links: [link] }
+            : { ...graph(embeddings), parents: [rag], links: [link] },
+      ],
+    ]);
+    const result = await call("brain_traverse", {
+      brainId: up(BRAIN),
+      thoughtId: up(THOUGHT),
+      depth: 2,
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toBe(
+      "# Neighbourhood of: RAG\n\n" +
+        `## Hop 1\n- Embeddings — ${CHILD}  (via RAG)\n\n` +
+        "## Labelled links\n- RAG -> motivates -> Embeddings\n- Embeddings -> motivates -> RAG\n\n" +
+        "## Totals\nthoughts 2, links 2",
+    );
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ["brain_get_thought", { thoughtId: THOUGHT }],
+    ["brain_search", { query: "RAG" }],
+    ["brain_traverse", { thoughtId: THOUGHT }],
+    ["brain_list_types_and_tags", {}],
+    ["brain_recent_changes", {}],
+    ["brain_index", { action: "status" }],
+    ["brain_create_thought", { name: "RAG", parentId: PARENT, typeId: TYPE, tagIds: [TAG] }],
+    ["brain_update_thought", { thoughtId: THOUGHT, typeId: TYPE }],
+    ["brain_set_note", { thoughtId: THOUGHT, markdown: "x" }],
+    ["brain_append_note", { thoughtId: THOUGHT, markdown: "x" }],
+    ["brain_link", { fromId: PARENT, toId: THOUGHT, relation: "child" }],
+    ["brain_unlink", { fromId: PARENT, toId: THOUGHT, linkId: LINK, confirm: true }],
+    ["brain_tag", { thoughtId: THOUGHT, add: [TAG], remove: [TAG] }],
+    ["brain_create_type_or_tag", { kind: "tag", name: "gotcha" }],
+    ["brain_attach_url", { thoughtId: THOUGHT, url: "https://example.com/p" }],
+    ["brain_activate", { thoughtId: THOUGHT }],
+    ["brain_delete_thought", { thoughtId: THOUGHT, confirm: true }],
+    [
+      "brain_ingest",
+      {
+        thoughts: [{ tempId: "t", name: "RAG", parent: PARENT, typeId: TYPE, tagIds: [TAG] }],
+        links: [{ from: "t", to: CHILD }],
+      },
+    ],
+  ])("%s sends it to TheBrain in lower case, and the brain's index is opened so", async (tool, args) => {
+    const opened: string[] = [];
+    const embedder = { id: "test", dimensions: 3 } as unknown as Embedder;
+    const context = (api: TheBrainApi) => ({
+      config: { allowDestructive: true },
+      search: (id: string) => {
+        opened.push(id);
+        return new SemanticSearch(api, new VectorStore(":memory:"), embedder);
+      },
+      indexer: (id: string) => {
+        opened.push(id);
+        return new SemanticIndexer(api, new VectorStore(":memory:"), embedder);
+      },
+      store: (id: string) => {
+        opened.push(id);
+        return new VectorStore(":memory:");
+      },
+    });
+    const { call, calls } = await connect([], context);
+    const capitals = Object.fromEntries(
+      Object.entries(args).map(([key, value]) => [
+        key,
+        JSON.parse(JSON.stringify(value).replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, up)),
+      ]),
+    );
+    await call(tool, { brainId: up(BRAIN), ...capitals });
+    expect(calls.length).toBeGreaterThan(0);
+    expect(JSON.stringify(calls)).not.toMatch(/[A-F]{8}-/);
+    expect(opened.filter((id) => id !== id.toLowerCase())).toEqual([]);
+  });
+
+  it("names one thought in a plan, in whichever spelling", async () => {
+    // A plan's parent is a tempId or a UUID, and only the plan says which.
+    // Kept as sent, the parent in capitals and in lower case were two
+    // thoughts: each was looked under, and the one thought asked for twice
+    // was made twice.
+    const { call, sent } = await connect(brainRoutes({ aliases: true }));
+    const result = await call("brain_ingest", {
+      brainId: BRAIN,
+      thoughts: [
+        { tempId: "a", name: "RAG", parent: up(PARENT) },
+        { tempId: "b", name: "RAG", parent: PARENT },
+      ],
+    });
+    expect(result.isError).toBe(false);
+    expect(sent("POST")).toEqual([
+      { name: "RAG", kind: 1, acType: 0, sourceThoughtId: PARENT, relation: 1 },
+    ]);
+  });
+
+  it("one that is no UUID is refused in the caller's spelling", async () => {
+    const { call, calls } = await connect([]);
+    const result = await call("brain_get_thought", { brainId: "My-Brain", thoughtId: THOUGHT });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('brainId must be a UUID, got "My-Brain"');
+    expect(calls).toEqual([]);
+  });
+});

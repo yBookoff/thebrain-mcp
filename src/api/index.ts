@@ -41,6 +41,7 @@ export {
   ZERO_UUID,
   assertUuid,
   isUuid,
+  lowerUuid,
   emptyOn400,
   mayHaveLanded,
 } from "./client.js";
