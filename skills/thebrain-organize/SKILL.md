@@ -108,7 +108,13 @@ Safe and reversible, after showing the person the list:
 - **Deleting.** Even with deletion permitted, ask separately for each thought,
   never as a list — "shall I delete all of these?".
 - **Restructuring the hierarchy.** Mass-moving branches is almost always a bad
-  idea without an explicit request.
+  idea without an explicit request. A single link that is the wrong kind, a
+  jump that should be a parent link or the other way, is `brain_link` with
+  `replace: true` once the person agrees.
+- **Removing a link** (`brain_unlink`). It asks the person itself, and takes
+  the link's label with it. A thought it leaves with no parent, child or jump
+  is shown next to nothing: give it another link first. Two thoughts joined by
+  two links are a fault to report, with the identifiers `brain_unlink` lists.
 
 ## How to report
 

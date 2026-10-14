@@ -365,4 +365,46 @@ function sameId(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
+/**
+ * Every link between two thoughts, from the `links` their graphs list and
+ * what the lookup of the pair answered: `lookup` from `between(a, b)` and
+ * `back` from `between(b, a)`, when it was asked, each null for a 404.
+ * `listed` may be one graph's links or both ends', and may hold links of
+ * other pairs.
+ *
+ * Two thoughts share one link as a rule, and the lookup returns it from
+ * either end. Two links posted at once for a pair are often two (L35), and
+ * then the lookup is a 404 from either end when both have one `thoughtIdA`,
+ * and from each end the link it names first when they have not (L43). A
+ * graph lists every link of its thought, those among them, but it is a
+ * copy, behind a write by a time nothing bounds (L27): straight after one of
+ * two is deleted it lists both, where the lookup is not behind. So the one
+ * link both lookups give is the pair's only link, whatever a graph lists
+ * beside it. Otherwise a link a lookup gives is in, listed or not, and so
+ * is a listed one; and with none from a lookup, only two or more listed
+ * are, the pair the lookup cannot see. One listed link and a 404 is left
+ * out: a graph behind a deletion, as a rule, or behind the creation of a
+ * second link, which only a later read tells apart.
+ *
+ * The lookups' copies come first: they are the ones that are not behind.
+ */
+export function linksOfPair(
+  a: string,
+  b: string,
+  listed: readonly LinkDto[],
+  lookup: LinkDto | null,
+  back: LinkDto | null = null,
+): LinkDto[] {
+  if (lookup !== null && back !== null && sameId(lookup.id, back.id)) return [lookup];
+  const joins = (l: LinkDto): boolean =>
+    (sameId(l.thoughtIdA, a) && sameId(l.thoughtIdB, b)) ||
+    (sameId(l.thoughtIdA, b) && sameId(l.thoughtIdB, a));
+  const found: LinkDto[] = [];
+  const looked = [lookup, back].filter((l): l is LinkDto => l !== null);
+  for (const link of [...looked, ...listed.filter(joins)]) {
+    if (!found.some((f) => sameId(f.id, link.id))) found.push(link);
+  }
+  return looked.length === 0 && found.length < 2 ? [] : found;
+}
+
 export { ThoughtKind };

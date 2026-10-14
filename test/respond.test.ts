@@ -314,9 +314,45 @@ describe("error explanations point at the next step", () => {
       /^Could not get target thought [0-9A-F-]{36}\. It may have been deleted/,
     );
     // Only that sentence: a 400 about a link in other words is as it came.
-    expect(refused("Link could not be created.")).toBe(
-      `Link could not be created. (POST /api/links/${BRAIN})`,
+    expect(refused("Link thickness not specified.")).toBe(
+      `Link thickness not specified. (POST /api/links/${BRAIN})`,
     );
+  });
+
+  it("the 400 a link gets with no cause says that the pair has more than one link, and what removes one", () => {
+    // Measured: the answer to any post between two thoughts joined by two or
+    // three links, either way and of any kind, a tag attached twice
+    // included; an end deleted a moment ago gets the sentence that names it
+    // (L43). It used to be passed on as it came, "Link could not be created.
+    // (POST …)", and no tool could do anything about the pair.
+    const refused = (message: string, alone?: boolean): string =>
+      describeError(
+        new TheBrainError("bad_request", message, {
+          status: 400,
+          method: "POST",
+          path: `/api/links/${BRAIN}`,
+        }),
+        alone,
+      );
+    const text = refused("Link could not be created.");
+    expect(text).toBe(
+      `Link could not be created. TheBrain named no cause (POST /api/links/${BRAIN}). It ` +
+        "answers so when the two thoughts are joined by more than one link already, as two " +
+        "links posted at once can leave them: nothing more can be posted between them, of " +
+        "any kind or either way. Nothing was written. brain_unlink, given the same two " +
+        "thoughts, lists the links that join them and removes the one its linkId names; or " +
+        "one is removed in TheBrain itself.",
+    );
+    // Without its period, and in other letter case, it is the same answer.
+    expect(refused("link could not be created")).toBe(
+      text.replace("Link could not be created.", "link could not be created."),
+    );
+    // A line under "Failed" makes no claim for the batch.
+    expect(refused("Link could not be created.", false)).toBe(
+      text.replace(" Nothing was written.", ""),
+    );
+    // It names no identifier, so none is blamed.
+    expect(text).not.toMatch(/brainId|brain_list\b|THEBRAIN_API_KEY|deleted/);
   });
 
   it("the identifier of zeros is told as that, with the same way on as a malformed one", () => {

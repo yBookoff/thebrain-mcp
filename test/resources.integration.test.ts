@@ -38,6 +38,7 @@ import {
   isTypeLink,
   isUuid,
   linkNameAsStored,
+  linksOfPair,
   logEntryKey,
   logTime,
   nameRefusal,
@@ -7680,6 +7681,312 @@ suite("resource layer against the live API", () => {
       );
       expect(renamed.name).toBe("motivates");
     }, 60_000);
+  });
+
+  /**
+   * What `brain_link` with replace and `brain_unlink` stand on
+   * (docs/api-map.md, L43): a post over the one link a pair has, a link's
+   * deletion, and the pairs that posts sent at once leave.
+   */
+  describe("a link changed or removed", () => {
+    const pair = async (
+      name: string,
+      kindB: number = ThoughtKind.Normal,
+    ): Promise<{ a: string; b: string }> => ({
+      a: await make(`${name}-A`),
+      b: await make(`${name}-B`, kindB),
+    });
+    const post = (body: Record<string, unknown>): Promise<{ id: string }> =>
+      api.client.post<{ id: string }>(`/api/links/${brainId}`, { json: body });
+    /** The links a thought's graph has between it and another. */
+    const joining = async (a: string, b: string): Promise<LinkDto[]> =>
+      (await api.thoughts.getGraph(brainId, a)).links.filter(
+        (l) => [l.thoughtIdA, l.thoughtIdB].includes(a) && [l.thoughtIdA, l.thoughtIdB].includes(b),
+      );
+    /** The log's entries about one link, oldest first, as `modType` and its values. */
+    const logged = async (linkId: string, atLeast: number): Promise<ModificationLogDto[]> => {
+      const ours = (entries: ModificationLogDto[]): ModificationLogDto[] =>
+        entries.filter((l) => l.sourceId === linkId);
+      const entries = await eventually(
+        () => newestLogs(300),
+        (all) => ours(all).length >= atLeast,
+        { timeoutMs: 3000, stepMs: 100 },
+      );
+      return ours(entries).sort((x, y) => compareLogTime(logTime(x), logTime(y)));
+    };
+    /**
+     * A pair that `bodies`, posted at once, left with `count` links or more,
+     * and the pairs tried before it, whose links are deleted. Two at once
+     * came to two links 51 times in 60 (L35), and three to three 8 times in
+     * 10; so a pair is tried until it comes to them.
+     */
+    const atOnce = async (
+      name: string,
+      bodies: (a: string, b: string) => Array<Record<string, unknown>>,
+      count: number,
+      kindB: number = ThoughtKind.Normal,
+    ): Promise<{ a: string; b: string; links: LinkDto[] }> => {
+      for (let attempt = 0; attempt < 15; attempt += 1) {
+        const { a, b } = await pair(`${name}-${attempt}`, kindB);
+        await Promise.all(bodies(a, b).map(post));
+        await settle(600);
+        const links = await joining(a, b);
+        if (links.length >= count) return { a, b, links };
+        for (const l of links) await api.links.delete(brainId, l.id);
+      }
+      throw new Error(`no pair came to ${count} links in fifteen tries`);
+    };
+
+    it("a link posted over with another relation is rewritten under its identifier, keeps its label, colour, thickness and direction, and logs a 402 alone", async () => {
+      // 144 of 144 by script, two posts to each change, three times each;
+      // here one post to each. The lookup had the new kind at its first
+      // read every time; a jump kept the end it was first posted from.
+      const STATES = {
+        jump: (a: string, b: string) => ({ thoughtIdA: a, thoughtIdB: b, relation: 3 }),
+        jumpBack: (a: string, b: string) => ({ thoughtIdA: b, thoughtIdB: a, relation: 3 }),
+        aAbove: (a: string, b: string) => ({ thoughtIdA: a, thoughtIdB: b, relation: 1 }),
+        bAbove: (a: string, b: string) => ({ thoughtIdA: b, thoughtIdB: a, relation: 1 }),
+      };
+      // Each target by a post that names its ends one way or the other.
+      const TARGETS = {
+        jump: (a: string, b: string) => ({ thoughtIdA: b, thoughtIdB: a, relation: 3 }),
+        aAbove: (a: string, b: string) => ({ thoughtIdA: b, thoughtIdB: a, relation: 2 }),
+        bAbove: (a: string, b: string) => ({ thoughtIdA: b, thoughtIdB: a, relation: 1 }),
+      };
+      // A type or a tag below is an ordinary link; above, it is not one.
+      for (const kindB of [ThoughtKind.Normal, ThoughtKind.Type, ThoughtKind.Tag]) {
+        const { a, b } = await pair(`changed-${kindB}`, kindB);
+        for (const [state, made] of Object.entries(STATES)) {
+          if (kindB !== ThoughtKind.Normal && state === "bAbove") continue;
+          for (const [target, sent] of Object.entries(TARGETS)) {
+            if (kindB !== ThoughtKind.Normal && target === "bAbove") continue;
+            const cell = `kind ${kindB}: ${state} to ${target}`;
+            const { id } = await post(made(a, b));
+            await api.links.update(brainId, id, {
+              name: "kept",
+              color: "#123456",
+              thickness: 3,
+              direction: 2,
+            });
+            const before = await eventually(
+              () => api.links.between(brainId, a, b),
+              (l) => l?.name === "kept" && l.color === "#123456" && l.direction === 2,
+            );
+            expect(before?.thickness, cell).toBe(300);
+            const first = before!.thoughtIdA;
+
+            expect((await post(sent(a, b))).id, cell).toBe(id);
+            const [relation, upper] =
+              target === "jump"
+                ? [Relation.Jump, first]
+                : target === "aAbove"
+                  ? [Relation.Child, a]
+                  : [Relation.Child, b];
+            const after = await eventually(
+              () => api.links.between(brainId, a, b),
+              (l) => l?.relation === relation && l.thoughtIdA === upper,
+              { timeoutMs: 2000, stepMs: 20 },
+            );
+            expect(after, cell).toMatchObject({
+              id,
+              relation,
+              thoughtIdA: upper,
+              meaning: LinkMeaning.Normal,
+              name: "kept",
+              color: "#123456",
+              thickness: 300,
+              direction: 2,
+            });
+            // Its 101, a 103 and a 201, 401 and 403 for the patch, and one
+            // 402 for the post; nothing names the relation.
+            const entries = await logged(id, 6);
+            expect(entries.map((l) => l.modType).sort(), cell).toEqual([101, 103, 201, 401, 402, 403]);
+            await api.links.delete(brainId, id);
+          }
+        }
+      }
+    }, 120_000);
+
+    it("a link deleted is gone from the lookup at once and from its own read soon after; deleted again it is a 400, as an identifier no link has is; the log has a 102 with both ends and its name", async () => {
+      const { a, b } = await pair("deleted");
+      const { id } = await post({ thoughtIdA: a, thoughtIdB: b, relation: 3, name: "gone" });
+      expect((await api.links.between(brainId, a, b))?.id).toBe(id);
+
+      await api.links.delete(brainId, id);
+      // Measured at the first read 20 times of 20, 2 to 4 ms after the answer.
+      const lookup = await eventually(
+        () => api.links.between(brainId, a, b),
+        (l) => l === null,
+        { timeoutMs: 1000, stepMs: 20 },
+      );
+      expect(lookup).toBeNull();
+      // The read by its identifier is behind, by 4 to 216 ms.
+      const read = await eventually(
+        () => api.links.get(brainId, id).then(() => "there", (e: TheBrainError) => e.kind),
+        (r) => r !== "there",
+        { timeoutMs: 3000, stepMs: 50 },
+      );
+      expect(read).toBe("not_found");
+
+      for (const linkId of [id, "12345678-1234-4234-8234-123456789abc"]) {
+        await expect(api.links.delete(brainId, linkId)).rejects.toMatchObject({
+          kind: "bad_request",
+          status: 400,
+          message: "Bad Request",
+        });
+      }
+
+      const entries = await logged(id, 3);
+      const gone = entries.find((l) => l.modType === ModType.Deleted);
+      expect(gone).toMatchObject({
+        sourceType: EntityType.Link,
+        extraAId: a,
+        extraBId: b,
+        oldValue: "gone",
+        newValue: null,
+      });
+      // Each end is linked to nothing now.
+      const graph = await eventually(
+        () => api.thoughts.getGraph(brainId, b),
+        (g) => g.links.length === 0,
+      );
+      expect([graph.parents, graph.children, graph.jumps].map((l) => l.length)).toEqual([0, 0, 0]);
+    }, 30_000);
+
+    it("two links that go each way: the lookup gives each by the end named first, any further post is the bare 400, and both graphs list both", async () => {
+      // Two jumps sent at once from each end came to two links 3 times in 5,
+      // and a jump and a parent link, stored from the other end, 2 in 5.
+      const { a, b, links } = await atOnce(
+        "each-way",
+        (a, b) => [
+          { thoughtIdA: a, thoughtIdB: b, relation: 3 },
+          { thoughtIdA: b, thoughtIdB: a, relation: 3 },
+        ],
+        2,
+      );
+      const fromA = links.find((l) => l.thoughtIdA === a)!;
+      const fromB = links.find((l) => l.thoughtIdA === b)!;
+      expect((await api.links.between(brainId, a, b))?.id).toBe(fromA.id);
+      expect((await api.links.between(brainId, b, a))?.id).toBe(fromB.id);
+      expect((await joining(b, a)).map((l) => l.id).sort()).toEqual([fromA.id, fromB.id].sort());
+      expect(
+        linksOfPair(a, b, (await api.thoughts.getGraph(brainId, a)).links, fromA).map((l) => l.id),
+      ).toEqual([fromA.id, fromB.id]);
+
+      for (const body of [
+        { thoughtIdA: a, thoughtIdB: b, relation: 3 },
+        { thoughtIdA: b, thoughtIdB: a, relation: 3 },
+        { thoughtIdA: a, thoughtIdB: b, relation: 1 },
+        { thoughtIdA: a, thoughtIdB: b, relation: 2 },
+      ]) {
+        await expect(post(body)).rejects.toMatchObject({
+          status: 400,
+          message: "Link could not be created.",
+        });
+      }
+      expect(await joining(a, b)).toHaveLength(2);
+
+      // One deleted, and the other is the pair's to the lookup from each end
+      // at once, where a graph read before lists both still: 12 of 12 for
+      // both graphs, for 26 to 211 ms. The two lookups are what tells the
+      // pair's one link from a graph behind.
+      await api.links.delete(brainId, fromA.id);
+      const graphs = [
+        ...(await api.thoughts.getGraph(brainId, a)).links,
+        ...(await api.thoughts.getGraph(brainId, b)).links,
+      ];
+      const [ab, ba] = await eventually(
+        async () => [await api.links.between(brainId, a, b), await api.links.between(brainId, b, a)],
+        ([x, y]) => x?.id === fromB.id && y?.id === fromB.id,
+        { timeoutMs: 1000, stepMs: 20 },
+      );
+      expect([ab?.id, ba?.id]).toEqual([fromB.id, fromB.id]);
+      expect(linksOfPair(a, b, graphs, ab!, ba!).map((l) => l.id)).toEqual([fromB.id]);
+      // And it takes a post again: rewritten, under its identifier.
+      expect((await post({ thoughtIdA: a, thoughtIdB: b, relation: 1 })).id).toBe(fromB.id);
+    }, 120_000);
+
+    it("three links posted at once the same way: the lookup has none until one is left, and every post between them is the bare 400", async () => {
+      const { a, b, links } = await atOnce(
+        "three",
+        (a, b) => [1, 2, 3].map(() => ({ thoughtIdA: a, thoughtIdB: b, relation: 3 })),
+        3,
+      );
+      expect(linksOfPair(a, b, links, null).map((l) => l.id)).toEqual(links.map((l) => l.id));
+      for (const [i, link] of links.entries()) {
+        const left = links.length - i;
+        if (left === 1) {
+          expect((await api.links.between(brainId, a, b))?.id).toBe(link.id);
+          expect((await api.links.between(brainId, b, a))?.id).toBe(link.id);
+          break;
+        }
+        expect(await api.links.between(brainId, a, b), `${left} left`).toBeNull();
+        expect(await api.links.between(brainId, b, a), `${left} left`).toBeNull();
+        await expect(post({ thoughtIdA: a, thoughtIdB: b, relation: 3 })).rejects.toMatchObject({
+          status: 400,
+          message: "Link could not be created.",
+        });
+        await api.links.delete(brainId, link.id);
+        await settle(100);
+      }
+    }, 120_000);
+
+    it("a tag attached twice: the lookup has neither, attached again or jumped to it is the bare 400, and the graph lists the tag once", async () => {
+      // 7 of 10 attaches sent at once came to two attachments.
+      const attach = (a: string, b: string) => ({ thoughtIdA: a, thoughtIdB: b, relation: 2 });
+      const { a, b, links } = await atOnce("tag-twice", (a, b) => [attach(a, b), attach(a, b)], 2, ThoughtKind.Tag);
+      expect(links.map((l) => [l.meaning, l.thoughtIdA])).toEqual([
+        [LinkMeaning.Tag, b],
+        [LinkMeaning.Tag, b],
+      ]);
+      expect(await api.links.between(brainId, a, b)).toBeNull();
+      expect(await api.links.hasTag(brainId, a, b)).toBe(false);
+      for (const body of [attach(a, b), { thoughtIdA: a, thoughtIdB: b, relation: 3 }]) {
+        await expect(post(body)).rejects.toMatchObject({
+          status: 400,
+          message: "Link could not be created.",
+        });
+      }
+      expect((await api.thoughts.getGraph(brainId, a)).tags.map((t) => t.id)).toEqual([b]);
+    }, 120_000);
+
+    it("a post towards an end deleted a moment ago is the 400 that names it, not the bare one", async () => {
+      // 20 of 20, 0 to 1,500 ms after the delete.
+      const a = await make("gone-end-A");
+      const b = await api.thoughts.create(brainId, { name: `${PREFIX}gone-end-B` });
+      await api.thoughts.delete(brainId, b);
+      await expect(post({ thoughtIdA: a, thoughtIdB: b, relation: 3 })).rejects.toMatchObject({
+        status: 400,
+        message: `Could not get target thought ${b}`,
+      });
+    }, 30_000);
+
+    it("a thought's graph lists its parent's link, its type's and its tag's among its links", async () => {
+      const parent = await make("links-parent");
+      const type = await make("links-type", ThoughtKind.Type);
+      const tag = await make("links-tag", ThoughtKind.Tag);
+      const id = await api.thoughts.create(brainId, {
+        name: `${PREFIX}links-thought`,
+        sourceThoughtId: parent,
+        relation: Relation.Child,
+        typeId: type,
+      });
+      created.push(id);
+      await api.links.attachTag(brainId, id, tag);
+      const graph = await eventually(
+        () => api.thoughts.getGraph(brainId, id),
+        (g) => g.links.length === 3,
+      );
+      expect(
+        graph.links
+          .map((l): [number, string] => [l.meaning, l.thoughtIdA])
+          .sort((x, y) => x[0] - y[0]),
+      ).toEqual([
+        [LinkMeaning.Normal, parent],
+        [LinkMeaning.Type, type],
+        [LinkMeaning.Tag, tag],
+      ]);
+    }, 30_000);
   });
 
   /**

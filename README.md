@@ -4,7 +4,7 @@ An MCP server for [TheBrain 15](https://www.thebrain.com/), built on its local A
 
 It gives an agent semantic operations over your brain: search by meaning, read a
 neighbourhood of the graph, and write a decomposed piece of material into the
-brain as a whole connected structure. It is not a mirror of the API — 18 tools
+brain as a whole connected structure. It is not a mirror of the API — 19 tools
 instead of 48 endpoints.
 
 The point is not "save this text". The point is that when you hand an agent an
@@ -73,7 +73,7 @@ anywhere.
 | `THEBRAIN_API_KEY` | — | Required |
 | `THEBRAIN_BASE_URL` | `http://localhost:11522`, then `:8001` | Local API address |
 | `THEBRAIN_DATA_DIR` | `~/.thebrain-mcp` | Where indexes are stored |
-| `THEBRAIN_ALLOW_DESTRUCTIVE` | `0` | Allow deleting thoughts |
+| `THEBRAIN_ALLOW_DESTRUCTIVE` | `0` | Allow deleting thoughts and links |
 | `THEBRAIN_EMBEDDING_MODEL` | `Xenova/multilingual-e5-small` | Embedding model |
 | `THEBRAIN_EMBEDDING_DTYPE` | `q8` | Weight precision |
 | `THEBRAIN_TIMEOUT_MS` | `30000` | API request timeout |
@@ -107,7 +107,8 @@ exactly as Settings shows it (`http://localhost:11522/api/`) is fine.
 | `brain_create_thought` | A thought together with its note, type, tags and aliases |
 | `brain_update_thought` | Name, label, type, colours; add and remove aliases |
 | `brain_set_note` / `brain_append_note` | Replace or extend a note |
-| `brain_link` | Connect two thoughts, with a label |
+| `brain_link` | Connect two thoughts, with a label; with `replace`, make the link that joins them another kind |
+| `brain_unlink` | Remove a link, with human confirmation; mends two thoughts joined twice |
 | `brain_tag` | Attach and detach tags |
 | `brain_create_type_or_tag` | A new type or tag; a tag of a name the brain has is given back, not made twice |
 | `brain_attach_url` | Attach a link, without duplicates |
@@ -172,7 +173,8 @@ restart (`claude --continue` keeps the conversation).
 
 ## Deletion
 
-Off by default. Even with `THEBRAIN_ALLOW_DESTRUCTIVE=1` it requires human
+Of a thought (`brain_delete_thought`) and of a link (`brain_unlink`). Off by
+default. Even with `THEBRAIN_ALLOW_DESTRUCTIVE=1` it requires human
 consent: through a confirmation form if the client supports one, otherwise
 through a second call with an explicit flag. The agent cannot make this decision
 for you.

@@ -12,6 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ElicitRequestSchema, type ElicitResult } from "@modelcontextprotocol/sdk/types.js";
 
 import { TheBrainApi } from "../src/api/index.js";
 import { indexModelId } from "../src/semantic/document.js";
@@ -40,10 +41,14 @@ type Route = [needle: string, respond: (url: URL, body: unknown) => unknown];
  * One thing is added to what a route returns: a graph lists the thoughts
  * created next to its thought through this connection, in the list their
  * relation puts them in, as the API's does. `brain_ingest` waits for that.
+ *
+ * `elicit`, when given, makes the client one that shows a form: it answers
+ * each question the server puts, as a person would through it.
  */
 async function connect(
   routes: Route[],
   context: (api: TheBrainApi) => Record<string, unknown> = () => ({}),
+  elicit?: (message: string) => ElicitResult | Promise<ElicitResult>,
 ) {
   const calls: Array<{ method: string; path: string; body: unknown }> = [];
   const LISTS = { 1: "children", 2: "parents", 3: "jumps" } as const;
@@ -102,7 +107,15 @@ async function connect(
   registerIngestTool(server, ctx);
 
   const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "test-client", version: "0" });
+  const client =
+    elicit === undefined
+      ? new Client({ name: "test-client", version: "0" })
+      : new Client({ name: "test-client", version: "0" }, { capabilities: { elicitation: {} } });
+  if (elicit !== undefined) {
+    client.setRequestHandler(ElicitRequestSchema, async (request) =>
+      elicit(request.params.message),
+    );
+  }
   await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
 
   const call = async (
@@ -1289,9 +1302,9 @@ describe("tools/list", () => {
     // changes those two sentences.
     const { client } = await connect([]);
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(18);
-    expect(tools.reduce((sum, tool) => sum + (tool.description ?? "").length, 0)).toBe(4648);
-    expect(JSON.stringify(tools).length).toBe(19028);
+    expect(tools).toHaveLength(19);
+    expect(tools.reduce((sum, tool) => sum + (tool.description ?? "").length, 0)).toBe(4958);
+    expect(JSON.stringify(tools).length).toBe(20318);
   });
 });
 
@@ -6091,6 +6104,694 @@ describe("a label, a tag and a link that are there already", () => {
       { thoughtIdA: LEAF, thoughtIdB: SIDE, relation: 3, name: "motivates" },
     ]);
     expect(sent("PATCH")).toEqual([]);
+  });
+});
+
+describe("a link changed or removed", () => {
+  const TYPE = "eeeeeeee-0000-4000-8000-000000000005";
+  const TAG = "ffffffff-0000-4000-8000-000000000006";
+  const ELSEWHERE = "12121212-0000-4000-8000-000000000012";
+  const LINK_2 = "dddddddd-0000-4000-8000-000000000044";
+  const LINK_3 = "dddddddd-0000-4000-8000-000000000444";
+  const ZEROS = "00000000-0000-0000-0000-000000000000";
+  /** THOUGHT, PARENT and ELSEWHERE ordinary, TAG a tag and TYPE a type. */
+  const THOUGHTS: Record<string, { name: string; kind: number }> = {
+    [THOUGHT]: { name: "RAG", kind: 1 },
+    [PARENT]: { name: "Constraints", kind: 1 },
+    [ELSEWHERE]: { name: "Reading", kind: 1 },
+    [TAG]: { name: "gotcha", kind: 4 },
+    [TYPE]: { name: "Pattern", kind: 2 },
+  };
+  interface Link {
+    id: string;
+    thoughtIdA: string;
+    thoughtIdB: string;
+    relation: number;
+    meaning: number;
+    name: string | null;
+  }
+  /** A link as the API stores it: `thoughtIdA` above, the tag, the type. */
+  const link = (
+    id: string,
+    a: string,
+    b: string,
+    relation: number,
+    { meaning = 1, name = null }: { meaning?: number; name?: string | null } = {},
+  ): Link => ({ id, thoughtIdA: a, thoughtIdB: b, relation, meaning, name });
+  /** THOUGHT and PARENT each under ELSEWHERE, so that neither is left alone. */
+  const PARENTED = [link(LINK_3, ELSEWHERE, THOUGHT, 1), link(`${LINK_3.slice(0, -1)}5`, ELSEWHERE, PARENT, 1)];
+
+  /**
+   * A brain whose links are `links`. A graph lists each link of its thought,
+   * and the lookup of a pair answers as the API's does: its one link; of two
+   * that go each way the one whose `thoughtIdA` is named first; and a 404 for
+   * two the same way (L35, L43). `lookup` is the lookup's answer instead. A
+   * post answers `posted`; `first` goes ahead of the routes.
+   */
+  const brain = (
+    links: Link[],
+    {
+      lookup,
+      posted = LINK,
+      first = [],
+    }: { lookup?: Link | null; posted?: string; first?: Route[] } = {},
+  ): Route[] => [
+    ...first,
+    [
+      "GET /graph",
+      (url) => {
+        const id = url.pathname.split("/").at(-2)!;
+        if (!(id in THOUGHTS)) return generic403();
+        return {
+          ...graph({ ...thought("", { aliases: [] }), id, ...THOUGHTS[id] }),
+          links: links.filter((l) => [l.thoughtIdA, l.thoughtIdB].includes(id)),
+        };
+      },
+    ],
+    [
+      "GET /api/thoughts/",
+      (url) => {
+        const id = url.pathname.split("/").pop()!;
+        return id in THOUGHTS ? { ...thought("", { aliases: [] }), id, ...THOUGHTS[id] } : 404;
+      },
+    ],
+    [
+      "GET /api/links/",
+      (url) => {
+        if (lookup !== undefined) return lookup ?? 404;
+        const [a, b] = url.pathname.split("/").slice(-2) as [string, string];
+        const pair = links.filter(
+          (l) => [l.thoughtIdA, l.thoughtIdB].includes(a) && [l.thoughtIdA, l.thoughtIdB].includes(b),
+        );
+        if (pair.length === 1) return pair[0];
+        const first = pair.filter((l) => l.thoughtIdA === a);
+        return first.length === 1 ? first[0] : 404;
+      },
+    ],
+    ["POST /api/links/", () => ({ id: posted })],
+    ["PATCH /api/links/", () => 200],
+    ["DELETE /api/links/", () => 200],
+  ];
+  const requests = (calls: Array<{ method: string; path: string }>): string[] =>
+    calls.map((c) => `${c.method} ${c.path}`);
+  const writes = (calls: Array<{ method: string; path: string }>): string[] =>
+    requests(calls.filter((c) => c.method !== "GET"));
+  const ends = { brainId: BRAIN, fromId: THOUGHT, toId: PARENT };
+  const said = (status: number, body: unknown) => (): Response =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  const noAnswer = (): never => {
+    // What the client makes of a timeout: the request may have reached TheBrain.
+    throw new DOMException("timed out", "TimeoutError");
+  };
+
+  describe("brain_link with replace", () => {
+    it("makes the link that is there the one asked for, under its identifier, and says what it was", async () => {
+      // It used to have no way to: the result said what was there, and a
+      // post over a link that is there is what rewrites it (L21, L43).
+      for (const [existing, relation, was, now, posted] of [
+        [link(LINK, THOUGHT, PARENT, 3), "parent", "jump", "parent-child with toId above", 2],
+        [link(LINK, THOUGHT, PARENT, 3), "child", "jump", "parent-child with fromId above", 1],
+        // A jump stored from the other end is the same jump.
+        [link(LINK, PARENT, THOUGHT, 3), "child", "jump", "parent-child with fromId above", 1],
+        [link(LINK, PARENT, THOUGHT, 1), undefined, "parent-child with toId above", "jump", 3],
+        [
+          link(LINK, PARENT, THOUGHT, 1),
+          "child",
+          "parent-child with toId above",
+          "parent-child with fromId above",
+          1,
+        ],
+        [
+          link(LINK, THOUGHT, PARENT, 1),
+          "parent",
+          "parent-child with fromId above",
+          "parent-child with toId above",
+          2,
+        ],
+      ] as const) {
+        const { call, calls, sent } = await connect(brain([existing, ...PARENTED]));
+        const asked = relation === undefined ? {} : { relation };
+        const result = await call("brain_link", { ...ends, ...asked, replace: true });
+        expect(result, `${was} -> ${now}`).toEqual({
+          isError: false,
+          text: `## Link changed\nidentifier ${LINK}: from ${was} to ${now}`,
+        });
+        expect(sent("POST")).toEqual([{ thoughtIdA: THOUGHT, thoughtIdB: PARENT, relation: posted }]);
+        expect(writes(calls)).toEqual([`POST /api/links/${BRAIN}`]);
+      }
+    });
+
+    it("reads the upper end and the pair from each end before its one write, and a graph only for a second link", async () => {
+      // The one link a pair has is what the lookup gives from either end. A
+      // graph, a copy, can list a second straight after it was removed.
+      const stale = [link(LINK, THOUGHT, PARENT, 3), link(LINK_2, THOUGHT, PARENT, 1)];
+      for (const listed of [[link(LINK, THOUGHT, PARENT, 3)], stale]) {
+        const { call, calls } = await connect(brain(listed, { lookup: listed[0]! }));
+        const result = await call("brain_link", { ...ends, relation: "parent", replace: true });
+        expect(result.text).toBe(
+          `## Link changed\nidentifier ${LINK}: from jump to parent-child with toId above`,
+        );
+        expect(requests(calls)).toEqual([
+          `GET /api/thoughts/${BRAIN}/${PARENT}`,
+          `GET /api/links/${BRAIN}/${THOUGHT}/${PARENT}`,
+          `GET /api/links/${BRAIN}/${PARENT}/${THOUGHT}`,
+          // `create()` reads the upper end too, as it does for any new link.
+          `GET /api/thoughts/${BRAIN}/${PARENT}`,
+          `POST /api/links/${BRAIN}`,
+        ]);
+      }
+      // A lookup that has no link from the other end is a pair with more.
+      const three = [
+        link(LINK, THOUGHT, PARENT, 3),
+        link(LINK_2, PARENT, THOUGHT, 3),
+        link(LINK_3, PARENT, THOUGHT, 3),
+      ];
+      const { call, calls } = await connect(brain(three));
+      const result = await call("brain_link", { ...ends, relation: "parent", replace: true });
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/^fromId and toId are joined by 3 links/);
+      expect(requests(calls)).toEqual([
+        `GET /api/thoughts/${BRAIN}/${PARENT}`,
+        `GET /api/links/${BRAIN}/${THOUGHT}/${PARENT}`,
+        `GET /api/links/${BRAIN}/${PARENT}/${THOUGHT}`,
+        `GET /api/thoughts/${BRAIN}/${THOUGHT}/graph`,
+      ]);
+    });
+
+    it("keeps the label, or replaces it and quotes the one it had", async () => {
+      const labelled = link(LINK, THOUGHT, PARENT, 3, { name: "contradicts" });
+      for (const [existing, name, said, sentName] of [
+        [labelled, undefined, ', and keeps its label "contradicts"', undefined],
+        [labelled, "refines", ', label updated: it was "contradicts" and is now "refines"', "refines"],
+        // The label it has is not sent again.
+        [labelled, "contradicts", ', label already "contradicts"', undefined],
+        [link(LINK, THOUGHT, PARENT, 3), "refines", ", label updated", "refines"],
+      ] as const) {
+        const { call, sent } = await connect(brain([existing]));
+        const named = name === undefined ? {} : { name };
+        const result = await call("brain_link", { ...ends, relation: "child", ...named, replace: true });
+        expect(result.text, said).toBe(
+          `## Link changed\nidentifier ${LINK}: from jump to parent-child with fromId above${said}`,
+        );
+        expect(sent("POST"), said).toEqual([
+          {
+            thoughtIdA: THOUGHT,
+            thoughtIdB: PARENT,
+            relation: 1,
+            ...(sentName === undefined ? {} : { name: sentName }),
+          },
+        ]);
+        expect(sent("PATCH")).toEqual([]);
+      }
+    });
+
+    it("over the link asked for, answers as brain_link does without it, and reads no graph", async () => {
+      for (const name of [undefined, "contradicts"]) {
+        const named = name === undefined ? {} : { name };
+        const routes = brain([link(LINK, PARENT, THOUGHT, 1)]);
+        const without = await connect(routes);
+        const plain = await without.call("brain_link", { ...ends, relation: "parent", ...named });
+        const withIt = await connect(routes);
+        const replaced = await withIt.call("brain_link", {
+          ...ends,
+          relation: "parent",
+          ...named,
+          replace: true,
+        });
+        expect(replaced).toEqual(plain);
+        expect(requests(withIt.calls)).toEqual(requests(without.calls));
+        expect(requests(withIt.calls).some((r) => r.endsWith("/graph"))).toBe(false);
+      }
+    });
+
+    it("never replaces a tag's attachment or a type's link, and writes nothing", async () => {
+      const NOTHING = "replace changes an ordinary link, never a tag's attachment or a type's link. Nothing was written.";
+      for (const [args, existing, text] of [
+        [
+          { fromId: THOUGHT, toId: TAG },
+          link(LINK, TAG, THOUGHT, 1, { meaning: 5 }),
+          `toId is a tag on fromId: ${NOTHING} To link the two another way, take the tag off ` +
+            "with brain_tag first.",
+        ],
+        [
+          { fromId: THOUGHT, toId: TYPE, relation: "child" },
+          link(LINK, TYPE, THOUGHT, 1, { meaning: 2 }),
+          `toId is the type of fromId: ${NOTHING} To link the two another way, take the type ` +
+            "away first, with typeId null in brain_update_thought.",
+        ],
+        [
+          { fromId: THOUGHT, toId: PARENT, name: "about" },
+          link(LINK, PARENT, THOUGHT, 1, { meaning: 6 }),
+          `a link of another kind (meaning 6): ${NOTHING}`,
+        ],
+      ] as const) {
+        const { call, calls } = await connect(brain([existing]));
+        const result = await call("brain_link", { brainId: BRAIN, ...args, replace: true });
+        expect(result).toEqual({ isError: true, text });
+        expect(writes(calls)).toEqual([]);
+      }
+      // Without replace it is what it was: nothing added, and no error.
+      const { call } = await connect(brain([link(LINK, TAG, THOUGHT, 1, { meaning: 5 })]));
+      expect(await call("brain_link", { brainId: BRAIN, fromId: THOUGHT, toId: TAG })).toEqual({
+        isError: false,
+        text:
+          "## No link added\ntoId is a tag on fromId, and two thoughts share one link: the " +
+          "requested jump was not added in its place",
+      });
+    });
+
+    it("lists two links that join the pair, the same way or each way, and writes nothing", async () => {
+      const several = (lines: string[]): string =>
+        "fromId and toId are joined by 2 links, and TheBrain posts nothing between two " +
+        "thoughts joined by more than one, so none of them can be changed. Nothing was " +
+        `written.\n${lines.join("\n")}\nRemove all but one with brain_unlink, naming each by ` +
+        "its linkId; brain_link then finds the one left, and replace changes it.";
+      for (const [links, lines] of [
+        // The same way: the lookup has neither, and a post would be the 400.
+        [
+          [link(LINK, THOUGHT, PARENT, 3, { name: "x" }), link(LINK_2, THOUGHT, PARENT, 1)],
+          [`- ${LINK}: jump, labelled "x"`, `- ${LINK_2}: parent-child with fromId above`],
+        ],
+        // Each way: the lookup has one, and the graph the other.
+        [
+          [link(LINK, THOUGHT, PARENT, 3), link(LINK_2, PARENT, THOUGHT, 1)],
+          [`- ${LINK}: jump`, `- ${LINK_2}: parent-child with toId above`],
+        ],
+      ] as const) {
+        const { call, calls } = await connect(brain([...links]));
+        const result = await call("brain_link", { ...ends, relation: "child", replace: true });
+        expect(result).toEqual({ isError: true, text: several([...lines]) });
+        expect(writes(calls)).toEqual([]);
+      }
+    });
+
+    it("with no link between the two, links them as brain_link does without it", async () => {
+      // A graph that still lists one link the lookup has not is behind a
+      // deletion: there is no link to replace.
+      for (const listed of [[], [link(LINK_2, THOUGHT, PARENT, 3)]]) {
+        const { call, sent } = await connect(brain(listed, { lookup: null }));
+        const result = await call("brain_link", { ...ends, name: "about", replace: true });
+        expect(result).toEqual({ isError: false, text: `## Done\nlink created — ${LINK}` });
+        expect(sent("POST")).toEqual([
+          { thoughtIdA: THOUGHT, thoughtIdB: PARENT, relation: 3, name: "about" },
+        ]);
+      }
+    });
+
+    it("says so when TheBrain answers with another link than the one it read", async () => {
+      const { call } = await connect(brain([link(LINK, THOUGHT, PARENT, 3)], { posted: LINK_2 }));
+      const result = await call("brain_link", { ...ends, relation: "parent", replace: true });
+      expect(result).toEqual({
+        isError: false,
+        text:
+          `## Link changed\nidentifier ${LINK_2}: from jump to parent-child with toId above. ` +
+          `TheBrain answered with ${LINK_2}, not ${LINK}: the link read a moment ago was gone, ` +
+          "and this one was made in its place",
+      });
+    });
+
+    it("says that a link is made the one asked for with replace", async () => {
+      const { client } = await connect([]);
+      const { tools } = await client.listTools();
+      const props = tools.find((t) => t.name === "brain_link")!.inputSchema.properties as Record<
+        string,
+        { type?: string; description?: string }
+      >;
+      expect(props["replace"]?.type).toBe("boolean");
+      expect(props["replace"]?.description).toMatch(/identifier.*label.*Never a tag or a type/s);
+    });
+  });
+
+  describe("brain_link and two links that join one pair", () => {
+    it("explains the 400 a post between them gets, and points at brain_unlink", async () => {
+      // The bare "Link could not be created. (POST …)" used to be all of it,
+      // and no tool could do anything about the pair.
+      const refused = said(400, "Link could not be created.");
+      const links = [link(LINK, THOUGHT, PARENT, 3), link(LINK_2, THOUGHT, PARENT, 1)];
+      const { call } = await connect(brain(links, { first: [["POST /api/links/", refused]] }));
+      expect(await call("brain_link", { ...ends, relation: "child" })).toEqual({
+        isError: true,
+        text:
+          `Link could not be created. TheBrain named no cause (POST /api/links/${BRAIN}). It ` +
+          "answers so when the two thoughts are joined by more than one link already, as two " +
+          "links posted at once can leave them: nothing more can be posted between them, of " +
+          "any kind or either way. Nothing was written. brain_unlink, given the same two " +
+          "thoughts, lists the links that join them and removes the one its linkId names; or " +
+          "one is removed in TheBrain itself.",
+      });
+    });
+  });
+
+  describe("brain_unlink", () => {
+    const allowed = () => ({ config: { allowDestructive: true } });
+    const ASK =
+      "This client cannot display a confirmation form. Ask the user yourself and, once they " +
+      "agree, repeat the call with confirm=true. Never do this without explicit human consent.";
+    const question = (lines: string[]): string =>
+      `Remove the link between "RAG" and "Constraints"?\n\n${lines.join("\n")}\n\n` +
+      "This cannot be undone.";
+    const jump = link(LINK, THOUGHT, PARENT, 3, { name: "contradicts" });
+    const REMOVED =
+      `## Removed\nthe link between "RAG" and "Constraints": jump, labelled "contradicts" — ${LINK}`;
+
+    it("with deletion not enabled, refuses before any request, as brain_delete_thought does", async () => {
+      for (const config of [{}, { allowDestructive: false }]) {
+        const { call, calls } = await connect(brain([jump]), () => ({ config }));
+        for (const confirm of [undefined, true]) {
+          const result = await call("brain_unlink", { ...ends, ...(confirm ? { confirm } : {}) });
+          expect(result).toEqual({
+            isError: true,
+            text:
+              "deletion is disabled. To allow it, start the server with " +
+              "THEBRAIN_ALLOW_DESTRUCTIVE=1 — that is a deliberate choice by the user, not " +
+              "something to work around.",
+          });
+          const deleted = await call("brain_delete_thought", { brainId: BRAIN, thoughtId: THOUGHT });
+          expect(result.text).toBe(deleted.text);
+        }
+        expect(calls).toEqual([]);
+      }
+    });
+
+    it("refuses identifiers it cannot use before any request", async () => {
+      for (const [args, text] of [
+        [
+          { fromId: ZEROS, toId: PARENT },
+          `fromId is the all-zero UUID (${ZEROS}), which names nothing.`,
+        ],
+        [{ fromId: THOUGHT, toId: "nope" }, 'toId must be a UUID, got "nope".'],
+        [{ ...ends, linkId: "nope" }, 'linkId must be a UUID, got "nope".'],
+        [
+          { fromId: THOUGHT, toId: THOUGHT.toUpperCase() },
+          `fromId and toId are both ${THOUGHT}, and no link joins a thought to itself. ` +
+            "Nothing was removed.",
+        ],
+      ] as const) {
+        const { call, calls } = await connect(brain([jump]), allowed);
+        const result = await call("brain_unlink", { brainId: BRAIN, ...args, confirm: true });
+        expect(result.isError, text).toBe(true);
+        expect(result.text).toContain(text);
+        expect(calls).toEqual([]);
+      }
+    });
+
+    it("puts the question first, and removes the link once a person has agreed", async () => {
+      const { call, calls } = await connect(brain([jump, ...PARENTED]), allowed);
+      const asked = await call("brain_unlink", ends);
+      expect(asked).toEqual({
+        isError: true,
+        text: `${question([`- jump, labelled "contradicts" — ${LINK}`])}\n\n${ASK}`,
+      });
+      expect(writes(calls)).toEqual([]);
+
+      const result = await call("brain_unlink", { ...ends, confirm: true });
+      expect(result).toEqual({ isError: false, text: REMOVED });
+      expect(requests(calls).slice(4)).toEqual([
+        `GET /api/thoughts/${BRAIN}/${THOUGHT}/graph`,
+        `GET /api/thoughts/${BRAIN}/${PARENT}/graph`,
+        `GET /api/links/${BRAIN}/${THOUGHT}/${PARENT}`,
+        `GET /api/links/${BRAIN}/${PARENT}/${THOUGHT}`,
+        `DELETE /api/links/${BRAIN}/${LINK}`,
+      ]);
+    });
+
+    it("takes the one link both lookups give for the pair's only one, whatever a graph still lists", async () => {
+      // Straight after one of two links is removed a graph lists both, and
+      // the second removal was asked to choose between them.
+      const gone = link(LINK_2, THOUGHT, PARENT, 1);
+      const { call, calls } = await connect(brain([jump, gone, ...PARENTED], { lookup: jump }), allowed);
+      expect(await call("brain_unlink", { ...ends, confirm: true })).toEqual({
+        isError: false,
+        text: REMOVED,
+      });
+      expect(writes(calls)).toEqual([`DELETE /api/links/${BRAIN}/${LINK}`]);
+
+      // Nor is the one a graph still lists a link that keeps a thought linked.
+      const alone = await connect(brain([jump, gone], { lookup: jump }), allowed);
+      expect((await alone.call("brain_unlink", { ...ends, confirm: true })).text).toBe(
+        `${REMOVED}\n\n## Warning\n` +
+          ["RAG", "Constraints"]
+            .map(
+              (name) =>
+                `- "${name}" has no parent, child or jump now: TheBrain shows it next to no ` +
+                "thought, and a search finds it. brain_link links it again.",
+            )
+            .join("\n"),
+      );
+    });
+
+    it("asks through the client's form where it has one, and a refusal or a failure there removes nothing", async () => {
+      const shown: string[] = [];
+      const through = async (answer: () => ElicitResult) => {
+        const { call, calls } = await connect(brain([jump, ...PARENTED]), allowed, (message) => {
+          shown.push(message);
+          return answer();
+        });
+        return { result: await call("brain_unlink", ends), writes: writes(calls) };
+      };
+      const summary = question([`- jump, labelled "contradicts" — ${LINK}`]);
+
+      const agreed = await through(() => ({ action: "accept", content: { confirm: true } }));
+      expect(agreed.result).toEqual({ isError: false, text: REMOVED });
+      expect(agreed.writes).toEqual([`DELETE /api/links/${BRAIN}/${LINK}`]);
+      expect(shown).toEqual([summary]);
+
+      for (const answer of [
+        (): ElicitResult => ({ action: "decline" }),
+        (): ElicitResult => ({ action: "cancel" }),
+        (): ElicitResult => ({ action: "accept", content: { confirm: false } }),
+      ]) {
+        const refused = await through(answer);
+        expect(refused.result).toEqual({
+          isError: true,
+          text: `Deletion cancelled by the user.\n\n${summary}`,
+        });
+        expect(refused.writes).toEqual([]);
+      }
+
+      // A form that failed is no consent: the call goes back for one.
+      const failed = await through(() => {
+        throw new Error("client dropped");
+      });
+      expect(failed.result).toEqual({ isError: true, text: `${summary}\n\n${ASK}` });
+      expect(failed.writes).toEqual([]);
+    });
+
+    it("says which thought it leaves with no parent, child or jump, before and after", async () => {
+      const { call } = await connect(brain([jump, link(LINK_3, ELSEWHERE, PARENT, 1)]), allowed);
+      expect((await call("brain_unlink", ends)).text).toBe(
+        `${question([
+          `- jump, labelled "contradicts" — ${LINK}`,
+          '- "RAG" would be left with no parent, child or jump',
+        ])}\n\n${ASK}`,
+      );
+      expect((await call("brain_unlink", { ...ends, confirm: true })).text).toBe(
+        `${REMOVED}\n\n## Warning\n- "RAG" has no parent, child or jump now: TheBrain shows ` +
+          "it next to no thought, and a search finds it. brain_link links it again.",
+      );
+
+      // A type or a tag has none as a rule, and is no thought left alone.
+      const typed = await connect(brain([link(LINK, THOUGHT, TYPE, 3), PARENTED[0]!]), allowed);
+      expect(
+        (await typed.call("brain_unlink", { brainId: BRAIN, fromId: THOUGHT, toId: TYPE })).text,
+      ).toBe(
+        'Remove the link between "RAG" and "Pattern" [type]?\n\n' +
+          `- jump — ${LINK}\n\nThis cannot be undone.\n\n${ASK}`,
+      );
+    });
+
+    it("lists the links of a pair joined by more than one, and removes only the one named", async () => {
+      const links = [
+        link(LINK, THOUGHT, PARENT, 3, { name: "contradicts" }),
+        link(LINK_2, THOUGHT, PARENT, 1),
+      ];
+      const { call, calls } = await connect(brain([...links, ...PARENTED]), allowed);
+      const listed = await call("brain_unlink", { ...ends, confirm: true });
+      expect(listed).toEqual({
+        isError: true,
+        text:
+          "fromId and toId are joined by 2 links. Nothing was removed: send the call again " +
+          `with the linkId of the one to remove.\n- ${LINK}: jump, labelled "contradicts"\n` +
+          `- ${LINK_2}: parent-child with fromId above`,
+      });
+      expect(writes(calls)).toEqual([]);
+
+      expect((await call("brain_unlink", { ...ends, linkId: LINK })).text).toBe(
+        `${question([
+          `- jump, labelled "contradicts" — ${LINK}`,
+          `- stays: parent-child with "RAG" above — ${LINK_2}`,
+        ])}\n\n${ASK}`,
+      );
+      const result = await call("brain_unlink", { ...ends, linkId: LINK.toUpperCase(), confirm: true });
+      expect(result).toEqual({
+        isError: false,
+        text:
+          `${REMOVED}\n\n## Left\n- ${LINK_2}: parent-child with "RAG" above\nIt is the one ` +
+          "link the two have now: brain_link finds it, and with replace changes it.",
+      });
+      expect(writes(calls)).toEqual([`DELETE /api/links/${BRAIN}/${LINK}`]);
+    });
+
+    it("says that more than one is left, of three", async () => {
+      const links = [
+        link(LINK, THOUGHT, PARENT, 3),
+        link(LINK_2, THOUGHT, PARENT, 3),
+        link(LINK_3, THOUGHT, PARENT, 3),
+      ];
+      const { call } = await connect(brain(links), allowed);
+      const result = await call("brain_unlink", { ...ends, linkId: LINK_2, confirm: true });
+      expect(result.text).toBe(
+        `## Removed\nthe link between "RAG" and "Constraints": jump — ${LINK_2}\n\n## Left\n` +
+          `- ${LINK}: jump\n- ${LINK_3}: jump\nStill more than one: TheBrain posts nothing ` +
+          "between the two while it is so.",
+      );
+    });
+
+    it("refuses a linkId that is not one of the pair's, and lists theirs", async () => {
+      const { call, calls } = await connect(brain([jump]), allowed);
+      const result = await call("brain_unlink", { ...ends, linkId: LINK_2, confirm: true });
+      expect(result).toEqual({
+        isError: true,
+        text:
+          `No link between fromId and toId has the identifier ${LINK_2}. Nothing was removed. ` +
+          `The links that join them:\n- ${LINK}: jump, labelled "contradicts"`,
+      });
+      expect(writes(calls)).toEqual([]);
+    });
+
+    it("never removes a tag's attachment or a type's link, and says which tool does", async () => {
+      const tagOn = link(LINK, TAG, THOUGHT, 1, { meaning: 5 });
+      const typeOf = link(LINK, TYPE, THOUGHT, 1, { meaning: 2 });
+      for (const [args, links, text] of [
+        [
+          { fromId: THOUGHT, toId: TAG },
+          [tagOn],
+          "toId is a tag on fromId: a tag's attachment, which brain_unlink does not remove. " +
+            "Nothing was removed. Take the tag off with brain_tag.",
+        ],
+        [
+          { fromId: TYPE, toId: THOUGHT },
+          [typeOf],
+          "fromId is the type of toId: a type's link, which brain_unlink does not remove. " +
+            "Nothing was removed. Take the type away with typeId null in brain_update_thought.",
+        ],
+        [
+          { fromId: THOUGHT, toId: PARENT },
+          [link(LINK, THOUGHT, PARENT, 1, { meaning: 6 })],
+          "a link of another kind (meaning 6), which brain_unlink does not remove. Nothing " +
+            "was removed.",
+        ],
+        // A tag attached twice, which brain_tag cannot take off either.
+        [
+          { fromId: THOUGHT, toId: TAG },
+          [tagOn, { ...tagOn, id: LINK_2 }],
+          "toId is a tag on fromId: a tag's attachment, which brain_unlink does not remove. " +
+            "Nothing was removed. Take the tag off with brain_tag. The tag is attached 2 " +
+            "times, and brain_tag finds none of them while it is: all but one are removed in " +
+            "TheBrain itself.",
+        ],
+        // Named by its identifier, beside an ordinary link.
+        [
+          { fromId: THOUGHT, toId: TAG, linkId: LINK },
+          [tagOn, link(LINK_2, THOUGHT, TAG, 3)],
+          "toId is a tag on fromId: a tag's attachment, which brain_unlink does not remove. " +
+            "Nothing was removed. Take the tag off with brain_tag.",
+        ],
+      ] as const) {
+        const { call, calls } = await connect(brain([...links]), allowed);
+        const result = await call("brain_unlink", { brainId: BRAIN, ...args, confirm: true });
+        expect(result, text).toEqual({ isError: true, text });
+        expect(writes(calls)).toEqual([]);
+      }
+    });
+
+    it("removes nothing where no link joins the two", async () => {
+      const { call, calls } = await connect(brain([], { lookup: null }), allowed);
+      expect(await call("brain_unlink", { ...ends, confirm: true })).toEqual({
+        isError: false,
+        text: "## Nothing removed\nno link joins fromId and toId",
+      });
+      expect(writes(calls)).toEqual([]);
+    });
+
+    it("does not tell no link from two when the lookup has none and a graph lists one", async () => {
+      // A graph is behind a deletion, and behind the creation of a second
+      // link as well: once, with the app busy, both lookups had none, a
+      // graph listed one, and a post between the two was the bare 400.
+      for (const linkId of [undefined, LINK]) {
+        const { call, calls } = await connect(
+          brain([link(LINK, THOUGHT, PARENT, 3)], { lookup: null }),
+          allowed,
+        );
+        const named = linkId === undefined ? {} : { linkId };
+        expect(await call("brain_unlink", { ...ends, ...named, confirm: true })).toEqual({
+          isError: true,
+          text:
+            "TheBrain's lookup has no link between fromId and toId from either end, and " +
+            `their graphs list one, ${LINK}: it was removed a moment ago, or the two are ` +
+            "joined by more than one link, which the lookup cannot see and a graph does not " +
+            "list all of yet. Nothing was removed. Send the call again in a moment.",
+        });
+        expect(writes(calls)).toEqual([]);
+      }
+    });
+
+    it("takes the lookup's link that no graph lists yet", async () => {
+      const { call, calls } = await connect(brain(PARENTED, { lookup: jump }), allowed);
+      expect(await call("brain_unlink", { ...ends, confirm: true })).toEqual({
+        isError: false,
+        text: REMOVED,
+      });
+      expect(writes(calls)).toEqual([`DELETE /api/links/${BRAIN}/${LINK}`]);
+    });
+
+    it("a read that fails asks nothing and removes nothing", async () => {
+      // A thought nobody has: its graph is the catch-all 403.
+      const nobody = "99999999-0000-4000-8000-000000000009";
+      const { call, calls } = await connect(brain([jump]), allowed);
+      const result = await call("brain_unlink", { brainId: BRAIN, fromId: THOUGHT, toId: nobody, confirm: true });
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/^TheBrain answered 403 and named no cause \(GET .*\/graph\)/);
+      expect(writes(calls)).toEqual([]);
+    });
+
+    it("a deletion that got no answer, or a link gone by then, is told as that", async () => {
+      const lost = await connect(brain([jump, ...PARENTED], { first: [["DELETE /api/links/", noAnswer]] }), allowed);
+      expect(await lost.call("brain_unlink", { ...ends, confirm: true })).toEqual({
+        isError: true,
+        text:
+          "request exceeded 30000 ms. Check that the TheBrain desktop app is running and its " +
+          "local API is enabled.\n\n## Next\nNo answer came to the deletion, so TheBrain may " +
+          "have removed the link all the same. Sent again as it was, this call removes that " +
+          "link if it is there still, and nothing else.",
+      });
+
+      // Measured: a DELETE of a link that is gone is a 400 with no words.
+      const gone = said(400, { title: "Bad Request", status: 400 });
+      const late = await connect(brain([jump, ...PARENTED], { first: [["DELETE /api/links/", gone]] }), allowed);
+      expect(await late.call("brain_unlink", { ...ends, confirm: true })).toEqual({
+        isError: true,
+        text:
+          `TheBrain answered 400 to the deletion of ${LINK}, its answer for a link that is ` +
+          "gone: it was removed a moment ago, after it was read. This call removed nothing. " +
+          "Sent again as it was, it says what joins the two now.",
+      });
+    });
+
+    it("is described as a deletion a person agrees to, and names the tools for the rest", async () => {
+      const { client } = await connect([]);
+      const { tools } = await client.listTools();
+      const tool = tools.find((t) => t.name === "brain_unlink")!;
+      expect(tool.description).toMatch(/no undo.*human confirmation.*brain_link with replace.*brain_tag.*brain_update_thought/s);
+      expect(tool.inputSchema.required).toEqual(["brainId", "fromId", "toId"]);
+      const remover = tools.find((t) => t.name === "brain_delete_thought")!;
+      const confirm = (t: typeof tool) =>
+        (t.inputSchema.properties as Record<string, { description?: string }>)["confirm"];
+      expect(confirm(tool)).toEqual(confirm(remover));
+    });
   });
 });
 

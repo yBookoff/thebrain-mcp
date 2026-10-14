@@ -7,6 +7,7 @@ import {
   codePoints,
   compareLogTime,
   linkNameAsStored,
+  linksOfPair,
   logEntryKey,
   logTime,
   nameRefusal,
@@ -2517,6 +2518,75 @@ describe("a link's name as TheBrain stores it", () => {
     expect(linkNameAsStored("😀".repeat(600))).toBe("😀".repeat(512));
     // A cut inside an emoji leaves U+FFFD for the half that was kept.
     expect(linkNameAsStored(`${x(1023)}😀`)).toBe(`${x(1023)}\ufffd`);
+  });
+});
+
+describe("every link between two thoughts", () => {
+  const A = "aaaa0000-0000-4000-8000-00000000000a";
+  const B = "bbbb0000-0000-4000-8000-00000000000b";
+  const C = "cccc0000-0000-4000-8000-00000000000c";
+  const at = (id: string, a: string, b: string, relation = 3, meaning = 1): LinkDto =>
+    ({ id, thoughtIdA: a, thoughtIdB: b, relation, meaning, name: null }) as LinkDto;
+  const L1 = "11111111-0000-4000-8000-000000000001";
+  const L2 = "22222222-0000-4000-8000-000000000002";
+  const L3 = "33333333-0000-4000-8000-000000000003";
+  const ids = (links: LinkDto[]): string[] => links.map((l) => l.id);
+
+  it("is the lookup's one link, listed by a graph or not yet", () => {
+    const one = at(L1, A, B);
+    expect(ids(linksOfPair(A, B, [one], one))).toEqual([L1]);
+    // A graph is a copy, behind a link made a moment ago; the lookup is not.
+    expect(ids(linksOfPair(A, B, [], one))).toEqual([L1]);
+    // And the lookup's copy is the one given, where a graph lists the same.
+    const renamed = { ...one, name: "now" };
+    expect(linksOfPair(A, B, [one, one], renamed)).toEqual([renamed]);
+  });
+
+  it("is two where they go each way: the lookup from each end has one, a graph both", () => {
+    const listed = [at(L1, A, B), at(L2, B, A, 1)];
+    expect(ids(linksOfPair(A, B, listed, listed[0]!))).toEqual([L1, L2]);
+    expect(ids(linksOfPair(B, A, listed, listed[1]!))).toEqual([L2, L1]);
+    // Each lookup's link is in, a graph that lists neither not withstanding.
+    expect(ids(linksOfPair(A, B, [], listed[0]!, listed[1]!))).toEqual([L1, L2]);
+  });
+
+  it("is the one link both lookups give, whatever a graph lists beside it", () => {
+    // Straight after one of two is deleted a graph lists both (L43).
+    const left = at(L1, A, B);
+    const listed = [left, at(L2, A, B, 1)];
+    expect(linksOfPair(A, B, listed, left, { ...left, id: L1.toUpperCase() })).toEqual([left]);
+    // One end's lookup alone says nothing of the rest.
+    expect(ids(linksOfPair(A, B, listed, left))).toEqual([L1, L2]);
+    expect(ids(linksOfPair(A, B, listed, left, null))).toEqual([L1, L2]);
+    // Nor does a 404 from one end beside a link from the other.
+    expect(ids(linksOfPair(A, B, [...listed, at(L3, B, A)], null, at(L3, B, A)))).toEqual([
+      L3,
+      L1,
+      L2,
+    ]);
+  });
+
+  it("is what a graph lists beside the lookup's 404, when that is two or more", () => {
+    // Two or three the same way: the lookup has none of them (L35, L43).
+    const two = [at(L1, A, B), at(L2, A, B, 1)];
+    expect(ids(linksOfPair(A, B, two, null))).toEqual([L1, L2]);
+    expect(ids(linksOfPair(A, B, [...two, at(L3, A, B)], null))).toEqual([L1, L2, L3]);
+    // Both graphs read: each link once.
+    expect(ids(linksOfPair(A, B, [...two, ...two], null))).toEqual([L1, L2]);
+  });
+
+  it("is none for a 404 beside one listed link, which a graph behind a deletion lists", () => {
+    expect(linksOfPair(A, B, [at(L1, A, B)], null)).toEqual([]);
+    expect(linksOfPair(A, B, [], null)).toEqual([]);
+  });
+
+  it("leaves out the links of other pairs, and takes an identifier in any letter case", () => {
+    const listed = [at(L1, A, C), at(L2, C, B), at(L3, B.toUpperCase(), A, 1, 5)];
+    expect(ids(linksOfPair(A, B, listed, null))).toEqual([]);
+    const lookup = { ...at(L3, B, A, 1, 5), id: L3.toUpperCase() };
+    expect(ids(linksOfPair(A.toUpperCase(), B, listed, lookup))).toEqual([L3.toUpperCase()]);
+    // A tag's attachment and a type's link are links of the pair too.
+    expect(ids(linksOfPair(A, B, [...listed, at(L1, A, B, 1, 2)], null))).toEqual([L3, L1]);
   });
 });
 

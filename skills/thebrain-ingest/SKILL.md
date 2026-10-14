@@ -249,7 +249,16 @@ under "Links that already existed".
 **Two thoughts share one link, and a link has one label.** Give a pair one link
 in a plan. Of two between the same two thoughts only the first is sent; the
 other is listed under "Links not added", its label unwritten. Pick the relation
-before you send: no tool changes a link that is there.
+before you send: a plan never changes a link that is there. When a result says
+a link "already existed as" another kind and the person wants the one you
+asked for, `brain_link` with `replace: true` makes it so, keeping its label.
+That turns a parent link into a jump or the other way, so do it only where the
+hierarchy should change; the same call with the old relation puts it back.
+
+**Two thoughts joined by more than one link** take no new link: `brain_link`
+answers `Link could not be created.` and says so. `brain_unlink` with the two
+thoughts lists their links by identifier; ask the person which to remove, and
+remove it with its `linkId`. That is a deletion, and needs their consent.
 
 A label given for a link that has another one replaces it, from `brain_link`
 and from a plan alike, and the result quotes both: `label updated: it was "…"

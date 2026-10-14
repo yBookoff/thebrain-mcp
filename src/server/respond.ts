@@ -142,6 +142,22 @@ export function describeError(error: unknown, alone = true): string {
         if (LINK_END_MISSING.test(error.message.trim())) {
           return `${sentence(error.message)} ${GONE} ${TAKE_IDENTIFIERS}`;
         }
+        // The other 400 of a link, which names nothing. It is the answer for
+        // two thoughts joined by more than one link already, which two posts
+        // sent at once leave: whatever is posted, either way, and for a tag
+        // attached twice too. An end deleted a moment ago is the sentence
+        // above, with its identifier (L43). It was passed on as it came, and
+        // no tool could do anything about it.
+        if (/^link could not be created\.?$/i.test(error.message.trim())) {
+          return (
+            `${sentence(error.message)} TheBrain named no cause${requestOf(error)}. It answers ` +
+            "so when the two thoughts are joined by more than one link already, as two links " +
+            "posted at once can leave them: nothing more can be posted between them, of any " +
+            `kind or either way.${nothing} brain_unlink, given the same two thoughts, lists ` +
+            "the links that join them and removes the one its linkId names; or one is removed " +
+            "in TheBrain itself."
+          );
+        }
         return error.toToolMessage();
       default:
         return error.toToolMessage();

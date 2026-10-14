@@ -33,7 +33,7 @@ That requires two things the raw API does not provide:
   decomposition must land in one call — atomic in intent, validated before the
   first write, and idempotent on re-run.
 
-So: 18 tools instead of 48 endpoints, plus a local vector index, plus a batch
+So: 19 tools instead of 48 endpoints, plus a local vector index, plus a batch
 ingest operation.
 
 ---
@@ -179,9 +179,9 @@ So the agent thinks, and the server's job is to make that thinking *informed*
 
 ## 4. Tool design
 
-Eighteen tools. Measured on the built server: the descriptions total about 1160
-tokens, and the full `tools/list` payload including schemas about 4750. That is
-4,648 and 19,028 characters, with a token at four: the tools of `tools/list` as
+Nineteen tools. Measured on the built server: the descriptions total about 1240
+tokens, and the full `tools/list` payload including schemas about 5080. That is
+4,958 and 20,318 characters, with a token at four: the tools of `tools/list` as
 JSON, asked for in process, which is the figure the sections below count their
 own cost against.
 
@@ -630,6 +630,135 @@ Nothing about the index changed.
 whether the rule for names holds on Windows, where the comparison of text is
 another library's. A type created as the parent of a thought that has a
 type already.
+
+### A link changed, and one removed
+
+No tool could change what a link is or take one away. `brain_link` said what
+joined two thoughts when it was not the link asked for, "the requested jump
+was not added", and the model had nowhere to go from there. And a pair that
+two posts sent at once had joined twice could not be linked, labelled or
+mended by any tool: every post between the two was TheBrain's bare
+`Link could not be created.`, which `brain_link` passed on as it came.
+`brain_ingest` made such pairs before it sent one link a pair (*What a
+second run writes*), so users' brains may hold some. `brain_link` takes
+`replace` now, and `brain_unlink` removes a link.
+
+**What the API does, measured on 15.0.640** (`docs/api-map.md`, row L43).
+Posted over with another relation, the one link a pair has is rewritten to
+it under its identifier, its label, colour, thickness and direction kept,
+144 times of 144 across every state a link can be in between an ordinary
+thought and an ordinary thought, a type or a tag below it; the lookup of the
+pair has the new kind at its first read, and the log a `402` and nothing
+that names the relation. A jump keeps at `thoughtIdA` the end it was first
+posted from. `DELETE` answers 200 with no body and logs a `102` with both
+ends; the lookup has the link no more at its first read, and where the pair
+had another has that one, from either end; the link's own read and a graph
+read before are behind, a graph by 26–211 ms. Deleted again, a link is a 400
+`Bad Request`. Two posts at once for a pair were two links 8 times in 20
+here, three at once three links 8 in 10, and with more than one link every
+post between the two is the bare 400 and makes nothing, of any kind, from
+either end, a tag attached twice included. No other cause of it was found:
+an end deleted a moment before is the 400 that names it.
+
+**Changing a link is a post over it, and is no deletion.** With `replace`,
+`brain_link` posts the relation asked for over an ordinary link of another
+kind that joins the two, through `links.create()`, which reads an upper end
+that is a type or a tag first and refuses it, as for any new link (§7, items
+18 and 21). The result says what the link was and what it is: "## Link
+changed", "identifier {id}: from jump to parent-child with toId above", and
+"and keeps its label "…"", or the label replaced and quoted as a label
+always is (*What a second run writes*). Over the link asked for it answers as
+without `replace`, to the character, and with no link it links the two. It
+takes no consent and no gate. Nothing is lost: the identifier, the label,
+the colour, the thickness and the direction stay, and the same call with
+the old relation puts the link back; only the end a jump was first posted
+from may come back the other way round, which nothing shown here depends
+on. A child it leaves with no parent is still linked to the other end.
+Invariant 3 guards what a result cannot give back.
+
+**Never a tag's attachment or a type's link.** Meanings 2, 3, 5 and 7, by
+`isTagLink()` and `isTypeLink()`: posted over, the tag or the type would
+go, which is what `brain_tag` and `typeId: null` are for and say so. Both
+tools refuse them with nothing written, and point at those.
+
+**Not over a pair joined by more than one link.** The post would be the
+400. The one link a pair has is what the lookup gives from either end; of
+two each way it gives each from its own end, and of two the same way a 404
+from both. So after its lookup `brain_link` asks the other end too: the same
+link is the pair's only one, whatever a graph lists, and it is posted over.
+Two different links, or a 404 from the other end, read `fromId`'s graph, and
+the pair's links are listed by identifier with what each is, and the call
+refused: "Remove all but one with brain_unlink, naming each by its linkId".
+A graph alone would not do: straight after one of two is deleted, both
+graphs list both, 12 pairs of 12.
+
+**Removing one is a deletion, and asks as deleting a thought does** (§6).
+A link's label goes with it, a link made again is another link with another
+identifier, and a thought it leaves with no link is shown next to nothing in
+TheBrain, found by a search alone. So `brain_unlink` is off unless
+`THEBRAIN_ALLOW_DESTRUCTIVE=1`, answers then with `brain_delete_thought`'s
+sentence before any request, and puts its question through
+`confirmDestructive()`: a form where the client has one, a call with
+`confirm` where it has not, and a form that fails is a refusal. The question
+names both thoughts, the link and its label, the links of the pair that
+stay, and a thought it leaves with no parent, child or jump; the result says
+the same, what is left of the pair, and a warning for that thought. A
+deletion that got no answer is said to may have landed; a link gone between
+the read and the deletion is the 400, told as that.
+
+**Two thoughts joined more than once.** `brain_unlink` is named by the two
+ends, and `linkId` picks one of the pair's links; without it, a pair with
+more than one is listed by identifier and nothing is asked. Its links are
+`linksOfPair()`'s: both ends' graphs and the lookup from each end. The one
+link both lookups give is the only one, whatever a graph lists beside it;
+otherwise each link a lookup gives and each a graph lists; and with neither
+lookup, two or more listed, the pair the lookup cannot see. Neither lookup
+and one listed link tells nothing: a graph is behind a deletion, and behind
+the creation of a second link as well, which was seen once with the app
+busy. Then the call says so and removes nothing. Four reads before the
+question, then the one `DELETE`. The thought left alone is counted from the graphs with only the
+pair's real links, since a graph lists one removed a moment ago. The 400
+itself is explained by `describeError()`, in every tool that meets it: the
+two are joined by more than one link already, nothing more can be posted
+between them, and `brain_unlink` lists and removes them, or TheBrain itself.
+
+**Why an argument and a tool.** Five other ways were weighed.
+
+- *One tool for both, with a kind or "none".* One description where there
+  are two, some 300 characters less. But a reversible change and a gated
+  deletion would share a schema, `confirm` would mean nothing for one, and
+  the gate would shut half a tool. And the change belongs where the model
+  learns that the link is not the one it asked for: in `brain_link`.
+- *Delete and create.* What a change would be if the post did not keep the
+  link. It does, 144 times of 144, and the other way loses the identifier,
+  the label and the rest, leaves a moment with no link, and needs the gate.
+- *`PATCH /relation`.* 2 swaps the ends at every send and 4 does nothing
+  (§7, item 19).
+- *Mending a doubled pair inside `brain_link`.* It would delete with no one
+  asked, and the two links can differ in kind and in label: which to keep
+  is the person's.
+- *A link by its identifier alone.* No read tool prints one, and the two ends
+  are what lets a tool refuse a tag or a type, and say which thought is left
+  alone.
+
+**Cost.** `tools/list` went from 19,028 characters to 20,318: 1,040 for
+`brain_unlink` and 250 for `replace`, some 323 tokens every session pays.
+`brain_link` with `replace` reads one lookup more than without it, and a
+graph only for a pair joined more than once.
+
+**Left as they were.** `brain_link` without `replace` answers what it
+answered, but for the 400, and so do the other tools. A plan of
+`brain_ingest` adds and never changes or removes a link. `brain_tag`
+cannot take off a tag attached twice, since its lookup has neither;
+`brain_unlink` refuses a tag's attachment and says so.
+
+**Not guarded.** A graph read straight after one of three links that go the
+same way was deleted lists it beside the two left, and the lookup sees none
+of them: the list can name a link gone a moment ago, whose removal is then
+the 400 told as gone. A pair joined a moment ago, whose graphs list none of
+its links yet, is answered as no link. Two calls at once for one pair are
+two writes, as before. Not known: what TheBrain's own window shows of two links between one
+pair, and of the end a jump was first posted from.
 
 ### `brain_ingest` — the tool the product is built around
 
@@ -1637,7 +1766,9 @@ nor written over, and a walk names the thoughts it could not look around (§4,
 ## 6. Deletion: two independent safeties
 
 Deletion is implemented — refusing to implement it would just push users to do it
-by hand, less carefully. It is guarded twice:
+by hand, less carefully. Two tools delete: `brain_delete_thought` a thought,
+and `brain_unlink` a link (§4, *A link changed, and one removed*). Each is
+guarded twice:
 
 1. **Off unless `THEBRAIN_ALLOW_DESTRUCTIVE=1`.** A default install cannot delete
    anything, whatever the agent decides.
@@ -1663,6 +1794,12 @@ nothing attached. `brain_get_thought` leaves the note out of its
 Attachments section for the same reason: it stood there as "(unnamed) —
 Notes.md", beside the Note section. The question is not put at all when the
 note could not be read (§4, *A read that fails inside a tool*).
+
+**The question for a link names both its thoughts.** By name, marked when one
+is a type or a tag, with what the link is and its label, the links of the
+pair that stay, and a thought the removal leaves with no parent, child or
+jump. A change of a link's kind is not put to anyone: it keeps the link, and
+the same call puts the old kind back.
 
 ---
 
@@ -1958,6 +2095,18 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     of 170,000, and 15 ms with a `startTime` an hour back. Every reader
     here that can name a start does (row L42, and *Reading the whole log*
     below).
+30. **A link posted over with another relation keeps the rest of it, and two
+    thoughts joined by more than one link take no post at all.** The post
+    rewrites the one link a pair has under its identifier, with its label,
+    colour, thickness and direction (144 of 144), which is what `brain_link`
+    with `replace` sends. Between two thoughts joined more than once, as
+    posts sent at once leave them, every post is the 400 `"Link could not be
+    created."`, whatever it asks for; the lookup gives a 404 for two the
+    same way and, of two each way, the one it names first. A `DELETE` takes
+    a link away at once for the lookup, and a graph read before lists it
+    for 26–211 ms more. `brain_unlink` reads the pair from both graphs and from both ends
+    of the lookup, and the 400 is explained by `describeError()` (row L43,
+    §4).
 
 ### Write visibility
 
@@ -1972,6 +2121,9 @@ Measured against a live API by polling until the result appeared:
 | clear a label or a colour → `get(id)` | up to 0.2 s |
 | delete a type's link → `get(id)` without `typeId` | 20–210 ms |
 | set a type by `PATCH` → `get(id)` | ~0.1 s, 107 ms at the most |
+| delete a link → the lookup of the pair | instant: the other link of two, from either end, or none |
+| delete a link → `get(link)`, and a graph read before | 4–216 ms; 26–211 ms for a graph, which lists both of two links till then |
+| a link posted over with another relation → the lookup | instant |
 | `PATCH` a link → `get(link)` | 10–368 ms, 85–173 ms at the median of five spacings; there at the first read 12 times in 300. Behind bursts of writes to another brain up to 4.7 s, and once more than 5 s |
 | `create` with a type → `get(id)` shows it | instant |
 | the first `PATCH` after a burst of creates → `get(id)` | 0.6–0.8 s after 150, 2.6 s after 300 with a type |
