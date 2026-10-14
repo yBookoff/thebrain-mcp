@@ -96,15 +96,11 @@ and repeating even a write is safe. A timeout or a dropped connection may have
 reached TheBrain, so it is reported rather than retried elsewhere. An explicit
 `THEBRAIN_BASE_URL` is used alone, with no fallback.
 
-**The client keeps what it wrote.** `client.sinceLastWrite()` is when its last
-write came back, and `client.written` (`RecentWrites`) is what its answered
-creates, links and renames put into the graphs, kept for a minute. Both
-are for a reader of a graph, which is answered from a copy that is behind a
-write by no fixed time (§4, *What a second run finds*). It keeps the URLs
-this process attached as well, as sent, for the list of a thought's
-attachments, which is a copy of the same kind (§7, item 13). A new write whose
-mark on a graph has been measured records it there, in the resource that
-sends it; one that takes a thought or a link away drops what was kept of it.
+**The client knows when it last wrote.** `client.sinceLastWrite()` is when
+its last write came back, answered or not, and `afterCopyLag()` waits out
+what is left of `COPY_LAG_MS`, 0.5 s, since then. It is for a reader of a
+copy that is behind a write: a thought's graph (§4, *What a second run
+finds*) and its list of attachments (§7, item 13).
 
 ### `src/semantic/` — meaning-based retrieval
 
@@ -923,86 +919,38 @@ and its three to six reads on every one of their calls, where
 `brain_create_thought` takes 30 ms at the median in three requests and
 `brain_link` 29 ms in four, and a rename would have to read the thought's
 parents to learn which graphs to wait for. So the wait is where the read is.
-Before `ingest()` first looks next to an existing thought, it waits until 300
-ms have passed since this process last had a write come back, answered or
-not: `TheBrainClient.sinceLastWrite()` keeps that one moment. It is a wait by
-the clock, because nothing in a graph tells a copy that is behind from one
-that is not, and 300 ms is half as long again as the longest lag measured. It
-costs no request, and no time unless a write came back less than 300 ms
-before, which a model's own turn never is: only calls sent in one turn meet
-it. After it, 0 of 360 were made twice, and the plan after an unanswered
-create found the thought 6 times of 6, in 310–315 ms. It knows this process's
-writes alone. A thought made in that moment in the app, or by another server,
-is still missed.
 
-**The clock is not enough, so the graph is held to what this process wrote.**
-The 300 ms were set against a longest lag of 205 ms, and that was the longest
-of one evening. The contract test behind the wait, eight tries a run, went
-red in one run of ten on 2026-10-12 and in none of 160 the day after, on the
-same code. Measured that day after, on two brains: 1,800 creates next to a
-thought whose graph had been read 0.3 s before, six runs of 300. A single
-read 150 ms after the answer lacked the new thought 29 times in 600, and one
-at 250 ms 4 times in 600. A reader that found the graph behind and went on
-reading every 10 ms first saw the thought more than 300 ms after its answer
-7 times in the 1,800, 364 ms at the latest. All seven came in the four runs
-in which the app took 30–66 ms at the median to answer a create, and none in
-the two in which it took 25 ms; nor did a single read at 300 ms lack the
-thought once in 2,560 while the app was that quick. So the wait stood one
-refresh of the copy clear of the lag on a good day, and the lag follows what
-the app is busy with, as a write's read-back does after a burst (§7). There
-is no bound to set a wait by.
+**Before `ingest()` first looks next to an existing thought, it waits until
+0.5 s have passed since this process last had a write come back**, answered
+or not (`afterCopyLag()`), and then takes the graph at its word. It is a wait
+by the clock, because nothing in a graph tells a copy that is behind from one
+that is not. It costs no request, and no time unless a write came back less
+than 0.5 s before, which a model's own turn never is: only calls sent in one
+turn meet it. The batch's own writes are not waited for: what it makes next
+to a thought it adds to what it read of that thought.
 
-Nothing in a graph says how old it is. But a process knows what it wrote. The
-client keeps, for a minute, what each answered write put into the graphs
-(`RecentWrites`, `client.written`): a thought created next to another, and a
-link between two, are each in the other's graph in the list the relation puts
-them in, and a renamed thought is listed under its new name. Those are the
-three writes that made a plan create a thought again. `ingest()` asks of
-every graph it looks in what of that the graph does not show, and while
-there is something it reads the graph again 25 ms later. A copy is behind by
-what it lacks, then, and not by the clock: with the clock taken out of the
-way and the graph read straight before the write, where the read straight
-after it lacked the new thought 197 times in 200, a plan found what a create,
-a link and a rename had left 192 times of 192, and without this made the
-thought again in each of 24 runs, at the first or second try (contract test).
-What such a miss is, with every request timed: the read 152–155 ms after the
-answer was a 200 that listed no children, as the one before the create had,
-and the copy had both thoughts 20–60 ms later, 3 times in 150.
+The wait was 300 ms, half as long again as the longest lag of one evening,
+205 ms; after it 0 of 360 were made twice, and the plan after an unanswered
+create found the thought 6 times of 6. The contract test behind it went red
+in one run of ten on 2026-10-12 and in none of 160 the day after. Measured
+that day after, 1,800 creates next to a thought whose graph had been read
+0.3 s before: a reader polling every 10 ms first saw the thought more than
+300 ms after its answer 7 times, 364 ms at the latest, all while the app was
+slow to answer. Half a second is past that by more than a refresh of the
+copy. Until BRMCP-75 the client also kept what each of its writes put into
+the graphs, and read a graph until it showed that; it was sized for lags of
+seconds under bursts of writes, which the server is not built for, and went.
+With the graph read straight before the write, where the read straight after
+it lacked the new thought 197 times in 200, and the plan sent the moment the
+write came back, a plan found what a create under each relation, a link and
+a rename had left, 8 of 8 (contract test). A second look before each create
+was weighed and left: it is the clock again, one step on, paid by most plans.
 
-It costs no request when the first read shows everything. After the wait by
-the clock that was every one of the 2,560 calls above; a call that does
-meet a copy still behind reads it again 25 ms apart, which for the seven
-latest above is one to three reads more. The wait by the clock stays, for
-the writes that leave nothing to look for: a create that got no answer,
-which has no identifier, a deletion, and a note (below).
-
-When six seconds of asking have not brought the graph up to date, it is
-still not taken at its word. The thought fails, what hangs on it is skipped,
-and its line says which thought the graph does not list and to send that
-part again in a few seconds: made then, it might be the second of its name,
-which only a person can remove (§6). The record can be the one that is wrong:
-a thought this process linked somewhere and a person then unlinked in the
-app will never be listed there. Nothing tells the two apart, so the plan
-fails there as well, until the record is dropped: after a minute, or at
-once when this process deletes the thought, changes its kind, or deletes a
-link.
-
-Three other ways were weighed.
-
-- *A longer wait.* Any number is that day's number, and it is paid in full
-  by every call that follows a write within it, the second of two plans sent
-  in one turn among them, whether the copy is behind or not.
-- *A second look before a create.* It is the clock again, one step on, and
-  the calls that pay are the plans that make something next to a thought
-  that was there, which is most plans.
-- *Have the other tools wait*, as weighed above: a rename has no graph to
-  wait for, and a create that got no answer has nothing to wait by.
-
-**Not guarded.** A create that got no answer is behind the clock's 300 ms
-and nothing more. A thought this process deleted can still be in a copy,
-and a plan that names it is told it existed: which graphs a deletion shows
-in, and when, was not measured. And a write made in the app or by another
-process is not known here at all.
+**Not guarded.** A copy further behind than 0.5 s is taken at its word, and
+the thought is made a second time. A thought this process deleted can still
+be in a copy, and a plan that names it is told it existed: which graphs a
+deletion shows in, and when, was not measured. And a write made in the app
+or by another process is not known here at all.
 
 **Two runs at the same moment are not guarded.** Two `brain_ingest` calls
 sent at once with a thought in common each made it, 6 times of 6: neither
@@ -1129,7 +1077,7 @@ test). Polled, the read straight after the write was stale 33 times in 52 and
 had the text within 102 ms; read once after a pause, it was still stale 2
 times in 20 at 150 ms and never from 200 ms on (0 of 60). A note that
 replaced another read back at once. `ingest()` reads a note only after the
-wait that stands ahead of its first look, 300 ms from this process's last
+wait that stands ahead of its first look, 0.5 s from this process's last
 write, so a note this process has just written is seen.
 
 **Not guarded.** A note written between this read and this write, a few
@@ -1433,26 +1381,17 @@ Nothing is deleted to tidy up after a failure. Deletion needs a human (§6).
 
 ### How long a batch waits, and for what
 
-**Six seconds, as a read-back.** The graph a plan looks in, and the graphs
-a batch waits on at its end, are answered from a copy that queues behind
+**Six seconds, as a read-back.** The graphs a batch waits on at its end are
+answered from a copy that queues behind
 the same writes as a read of the thought (§7, *Write visibility*): one was
 2 s behind a rename in a full contract run, and one lacked a type for 10 s
 under another client's bursts. A batch of 200 thoughts with notes, tags and
 links is some 600 writes, and a read was 5.3 s behind 600 creates. So
 `LISTED` is `READ_BACK`'s six seconds, where two were short of the batch's
-own writes and failed a thought with "send again". It costs what the copy
+own writes. It costs what the copy
 is behind and no more, and all six seconds only where a graph never shows
 the write. The pause between reads doubles each second, 25 ms to 400: 81
 reads in six seconds, as many as two at 25 ms.
-
-**A write is kept for a minute.** Past `WRITTEN_KEPT_MS` a graph is taken
-at its word, and one still behind makes the thought a second time. Ten
-seconds were short of the 1–30 s reads lagged beside bursts in another
-brain: a plan sent 20 s after the create, with the graph 30 s behind, made
-it twice (unit test). A minute is twice the 30 s, as for a write that did
-not read back. The cost is a write contradicted in the app: a thought this
-process linked somewhere and a person unlinked there fails a plan next to
-it, with "send again", for up to that minute.
 
 **Aliases accepted and not read back are said as that.** `ingest()` counted
 a list that did not read back as written, and the batch read as done. Now
@@ -1465,14 +1404,10 @@ end, beside the wait for the graphs (`aliasesReadBack()`): a wait each, six
 at a time, was 34 waits of six seconds for 200 thoughts.
 
 **The longest call.** By its waits, one `brain_ingest` call takes at most
-0.3 s by the clock before its first look; then up to six seconds for each
-level of the plan whose graphs are behind this process's writes, and no
-more than a minute for all of them, since those writes came before the
-call and are dropped a minute after; and six seconds at the end, for the
-graphs and the aliases together. That is 66 s and the requests' own time,
-for a plan that follows its process's writes into a copy a minute behind.
-One that follows none pays the last six seconds alone, and those only while
-TheBrain is behind. Before, the looks took 10 s at most and the end 2 s,
+0.5 s by the clock before its first look, and six seconds at the end, for
+the graphs and the aliases together: 6.5 s and the requests' own time. One
+that follows no write of its process pays the last six seconds alone, and
+those only while TheBrain is behind. Before, the looks took 10 s at most and the end 2 s,
 but the aliases waited six seconds each, six at a time: 204 s for 200
 thoughts whose lists did not read back.
 
@@ -1987,9 +1922,10 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     stored as it was given, so the lookup alone cannot deduplicate links.
     `attachUrl` also compares the thought's own attachments, host case aside.
     That list is a copy, and the other spelling attached straight after was
-    attached twice, 18 times in 20. So `attachUrl` also asks `by-location`,
-    which is live, for each spelling of the address this process attached
-    to the thought in the last minute (`client.written`): then 0 of 20.
+    attached twice, 18 times in 20. So `attachUrl` reads the list only once
+    0.5 s have passed since this process's last write (`afterCopyLag()`),
+    after asking `by-location` for the spelling given; the list was 214 ms
+    behind at the most, and the other spelling was then found 6 of 6.
     What the list has is asked for by `by-location` too before it counts:
     the list still had an attachment deleted 4 ms before, 6 times in 6.
     Another process, or the app, is still not seen while the list is behind.
@@ -2060,9 +1996,8 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     creates next to a thought read 0.3 s before, 7 were first seen in its
     graph more than 300 ms after their answer, 364 ms at the latest, all of
     them while the app was slow to answer. `ingest()` looks for a thought in
-    its parent's graph, so it waits for the graphs to list what it made; and
-    before it looks, for this process's last write to be 0.3 s old, and then
-    for the graph to show what this process wrote next to that thought (§4).
+    its parent's graph, so it waits for the graphs to list what it made, and
+    before it looks, for this process's last write to be 0.5 s old (§4).
 21. **A tag is no parent either, an identifier of zeros is no link, and two
     thoughts share one link.** Three ways the tools reported a link that was
     not there, or not the one asked for, each measured through the real
