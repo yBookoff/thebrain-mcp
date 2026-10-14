@@ -9883,6 +9883,58 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
       ]);
     });
 
+    it("a batch writes the aliases of the thoughts it finds with no wait each, and each reads back by its end", async (ctx) => {
+      await requireAliases(ctx);
+      // `ingest()` writes each list with no wait and waits for them all at
+      // once, beside the wait for the graphs: one wait each, six at a time,
+      // was up to 34 of six seconds for 200 thoughts. Each counts as written
+      // only once a read showed it, and the next edit builds on it.
+      const root = await make("alias-batch-root");
+      const names = ["one", "two", "three"].map((n) => `${PREFIX}alias-batch-${n}`);
+      const ids: string[] = [];
+      for (const [i, name] of names.entries()) {
+        const id = await api.thoughts.create(brainId, {
+          name,
+          sourceThoughtId: root,
+          aliases: [`${PREFIX}had-${i}`],
+        });
+        created.push(id);
+        ids.push(id);
+      }
+      await eventually(
+        () => api.thoughts.getGraph(brainId, root),
+        (g) => ids.every((id) => g.children.some((t) => t.id === id)),
+      );
+      // A thought made a moment ago can read without its aliases, and a list
+      // added to that would lose them: not what this is about.
+      for (const id of ids) await stored(id, (a) => a.length === 1);
+
+      const outcome = await ingest(api, brainId, {
+        thoughts: names.map((name, i) => ({
+          tempId: `t${i}`,
+          name,
+          parent: root,
+          aliases: [`${PREFIX}gained-${i}`],
+        })),
+      });
+      expect(outcome.reused.map((r) => r.thoughtId).sort()).toEqual([...ids].sort());
+      expect([outcome.aliasesWritten, outcome.aliasesNotReadBack, outcome.failures]).toEqual([
+        3,
+        [],
+        [],
+      ]);
+      // Read back by the time the batch returned, and built on by the next edit.
+      for (const [i, id] of ids.entries()) {
+        expect(aliasesOf(await api.thoughts.get(brainId, id)).sort()).toEqual(
+          [`${PREFIX}gained-${i}`, `${PREFIX}had-${i}`].sort(),
+        );
+      }
+      const next = await api.thoughts.changeAliases(brainId, ids[0]!, { add: [`${PREFIX}more`] });
+      expect([...next.aliases].sort()).toEqual(
+        [`${PREFIX}gained-0`, `${PREFIX}had-0`, `${PREFIX}more`].sort(),
+      );
+    }, 30_000);
+
     it("TheBrain's own search finds a thought by an alias", async (ctx) => {
       await requireAliases(ctx);
       // The tool descriptions and the skills say so, on the spec's word. The

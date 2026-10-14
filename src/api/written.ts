@@ -69,18 +69,22 @@ export type WrittenFact =
     };
 
 /**
- * How long a write is kept. The copy of a graph has to be this far behind for
- * a write to go unseen again: some twenty-five times the longest lag measured
- * for a graph, 364 ms, and about twice the 5.3 s that a write queued behind a
- * burst of 600 creates took to read back. A list of attachments was behind
- * by 214 ms at the most.
+ * How long a write is kept. Past it a reader takes a graph at its word, and
+ * a copy still behind the write then makes a thought a second time, which
+ * only a person can remove. A graph was 364 ms behind a create on a quiet
+ * app, a read 5.3 s behind a burst of 600 creates, and under writes kept up
+ * in another brain a read lagged 1–30 s and a graph lacked a type for 10 s.
+ * The ten seconds this was were short of that, so it is a minute: twice the
+ * 30 s, as `UNREAD_KEPT_MS` holds a write that did not read back. It is far
+ * past the wait a reader gives a graph (`LISTED` in `ingest()`, six seconds).
  *
  * It is also how long a write made here can be contradicted from outside. A
  * thought this process linked somewhere and a person then unlinked in the app
  * is one the graph will never list there: for the rest of this time a reader
- * waits for it and gives up. Hence no longer than this.
+ * waits for it, gives up, and says to send the thought again. An honest
+ * "send again" for a minute is worth more than a second thought of a name.
  */
-export const WRITTEN_KEPT_MS = 10_000;
+export const WRITTEN_KEPT_MS = 60_000;
 
 const LIST_OF: Readonly<Record<Relation, GraphList>> = {
   [Relation.Child]: "children",

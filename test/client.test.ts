@@ -782,7 +782,7 @@ describe("what a process wrote a moment ago, set against a graph", () => {
     expect(lacking(written, graph(ROOT), OTHER_BRAIN)).toEqual([`${NEW} in children`]);
   });
 
-  it("a write is kept for ten seconds and no longer", () => {
+  it("a write is kept for a minute and no longer", () => {
     vi.useFakeTimers();
     try {
       const written = new RecentWrites();
@@ -791,13 +791,13 @@ describe("what a process wrote a moment ago, set against a graph", () => {
       const behind = graph(ROOT, { jumps: { [ELSE]: "Before" } });
 
       vi.advanceTimersByTime(WRITTEN_KEPT_MS);
-      expect(WRITTEN_KEPT_MS).toBe(10_000);
+      expect(WRITTEN_KEPT_MS).toBe(60_000);
       expect(lacking(written, behind)).toEqual([`${NEW} in children`, `${ELSE} as After`]);
       vi.advanceTimersByTime(1);
       expect(lacking(written, behind)).toEqual([]);
       // Each from its own write: a later one outlives an earlier.
       written.linked(BRAIN, ROOT, NEW, Relation.Child);
-      vi.advanceTimersByTime(6000);
+      vi.advanceTimersByTime(WRITTEN_KEPT_MS - 4000);
       written.named(BRAIN, ELSE, "After");
       vi.advanceTimersByTime(6000);
       expect(lacking(written, behind)).toEqual([`${ELSE} as After`]);
@@ -806,19 +806,19 @@ describe("what a process wrote a moment ago, set against a graph", () => {
     }
   });
 
-  it("what is past its time goes as the next write is kept: a process that never looks at a graph keeps ten seconds of writes", () => {
+  it("what is past its time goes as the next write is kept: a process that never looks at a graph keeps a minute of writes", () => {
     vi.useFakeTimers();
     try {
       const written = new RecentWrites();
       const id = (n: number): string => `cccccccc-0000-4000-8000-${String(n).padStart(12, "0")}`;
-      // A create a second for a minute, and no graph read in all that time.
-      for (let n = 0; n < 60; n += 1) {
+      // A create a second for three minutes, and no graph read in all that time.
+      for (let n = 0; n < 180; n += 1) {
         written.linked(BRAIN, ROOT, id(n), Relation.Child);
         written.named(BRAIN, id(n), "After");
         vi.advanceTimersByTime(1000);
       }
-      // Two for a link, one for a name, of the eleven writes ten seconds hold.
-      expect(written.size).toBeLessThanOrEqual(11 * 3);
+      // Two for a link, one for a name, of the 61 writes a minute holds.
+      expect(written.size).toBeLessThanOrEqual(61 * 3);
       expect(written.size).toBeGreaterThan(0);
     } finally {
       vi.useRealTimers();
@@ -858,7 +858,7 @@ describe("the URLs a process attached a moment ago", () => {
     expect(written.attachedTo(BRAIN, ELSE)).toEqual(["https://Example.com/p"]);
   });
 
-  it("are kept for ten seconds and no longer, and go as the next write is kept", () => {
+  it("are kept for a minute and no longer, and go as the next write is kept", () => {
     vi.useFakeTimers();
     try {
       const written = new RecentWrites();
@@ -868,12 +868,12 @@ describe("the URLs a process attached a moment ago", () => {
       vi.advanceTimersByTime(1);
       expect(written.attachedTo(BRAIN, ROOT)).toEqual([]);
 
-      // A URL a second for a minute, and none asked for in all that time.
-      for (let n = 0; n < 60; n += 1) {
+      // A URL a second for three minutes, and none asked for in all that time.
+      for (let n = 0; n < 180; n += 1) {
         written.attached(BRAIN, ELSE, `https://example.com/${n}`);
         vi.advanceTimersByTime(1000);
       }
-      expect(written.size).toBeLessThanOrEqual(11);
+      expect(written.size).toBeLessThanOrEqual(61);
       expect(written.size).toBeGreaterThan(0);
     } finally {
       vi.useRealTimers();

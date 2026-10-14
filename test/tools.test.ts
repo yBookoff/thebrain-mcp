@@ -1897,6 +1897,62 @@ describe("brain_ingest", () => {
     expect(plain.text).not.toContain("aliases");
   });
 
+  it("aliases TheBrain accepted and did not read back are said as that, not counted as given", async () => {
+    // They were counted under "thoughts given aliases", and the batch read
+    // as done: a list to build on, which the next edit would have undone.
+    vi.useFakeTimers();
+    try {
+      const { call, sent } = await connect([
+        ["GET /api/brains/", () => ({ id: BRAIN, name: "brain", homeThoughtId: PARENT })],
+        // PARENT has "RAG" already, and every read of it shows the list before.
+        ["GET /graph", () => ({ ...graph(thought("parent")), children: [thought("RAG")] })],
+        ["GET /api/thoughts/", () => thought("RAG", { aliases: [] })],
+        ["PATCH /api/thoughts/", () => 200],
+      ]);
+      const pending = call("brain_ingest", {
+        brainId: BRAIN,
+        thoughts: [{ tempId: "rag", name: "RAG", parent: PARENT, aliases: ["Retrieval"] }],
+      });
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+      const result = await pending;
+
+      expect(sent("PATCH")).toEqual([[{ op: "replace", path: "/aliases", value: ["Retrieval"] }]]);
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe(
+        [
+          "## Thoughts",
+          "Outcome  Title  Identifier",
+          "───────  ─────  ────────────────────────────────────",
+          `existed  RAG    ${THOUGHT}`,
+          "",
+          "## Also",
+          "- links created: 0",
+          "- notes written: 0",
+          "- tags attached: 0",
+          "- thoughts given aliases: 0",
+          "",
+          "## Aliases not read back",
+          "TheBrain accepted the aliases of this thought, and it did not read back with them " +
+            "within 6 s: reads lag behind writes for seconds after a burst of them, and longer " +
+            "while writes keep coming.",
+          `- "RAG" (${THOUGHT}): added ["Retrieval"]; the list is now ["Retrieval"]`,
+          "Do not send them again: brain_get_thought shows them once TheBrain catches up. An " +
+            "alias edit of this thought sent before then waits for them, and is not sent while " +
+            "they do not show, since built on the old list it would undo them.",
+          "",
+          "## Next",
+          "Every write of the plan was accepted, and the identifiers above work immediately. " +
+            "Only the aliases under Aliases not read back have not shown on a read: do not " +
+            "send them, or this plan, again for them. To show the result to the user, open the " +
+            "root thought with brain_activate. Refresh the semantic index with brain_index " +
+            "using action=sync once brain_get_thought shows them.",
+        ].join("\n"),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a batch written whole reads as it always did: a table, the counts, the next step", async () => {
     const { call } = await connect(routes);
     const result = await call("brain_ingest", {
@@ -2354,7 +2410,7 @@ describe("brain_ingest and a thought that may be there already", () => {
     try {
       const { call } = await connect(routes({}, stale));
       const pending = call("brain_ingest", plan("child"));
-      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
       const result = await pending;
 
       expect(result.isError).toBe(false);
@@ -2384,7 +2440,7 @@ describe("brain_ingest and a thought that may be there already", () => {
     try {
       const { call, sent } = await connect(routes({}, once));
       const pending = call("brain_ingest", plan("child"));
-      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
       const result = await pending;
 
       // What the plan asked for is written, so the batch is no error.
@@ -2822,7 +2878,7 @@ describe("brain_ingest straight after another tool has written", () => {
     }
   });
 
-  it("a copy still behind after two seconds is an error that says so, and the thought is not made again", async () => {
+  it("a copy still behind after six seconds is an error that says so, and the thought is not made again", async () => {
     vi.useFakeTimers();
     try {
       const { call, calls } = await connect(routes(8000));
@@ -2831,16 +2887,16 @@ describe("brain_ingest straight after another tool has written", () => {
       expect((await made).isError).toBe(false);
 
       const pending = call("brain_ingest", plan);
-      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
       const result = await pending;
 
       expect(result.isError).toBe(true);
       expect(result.text).toContain(
-        `## Failed\n- thought "RAG" (rag): ${PARENT} was read for 2000 ms to look for a ` +
-          "thought of this name next to it, and its graph still does not show what this " +
-          `server wrote a moment ago: ${THOUGHT} among its children. TheBrain answers a ` +
-          "graph from a copy, and this one is behind, so a thought of this name may be " +
-          "there unseen: nothing was created. Send this thought again in a few seconds\n",
+        `## Failed\n- thought "RAG" (rag): ${PARENT} was read for ${READ_BACK.timeoutMs} ms ` +
+          "to look for a thought of this name next to it, and its graph still does not show " +
+          `what this server wrote a moment ago: ${THOUGHT} among its children. TheBrain ` +
+          "answers a graph from a copy, and this one is behind, so a thought of this name may " +
+          "be there unseen: nothing was created. Send this thought again in a few seconds\n",
       );
       expect(creates(calls)).toBe(1);
 

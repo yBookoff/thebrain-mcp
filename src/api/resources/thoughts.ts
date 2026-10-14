@@ -827,18 +827,24 @@ export class ThoughtsResource {
    * process waits for it before it reads the list to change, and is refused
    * with nothing sent when it still does not show (`#pastUnread`). Built on
    * the old list, it would undo the one written.
+   *
+   * `waitMs` bounds both waits. A caller that writes many lists gives 0 and
+   * waits for them together with `aliasesReadBack()`: a wait each, six at a
+   * time, made a batch of 200 wait up to 34 times over.
    */
   async changeAliases(
     brainId: string,
     thoughtId: string,
     changes: AliasChanges,
     known: { name?: string | undefined } = {},
+    waitMs: number = READ_BACK.timeoutMs,
   ): Promise<AliasOutcome> {
     const thought = await this.#pastUnread(
       "aliases",
       brainId,
       thoughtId,
       await this.get(brainId, thoughtId),
+      waitMs,
     );
     const current = aliasesOf(thought);
     const drop = new Set(normalizeAliases(changes.remove ?? []).map(aliasKey));
@@ -874,6 +880,7 @@ export class ThoughtsResource {
         brainId,
         thoughtId,
         (t) => listed(aliasesOf(t)) === listed(aliases),
+        waitMs,
       )) !== null;
     if (readBack) {
       this.#unread.delete(unreadKey("aliases", brainId, thoughtId));
@@ -888,8 +895,27 @@ export class ThoughtsResource {
   }
 
   /**
+   * Whether the alias list this process last wrote to the thought, and had
+   * not seen read back, shows on a read within `waitMs`; true when no such
+   * write is held. The thought is read once at least. One that shows is
+   * held no longer, and a list that is neither the one before the write nor
+   * the one written counts as past it, as in `#pastUnread`.
+   */
+  async aliasesReadBack(brainId: string, thoughtId: string, waitMs: number): Promise<boolean> {
+    const key = unreadKey("aliases", brainId, thoughtId);
+    const unread = this.#unread.get(key);
+    if (unread === undefined) return true;
+    if ((await this.#readsBack(brainId, thoughtId, (t) => !unread.behind(t), waitMs)) === null) {
+      return false;
+    }
+    if (this.#unread.get(key) === unread) this.#unread.delete(key);
+    return true;
+  }
+
+  /**
    * Waits for a write to show up on a read of the thought, and returns that
-   * read; null when none showed it within `READ_BACK`.
+   * read; null when none showed it within `timeoutMs`. The thought is read
+   * once at least, with no time to wait as well.
    *
    * A read that fails has not shown the write, and no more than that: thrown
    * from here, its error passed for the write's own, and a write that had
@@ -899,9 +925,10 @@ export class ThoughtsResource {
     brainId: string,
     thoughtId: string,
     landed: (thought: ThoughtDto) => boolean,
+    timeoutMs: number = READ_BACK.timeoutMs,
   ): Promise<ThoughtDto | null> {
     const started = Date.now();
-    const deadline = started + READ_BACK.timeoutMs;
+    const deadline = started + timeoutMs;
     for (;;) {
       const thought = await this.get(brainId, thoughtId).catch(() => null);
       if (thought !== null && landed(thought)) return thought;
@@ -936,6 +963,7 @@ export class ThoughtsResource {
     brainId: string,
     thoughtId: string,
     thought: ThoughtDto,
+    timeoutMs: number = READ_BACK.timeoutMs,
   ): Promise<ThoughtDto> {
     const key = unreadKey(field, brainId, thoughtId);
     const unread = this.#unread.get(key);
@@ -944,7 +972,7 @@ export class ThoughtsResource {
       this.#unread.delete(key);
       return thought;
     }
-    const past = await this.#readsBack(brainId, thoughtId, (t) => !unread.behind(t));
+    const past = await this.#readsBack(brainId, thoughtId, (t) => !unread.behind(t), timeoutMs);
     if (past === null) {
       const ago = Math.round((Date.now() - unread.at) / 1000);
       throw new TheBrainError(

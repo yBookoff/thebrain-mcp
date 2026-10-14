@@ -1462,6 +1462,57 @@ describe("a write that has not read back", () => {
     }
   });
 
+  it("with no wait an alias edit reads once after its write, and aliasesReadBack waits for it later", async () => {
+    // So a batch writes its lists and waits for them all at once: a wait
+    // each, six at a time, was up to 34 waits for 200 thoughts.
+    vi.useFakeTimers();
+    try {
+      const { api, calls, catchUp } = lagging(thought(THOUGHT, "RAG", { aliases: [] }));
+      const outcome = await api.thoughts.changeAliases(BRAIN, THOUGHT, { add: ["one"] }, {}, 0);
+      expect(outcome).toMatchObject({ aliases: ["one"], readBack: false });
+      expect(calls.map((c) => c.method)).toEqual(["GET", "PATCH", "GET"]);
+
+      const later = api.thoughts.aliasesReadBack(BRAIN, THOUGHT, READ_BACK.timeoutMs);
+      await vi.advanceTimersByTimeAsync(1000);
+      catchUp();
+      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+      await expect(later).resolves.toBe(true);
+
+      // Shown, it holds off the next edit no longer, which reads the list once.
+      const reads = calls.length;
+      await expect(
+        api.thoughts.changeAliases(BRAIN, THOUGHT, { add: ["two"] }, {}, 0),
+      ).resolves.toMatchObject({ aliases: ["one", "two"] });
+      expect(calls.slice(reads).map((c) => c.method)).toEqual(["GET", "PATCH", "GET"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("aliasesReadBack is false when the list does not show within the wait, and true at once with none held", async () => {
+    vi.useFakeTimers();
+    try {
+      const { api, calls } = await aliasedUnread("one");
+      const looked = api.thoughts.aliasesReadBack(BRAIN, THOUGHT, 2000);
+      let shown: boolean | undefined;
+      void looked.then((s) => (shown = s));
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(shown).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(200);
+      expect(shown).toBe(false);
+      // With no time it reads once.
+      const reads = calls.length;
+      await expect(api.thoughts.aliasesReadBack(BRAIN, THOUGHT, 0)).resolves.toBe(false);
+      expect(calls.length - reads).toBe(1);
+
+      const quiet = apiWith([]);
+      await expect(quiet.api.thoughts.aliasesReadBack(BRAIN, THOUGHT, 0)).resolves.toBe(true);
+      expect(quiet.calls).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a removal after a type that did not read back waits for it, and removes it", async () => {
     // Its first read had no type: it removed nothing and returned false,
     // and the type showed up a moment later.

@@ -6,7 +6,7 @@ import { z } from "zod";
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-import { MAX_ALIASES, thoughtNameAsStored } from "../../api/index.js";
+import { MAX_ALIASES, READ_BACK, READ_LAG, thoughtNameAsStored } from "../../api/index.js";
 import {
   IngestMissingError,
   IngestReadError,
@@ -167,6 +167,9 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
       // read as done. Its table names each thought by tempId too: the plan
       // that follows refers to what exists by identifier.
       const partial = outcome.failures.length > 0 || outcome.skipped.length > 0;
+      // So is one with aliases accepted and not read back, as in
+      // brain_update_thought: read as done, they are a list to build on.
+      const unread = outcome.aliasesNotReadBack.length > 0;
       // A thought that existed keeps the note it has, so where the plan has
       // a note for one, the table says of every note what became of it. A
       // plan that found no thought in place, or has no note for those it
@@ -202,7 +205,7 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
         ...outcome.reused.map((r) => row("existed", r)),
       ];
 
-      return (partial ? fail : ok)(
+      return (partial || unread ? fail : ok)(
         join([
           section(
             "Thoughts",
@@ -249,6 +252,7 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
           ),
           section("Failed", bullet(outcome.failures.map((f) => `${f.what}: ${whyFailed(f)}`))),
           section("Skipped", bullet(outcome.skipped.map((s) => `${s.what}: ${s.reason}`))),
+          section("Aliases not read back", aliasesNotReadBack(outcome.aliasesNotReadBack)),
           notKept.length === 0
             ? null
             : section(
@@ -277,7 +281,14 @@ export function registerIngestTool(server: McpServer, ctx: ServerContext): void 
                     (f) => f.unanswered && (rows.length > 0 || f.of === "thought"),
                   ),
                 )
-              : "The identifiers above work immediately. To show the result to the user, " +
+              : unread
+                ? "Every write of the plan was accepted, and the identifiers above work " +
+                  "immediately. Only the aliases under Aliases not read back have not shown " +
+                  "on a read: do not send them, or this plan, again for them. To show the " +
+                  "result to the user, open the root thought with brain_activate. Refresh the " +
+                  "semantic index with brain_index using action=sync once brain_get_thought " +
+                  "shows them."
+                : "The identifiers above work immediately. To show the result to the user, " +
                   "open the root thought with brain_activate. Refresh the semantic index " +
                   "with brain_index using action=sync.",
           ),
@@ -336,6 +347,31 @@ function listingNotRead(unread: IngestOutcome["listingUnread"]): string | null {
     "No write failed by this. Before sending this plan again, read each of them with " +
     "brain_get_thought and see that it lists them: sent before that, the plan would make " +
     "them a second time."
+  );
+}
+
+/**
+ * The aliases TheBrain accepted and no read showed within the wait, in the
+ * words brain_update_thought has for them (`aliasesNotReadBack()` there): no
+ * failure, which would say to send them again, and not done, which reads as
+ * a list to build on. Null when every list read back.
+ */
+function aliasesNotReadBack(unread: IngestOutcome["aliasesNotReadBack"]): string | null {
+  if (unread.length === 0) return null;
+  const one = unread.length === 1;
+  const lines = unread.map(
+    (u) =>
+      `"${shownName(u.name)}" (${u.thoughtId}): added ${JSON.stringify(u.added)}; the list ` +
+      `is now ${JSON.stringify(u.aliases)}`,
+  );
+  return (
+    `TheBrain accepted the aliases of ${one ? "this thought" : "these thoughts"}, and ` +
+    `${one ? "it" : "they"} did not read back with them within ` +
+    `${READ_BACK.timeoutMs / 1000} s: ${READ_LAG}.\n${bullet(lines)}\n` +
+    "Do not send them again: brain_get_thought shows them once TheBrain catches up. An " +
+    `alias edit of ${one ? "this thought" : "one of these thoughts"} sent before then ` +
+    "waits for them, and is not sent while they do not show, since built on the old list " +
+    "it would undo them."
   );
 }
 

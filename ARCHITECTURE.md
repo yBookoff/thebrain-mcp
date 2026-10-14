@@ -98,7 +98,7 @@ reached TheBrain, so it is reported rather than retried elsewhere. An explicit
 
 **The client keeps what it wrote.** `client.sinceLastWrite()` is when its last
 write came back, and `client.written` (`RecentWrites`) is what its answered
-creates, links and renames put into the graphs, kept for ten seconds. Both
+creates, links and renames put into the graphs, kept for a minute. Both
 are for a reader of a graph, which is answered from a copy that is behind a
 write by no fixed time (§4, *What a second run finds*). It keeps the URLs
 this process attached as well, as sent, for the list of a thought's
@@ -944,7 +944,7 @@ read is answered from a copy, brought up to date about every 0.1 s (§7, item
 children again too: 5 of 6. So `ingest()` returns once the graph of every
 thought that was there before the batch lists what the batch made next to it,
 read or not by this batch: the copy may be from an earlier read. It asks last,
-after the notes and links, and gives up after 2 s. Then the outcome counts
+after the notes and links, and gives up after 6 s. Then the outcome counts
 what is still `unlisted`, and the result says to wait before sending the plan
 again. The wait is 60–150 ms on a batch of one thought and nothing measurable
 on one with notes and links: a plan of 20 thoughts and 10 links took 325–456
@@ -998,7 +998,7 @@ the app is busy with, as a write's read-back does after a burst (§7). There
 is no bound to set a wait by.
 
 Nothing in a graph says how old it is. But a process knows what it wrote. The
-client keeps, for ten seconds, what each answered write put into the graphs
+client keeps, for a minute, what each answered write put into the graphs
 (`RecentWrites`, `client.written`): a thought created next to another, and a
 link between two, are each in the other's graph in the list the relation puts
 them in, and a renamed thought is listed under its new name. Those are the
@@ -1021,14 +1021,14 @@ latest above is one to three reads more. The wait by the clock stays, for
 the writes that leave nothing to look for: a create that got no answer,
 which has no identifier, a deletion, and a note (below).
 
-When two seconds of asking have not brought the graph up to date, it is
+When six seconds of asking have not brought the graph up to date, it is
 still not taken at its word. The thought fails, what hangs on it is skipped,
 and its line says which thought the graph does not list and to send that
 part again in a few seconds: made then, it might be the second of its name,
 which only a person can remove (§6). The record can be the one that is wrong:
 a thought this process linked somewhere and a person then unlinked in the
 app will never be listed there. Nothing tells the two apart, so the plan
-fails there as well, until the record is dropped: after ten seconds, or at
+fails there as well, until the record is dropped: after a minute, or at
 once when this process deletes the thought, changes its kind, or deletes a
 link.
 
@@ -1492,6 +1492,51 @@ holds.
 
 Nothing is deleted to tidy up after a failure. Deletion needs a human (§6).
 
+### How long a batch waits, and for what
+
+**Six seconds, as a read-back.** The graph a plan looks in, and the graphs
+a batch waits on at its end, are answered from a copy that queues behind
+the same writes as a read of the thought (§7, *Write visibility*): one was
+2 s behind a rename in a full contract run, and one lacked a type for 10 s
+under another client's bursts. A batch of 200 thoughts with notes, tags and
+links is some 600 writes, and a read was 5.3 s behind 600 creates. So
+`LISTED` is `READ_BACK`'s six seconds, where two were short of the batch's
+own writes and failed a thought with "send again". It costs what the copy
+is behind and no more, and all six seconds only where a graph never shows
+the write. The pause between reads doubles each second, 25 ms to 400: 81
+reads in six seconds, as many as two at 25 ms.
+
+**A write is kept for a minute.** Past `WRITTEN_KEPT_MS` a graph is taken
+at its word, and one still behind makes the thought a second time. Ten
+seconds were short of the 1–30 s reads lagged beside bursts in another
+brain: a plan sent 20 s after the create, with the graph 30 s behind, made
+it twice (unit test). A minute is twice the 30 s, as for a write that did
+not read back. The cost is a write contradicted in the app: a thought this
+process linked somewhere and a person unlinked there fails a plan next to
+it, with "send again", for up to that minute.
+
+**Aliases accepted and not read back are said as that.** `ingest()` counted
+a list that did not read back as written, and the batch read as done. Now
+it is under "Aliases not read back", in `brain_update_thought`'s words
+(*Accepted, and not read back*): accepted, do not send again,
+`brain_get_thought` shows them once TheBrain catches up. The result is
+`isError`, and "Next" says that every write was accepted. The lists are
+written with no wait (`changeAliases(…, 0)`) and waited for together at the
+end, beside the wait for the graphs (`aliasesReadBack()`): a wait each, six
+at a time, was 34 waits of six seconds for 200 thoughts.
+
+**The longest call.** By its waits, one `brain_ingest` call takes at most
+0.3 s by the clock before its first look; then up to six seconds for each
+level of the plan whose graphs are behind this process's writes, and no
+more than a minute for all of them, since those writes came before the
+call and are dropped a minute after; and six seconds at the end, for the
+graphs and the aliases together. That is 66 s and the requests' own time,
+for a plan that follows its process's writes into a copy a minute behind.
+One that follows none pays the last six seconds alone, and those only while
+TheBrain is behind. Before, the looks took 10 s at most and the end 2 s,
+but the aliases waited six seconds each, six at a time: 204 s for 200
+thoughts whose lists did not read back.
+
 ### A call about one thought, written in part
 
 Four tools write more than once in a call. `brain_create_thought` makes the
@@ -1732,7 +1777,7 @@ later.
   brain is open.
 
 **The read that waits for a write names the graph it could not read.**
-`ingest()` still asks to the end of its two seconds, since the next read may
+`ingest()` still asks to the end of its wait, since the next read may
 be answered. When the last one failed too, the thought is returned in
 `listingUnread` and not counted in `unlisted`, and the result has "Listing not
 read" for it: the thought, how many new thoughts are next to it, why, and to
@@ -1741,10 +1786,10 @@ yet" is a statement about TheBrain, and stays for a graph that answered. The
 batch is no error for it: what the plan asked for is written.
 
 A graph that failed is asked again after twice the pause each time, up to
-0.4 s, and one that answered a step later as before: 10 reads of a failing
-graph in the two seconds, where there were 76. And the two seconds are the
-whole of the wait, for every graph at once. A read still unanswered when they
-are over is given up on and its thought listed as not read. The batch used
+0.4 s, and one that answered after `pauseAt()`: 10 reads of a failing
+graph in what were two seconds, where there were 76, and 20 in the six now.
+And the wait is the whole of it, for every graph at once. A read still
+unanswered when it is over is given up on and its thought listed as not read. The batch used
 to wait for the read itself: with the answer held back 10 s it took 10 s to
 return a result whose writes were done, and a request's own limit is 30 s.
 
@@ -2007,7 +2052,7 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     That list is a copy, and the other spelling attached straight after was
     attached twice, 18 times in 20. So `attachUrl` also asks `by-location`,
     which is live, for each spelling of the address this process attached
-    to the thought in the last ten seconds (`client.written`), and takes
+    to the thought in the last minute (`client.written`), and takes
     the calls for one address on one thought one at a time: then 0 of 20.
     What the list has is asked for by `by-location` too before it counts:
     the list still had an attachment deleted 4 ms before, 6 times in 6.
