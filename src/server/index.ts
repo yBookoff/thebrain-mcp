@@ -20,7 +20,7 @@ export const SERVER_NAME = "thebrain-mcp";
  * scripts/sync-server-json.mjs, whose `--check` the publish workflow runs,
  * and a unit test sets it against package.json.
  */
-export const SERVER_VERSION = "0.2.0";
+export const SERVER_VERSION = "0.3.0";
 
 export function createServer(config: Config): {
   server: McpServer;
