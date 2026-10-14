@@ -181,7 +181,9 @@ silent wrong behaviour rather than a loud failure:
   with the same identifier and a `402` in the log; `PATCH /name` with the name
   a link has logs nothing. The lookup of a pair is not behind a write; the
   link by its own identifier is. Look first (`links.hasTag()`, `linkFound()`),
-  and compare a label as it is stored (`linkNameAsStored()`).
+  and compare a label as it is stored (`linkNameAsStored()`). `brain_tag` add
+  asks the lookup first and sends nothing for a tag that is there; a link of
+  the pair that is not the tag's is refused, since the attach would rewrite it.
 - **Two thoughts share one link, and no link reads back with `relation` 2.** A
   parent's link is stored as a child's from the other end, so `thoughtIdA` is
   the upper end, the tag or the type. Never compare a stored `relation` with
@@ -240,6 +242,12 @@ silent wrong behaviour rather than a loud failure:
   throws `not_a_tag`, and `detachTag()` deletes only the tag's own link. A
   caller that writes something before the tag calls `links.requireTag()` ahead
   of that write.
+- **A tag attached twice is a 404 to the lookup and two attachments in the
+  graph.** `brain_tag` remove, where the lookup gives no attachment, reads the
+  thought's graph and deletes every attachment of the tag through
+  `links.detachTagLink()`, which refuses any other link; one listed and none
+  looked up is refused, never "was not on the thought". Not gated, as a
+  single removal is not: add puts the tag back (L46).
 - **A tag is made once a name, and a create does not say which it did.**
   `POST /api/thoughts` with `kind: 4` under the name of a tag that is there
   makes nothing and answers with that tag's `{id}`; names are matched with
@@ -360,6 +368,12 @@ silent wrong behaviour rather than a loud failure:
   after its status: never send it again, and say why through `landedWhy()`.
   Every write refusal measured in those words is refused before sending; keep
   any new one there, or it will read as "may have landed".
+- **A note of white space alone is kept in its file and read as `""`**, by
+  .NET's rule, not `trim()`'s: U+0085 is white space to it and a byte order
+  mark is not. A note is what its read returns: `""` is none, anything else is
+  printed, through `shownName()` when nothing in it shows. `section()` drops
+  only `null` and `""` and never reads a body; `bullet()` and `table()` return
+  `null` for no rows.
 - **A note write with no answer may have landed, and an append sent again
   lands twice.** Both note tools say so under "Next" when `mayHaveLanded()`.
 - **For a moment after a note changes, its thought's `graph` is wrong about
