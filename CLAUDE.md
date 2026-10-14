@@ -49,6 +49,12 @@ silent wrong behaviour rather than a loud failure:
 - **A malformed UUID in the path returns HTTP 200 with an HTML page** to a
   `GET`; a write with one is a 400 with no body. Validate before the request;
   sniff the body after.
+- **An identifier in capitals is read, and every answer names it in lower
+  case.** A tool takes each identifier argument through `identifier()` (or
+  `identifierOrNull()`) from `src/server/identifier.ts`, never as a bare
+  `z.string()`, a new instance at each use, or the JSON Schema gets a `$ref`.
+  A plan's `parent`/`from`/`to` are lowered in `ingest()`, since only the
+  whole plan says which are tempIds.
 - **The status does not say which identifier was wrong.** A `brainId` that is
   no brain is a 401, `"Access to brain <id> is unauthorized."`, from every
   request, whatever else it names: `unknown_brain`, never `auth`, which is the
@@ -173,9 +179,14 @@ silent wrong behaviour rather than a loud failure:
   in 60; from then on `between()` is a 404 where both go the same way, and
   any further post is the bare 400 `Link could not be created.`, of any kind,
   from either end, a tag attached twice included. `describeError()` explains
-  it, and only `brain_unlink` mends the pair. `ingest()` sends one link a pair
-  and one attach for a tag on a thought: never write to one pair twice at
-  once.
+  it, and only `brain_unlink` mends the pair. Two `brain_link` calls at once
+  were two links 12 times in 21, one of them answered with zeros 7 times
+  (L47). Within a process, `links.inTurn()` takes one pair at a time:
+  `create()` and `attachTag()` take it, and a caller that looks and then
+  writes takes it around both (`brain_link`, `brain_tag` add, `ingest()`); the
+  write inside takes no second turn (`AsyncLocalStorage`). Never hold two
+  pairs' turns at once. Another process, or the app, writing to the pair at
+  the same moment is not guarded.
 - **Asking for what is there is not free, and `between()` is how to look.** A
   link posted over the pair's own, a tag attached again included, is a 200
   with the same identifier and a `402` in the log; `PATCH /name` with the name
