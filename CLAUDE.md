@@ -218,9 +218,14 @@ silent wrong behaviour rather than a loud failure:
   `Example.com/p` does not find `example.com/p`. Attach through
   `attachments.attachUrl()`, which also checks the thought's own list with the
   host case set aside. That list is a copy refreshed about every 0.1 s, up to
-  0.2 s behind a write; `by-location` is not. So the same address in another
-  host case, attached straight after, is attached twice (17 of 20); not
-  guarded.
+  0.2 s behind a write, and the first attach's own read makes it: the other
+  spelling sent straight after was attached twice 18 times in 20. So
+  `client.written` keeps for ten seconds the URLs this process attached, as
+  sent, `attachUrl()` asks `by-location`, which is live, for each spelling of
+  the address it attached to the thought, and calls for one address on one
+  thought go one at a time (0 of 20). Not guarded: another process or the app
+  attaching another spelling while the list is behind, and an attachment
+  deleted in the last 0.1 s, which the list may still show.
 - **Tags attach via `POST /api/links` with `relation: 2` against a `kind=4`
   thought.** The server rewrites it to `relation=1, meaning=5`. Against a type
   the same request sets the thought's type and against an ordinary thought it
