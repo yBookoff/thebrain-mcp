@@ -308,8 +308,8 @@ silent wrong behaviour rather than a loud failure:
   reused nor made again. A graph that has been read is answered from a copy,
   0.2 s behind a create as a rule and 364 ms at the worst measured, so
   `ingest()` first looks 0.5 s after this process's last write, and returns
-  once the graphs list what it made, counting what they still lack at the end
-  of its wait in `unlisted`. A
+  once the graphs list what it made, or after 3 s (`LISTED`), counting what
+  they still lack then in `unlisted`. A
   read of that graph that fails fails the thought, never "nothing there". A
   thought with no parent is still made by every run, and a `relation` with no
   parent is refused before any write.
@@ -346,12 +346,11 @@ silent wrong behaviour rather than a loud failure:
   read").
 - **A write reads back late, by no fixed time, and past the wait it is
   accepted, not failed.** A type set or removed and an alias list are waited
-  for up to `READ_BACK` (6 s); past it they are `not_read_back`, "accepted…
-  do not send it again", never under "Done". Until a read shows such a write,
-  this process's next alias edit or type removal of that thought waits for it
-  (`#pastUnread()`) and is refused, nothing sent, if no read does: built on
-  the old value it would undo the write. Another process's writes are not
-  known.
+  for up to `READ_BACK` (3 s, a read every 50 ms); past it they are
+  `not_read_back`, "accepted… do not send it again", never under "Done", and
+  `brain_update_thought` stops there as at any failure. Nothing holds back
+  the next edit of that thought: built on the old value it would undo the
+  write, which the aliases' line says.
 - **A note of white space alone is kept in its file and read as `""`**, by
   .NET's rule, not `trim()`'s: U+0085 is white space to it and a byte order
   mark is not. A note is what its read returns: `""` is none, anything else is
