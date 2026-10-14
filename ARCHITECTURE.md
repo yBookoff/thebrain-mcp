@@ -772,12 +772,10 @@ answered, and so do the other tools. A plan of `brain_ingest` adds and never
 changes or removes a link. `brain_unlink` refuses a tag's attachment and
 says so.
 
-**Not guarded.** Two thoughts joined by more than one link, which only posts
-sent at once leave (`docs/api-map.md`, under artificial load): the lookup
-may give none of them, and every post between the two is the bare 400,
-passed on as it comes. Such a pair is mended in TheBrain. Not known: what
-TheBrain's own window shows of two links between one pair, and of the end a
-jump was first posted from.
+**Not guarded.** A pair joined by more than one link, which only posts sent at
+once leave, is passed on as the API answers it and mended in TheBrain
+(`docs/api-map.md`, L43, under artificial load). Not known: what TheBrain's
+own window shows of the end a jump was first posted from.
 
 ### `brain_ingest` — the tool the product is built around
 
@@ -879,8 +877,8 @@ and the thought was created though it might exist: with a 500, the generic
 403 or a dropped connection put in on the way to the live API, beside the
 one of its name that was there, 9 of 9. Now the thought fails, as one whose
 create failed does: what hangs on it is skipped and the rest is written. One answer is not a failed read. The graph of an identifier nobody
-has is a 403, in the words this API has for much else, a request dropped
-under load included; the thought itself is a 404. When the thought says nobody
+has is a 403, in the words this API has for much else, a dropped request
+included; the thought itself is a 404. When the thought says nobody
 has it, there is nothing to look under, and the create goes out to be refused
 in the API's own words. Such a thought was deleted after the plan was checked:
 one nobody had by then rejects the plan (*When a thought of the plan is not
@@ -929,21 +927,16 @@ than 0.5 s before, which a model's own turn never is: only calls sent in one
 turn meet it. The batch's own writes are not waited for: what it makes next
 to a thought it adds to what it read of that thought.
 
-The wait was 300 ms, half as long again as the longest lag of one evening,
-205 ms; after it 0 of 360 were made twice, and the plan after an unanswered
-create found the thought 6 times of 6. The contract test behind it went red
-in one run of ten on 2026-10-12 and in none of 160 the day after. Measured
-that day after, 1,800 creates next to a thought whose graph had been read
-0.3 s before: a reader polling every 10 ms first saw the thought more than
-300 ms after its answer 7 times, 364 ms at the latest, all while the app was
-slow to answer. Half a second is past that by more than a refresh of the
-copy. Until BRMCP-75 the client also kept what each of its writes put into
-the graphs, and read a graph until it showed that; it was sized for lags of
-seconds under bursts of writes, which the server is not built for, and went.
-With the graph read straight before the write, where the read straight after
-it lacked the new thought 197 times in 200, and the plan sent the moment the
-write came back, a plan found what a create under each relation, a link and
-a rename had left, 8 of 8 (contract test). A second look before each create
+The wait was 300 ms, half as long again as the longest lag of one evening, 205
+ms, and its contract test went red in one run of ten. Of 1,800 creates next to
+a thought whose graph had been read 0.3 s before, a reader polling every 10 ms
+first saw the thought more than 300 ms after its answer 7 times, 364 ms at the
+latest, all while the app was slow to answer. Half a second is past that by
+more than a refresh of the copy. With the graph read straight before the write
+and the plan sent the moment the write came back, a plan found what a create
+under each relation, a link and a rename had left, 8 of 8 (contract test).
+Until BRMCP-75 the client also kept what each of its writes put into the
+graphs; sized for bursts of writes, it went. A second look before each create
 was weighed and left: it is the clock again, one step on, paid by most plans.
 
 **Not guarded.** A copy further behind than 0.5 s is taken at its word, and
@@ -952,13 +945,11 @@ be in a copy, and a plan that names it is told it existed: which graphs a
 deletion shows in, and when, was not measured. And a write made in the app
 or by another process is not known here at all.
 
-**Two runs at the same moment are not guarded.** Two `brain_ingest` calls
-sent at once with a thought in common each made it, 6 times of 6: neither
-sees what the other is about to make. One process could queue its batches,
-which would cover the calls one client sends at once to one server. It would
-not cover two clients, which are two processes, nor a batch beside one of the
-other write tools, and nothing measured says that a client sends two plans at
-once. So there is no lock, and the skill says to send one plan at a time.
+**Two runs at the same moment are not guarded.** Two `brain_ingest` calls sent
+at once with a thought in common each made it, 6 times of 6: neither sees what
+the other is about to make. A queue of batches in one process was weighed and
+left: it would not cover two clients, nor a batch beside another write tool.
+The skill says to send one plan at a time.
 
 **Two thoughts of one name in one list are neither of them the plan's.** A
 thought can have two children of one name, or two parents, or two jumps. The
@@ -1188,12 +1179,9 @@ one attach. Two attaches of one tag sent at once left two attachments 11
 times in 20.
 
 **Not guarded.** Two calls at once for one pair, from this process, from
-another or from TheBrain itself: each looks before either posts, and the
-pair can be left with two links (`docs/api-map.md`, L47). A pair that
-already has two links cannot be linked or labelled by any tool: the lookup
-answers 404, so the tools post, and the post is refused. `brain_tag` asked
-to add a tag that is on the thought looks first now, and sends nothing (§7,
-*Tags: undocumented, but they work*).
+another or from TheBrain itself: each looks before either posts, and the pair
+can be left with two links, which a person removes in TheBrain
+(`docs/api-map.md`, L47, under artificial load).
 
 #### When a thought of the plan is not created
 
@@ -1571,8 +1559,8 @@ way to the live API, once each, and all four the same:
 - `brain_traverse` listed the thought whose graph had failed like any other,
   with nothing under it: 4 thoughts and 3 links where there were 6 and 5.
 - `brain_ingest`, at the wait for the graphs (above), read the failing graph
-  74 to 78 times over its two seconds and answered "TheBrain does not yet
-  list 1 of the new thoughts", and to wait a few seconds.
+  74 to 78 times over the two seconds it then waited, and answered "TheBrain
+  does not yet list 1 of the new thoughts", and to wait a few seconds.
 - `brain_list` marked no brain open and printed no active thought.
 - `brain_append_note` wrote nothing when the read ahead of its write failed,
   and answered with the read's error alone. With the answer to its write
@@ -1816,10 +1804,10 @@ Notes.md", beside the Note section. The question is not put at all when the
 note could not be read (§4, *A read that fails inside a tool*).
 
 **The question for a link names both its thoughts.** By name, marked when one
-is a type or a tag, with what the link is and its label, the links of the
-pair that stay, and a thought the removal leaves with no parent, child or
-jump. A change of a link's kind is not put to anyone: it keeps the link, and
-the same call puts the old kind back.
+is a type or a tag, with what the link is and its label, and a thought the
+removal leaves with no parent, child or jump. A change of a link's kind is
+not put to anyone: it keeps the link, and the same call puts the old kind
+back.
 
 ---
 
@@ -2034,25 +2022,21 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     it, and one the link has already is not sent (§4, *What a second run
     writes*).
 
-    *One link, when the posts come one after another.* Posted over the link
-    a pair has, a link answers that link's identifier and logs a `402`,
-    changed or not. Two posted at once for a pair with none were two links
-    51 times in 60, and from then on the lookup of the pair answers 404 where
-    both go the same way and a further post is a 400. `ingest()` wrote a
-    plan's links six at a time, so two between one pair did exactly that. It
-    sends one link a pair now, and one attach for a tag on a thought (§4).
+    *One link a pair.* Posted over the link a pair has, a link answers that
+    link's identifier and logs a `402`, changed or not. Two posted at once for
+    a pair with none were two links 51 times in 60 (row L35, under artificial
+    load). `ingest()` wrote a plan's links six at a time, so two between one
+    pair did exactly that. It sends one link a pair now, and one attach for a
+    tag on a thought (§4).
 22. **The search answers from a copy that is behind, and a hit is that
     copy.** The search of a brain has an index of its own, refreshed about
     every five seconds. Until the next refresh it returns a thought that was
     deleted, the hit the same to the last field as before the delete, and a
     thought that was renamed or given another caption, alias or note by its
     old text, with the old name in the hit. The lookup by exact name answers
-    from the same index. A thought deleted within some tens of milliseconds
-    of a neighbour of its own stayed in it for good 7 times of 720, and six
-    such thoughts were still returned hours later, the oldest seventeen.
-    `brain_search` listed every hit as it found it. It reads the thought of
-    each hit now, and `findByName` its answer (§8, *A hit for a thought that
-    is gone*).
+    from the same index. `brain_search` listed every hit as it found it. It
+    reads the thought of each hit now, and `findByName` its answer (§8, *A
+    hit for a thought that is gone*).
 23. **A name of white space alone is refused for a new thought and ignored
     for a rename, and a name is not stored as it was sent.** White space is
     Unicode's `White_Space`, 25 code points, which is not what `trim()`
@@ -2086,8 +2070,8 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
 25. **A type on a type is a link of meaning 3, a tag on a tag one of 7, and
     a thought can have two types.** A type set on a type, by a patch, a link
     or a kind change, is a link the log calls `TypeOf`, and `detachType()`
-    took it for a link that is not the type's: `typeId: null` waited two
-    seconds and failed with the type in place. A thought created under one
+    took it for a link that is not the type's: `typeId: null` waited out
+    the read-back and failed with the type in place. A thought created under one
     type with another for its `typeId` has a type's link from each; deleting
     either reads back as no `typeId`, the other staying its type, and no patch
     takes one away. `typeId: null` deleted the one `typeId` named and answered
@@ -2116,9 +2100,9 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     takes it for that (row L40).
 28. **`statistics` is exact for thoughts, links, notes and web links, and
     behind for types and tags**: 0.04–0.9 s after one is made or deleted,
-    and 2.8–6.6 s after a burst of writes. Nothing in the server reads it;
-    the contract tests do, and wait for the two counts or leave them out
-    (row L41).
+    up to 2.2 s at the end of a sweep of deletes. Nothing in the server
+    reads it; the contract tests do, and wait for the two counts or leave
+    them out (row L41).
 29. **A log request with no `startTime` costs time by the length of the
     whole log**, however few entries it asks for: 135 ms for the newest 50
     of 170,000, and 15 ms with a `startTime` an hour back. Every reader
@@ -2133,23 +2117,24 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
 
 ### Write visibility
 
-Measured against a live API by polling until the result appeared:
+Measured against a live API by polling until the result appeared. What
+bursts of writes do to these is in `docs/api-map.md`, under artificial load.
 
 | Operation | Delay |
 |---|---|
 | `create` → `get(id)` | instant |
-| `rename` → `get(id)` | ~0.1 s, 102 ms at the most of 40; 130 ms beside another contract run. Behind what else the app was given to write: 1–30 s beside bursts of 300 creates in another brain, longer with each burst (24 renames in four minutes) |
+| `rename` → `get(id)` | ~0.1 s, 102 ms at the most of 40; 130 ms beside another contract run |
 | `set aliases` → `get(id)` | ~0.1 s, 0.2 s at the most |
 | `create` with aliases → `get(id)` shows them | usually instant, up to 0.15 s |
 | clear a label or a colour → `get(id)` | up to 0.2 s |
 | delete a type's link → `get(id)` without `typeId` | 20–210 ms |
 | set a type by `PATCH` → `get(id)` | ~0.1 s, 107 ms at the most |
-| delete a link → the lookup of the pair | instant: the other link of two, from either end, or none |
-| delete a link → `get(link)`, and a graph read before | 4–216 ms; 26–211 ms for a graph, which lists both of two links till then |
+| delete a link → the lookup of the pair | instant |
+| delete a link → `get(link)`, and a graph read before | 4–216 ms; 26–211 ms for a graph |
 | a link posted over with another relation → the lookup | instant |
-| `PATCH` a link → `get(link)` | 10–368 ms, 85–173 ms at the median of five spacings; there at the first read 12 times in 300. Behind bursts of writes to another brain up to 4.7 s, and once more than 5 s |
+| `PATCH` a link → `get(link)` | 10–368 ms, 85–173 ms at the median of five spacings; there at the first read 12 times in 300 |
 | `create` with a type → `get(id)` shows it | instant |
-| the first `PATCH` after a burst of creates → `get(id)` | 0.6–0.8 s after 150, 2.6 s after 300 with a type |
+| the first `PATCH` after a batch of creates → `get(id)` | 0.6–0.8 s after 150 created six at a time, as `ingest()` creates them; 0.5–0.8 s after 100 with a type. The waits allow 1–3 s after one batch of up to 200 |
 | `set note` → `get note` | ~0.2 s |
 | first note → `get note` | up to 0.15 s when the note had been read before: 8 first reads of 30 had none. At once when it had not |
 | first note → the thought's `graph` lists it | up to 0.15 s for a graph read before: a copy, 10 first reads of 50 without it. Live on its first read |
@@ -2166,9 +2151,9 @@ Measured against a live API by polling until the result appeared:
 | **`create` → `findByName`** | **~5.6 s** |
 | `create` → full-text search | 3.7–5.5 s, at the next refresh of the search's index (13 runs). The vendor's documentation says up to 15 s, which was not once seen |
 | a thought, a link, a note or a URL made or deleted → `statistics` | at the first read, every time measured |
-| a type or a tag made or deleted → `statistics.thoughtTypes`, `.tags` | 0.04–0.9 s on a quiet app; 2.8–6.6 s after a burst of 100 creates |
+| a type or a tag made or deleted → `statistics.thoughtTypes`, `.tags` | 0.04–0.9 s; up to 2.2 s at the end of a sweep of deletes |
 | `delete` → `get(id)` is a 404 | 30–206 ms: the thought still reads at first, 80 times of 80 |
-| `delete` → the search and the lookup by name stop returning it | 4.5–5.2 s, at that refresh; never for about one in a hundred deleted 9 to 38 ms after a neighbour |
+| `delete` → the search and the lookup by name stop returning it | 4.5–5.2 s, at that refresh |
 | a new name, caption, alias or note → the search finds it by the new text | up to 5 s, at that refresh; by the old text, and under the old name, until then |
 
 **The rule that falls out: after a write, address thoughts by identifier, never
@@ -2219,10 +2204,8 @@ lookup gives, and otherwise reads the thought before it says the tag was not
 on it. Cost: add of a new tag one lookup more (4 requests), add of one that
 is on 2 and no write.
 
-**A tag attached twice**, which only attaches sent at once leave
-(`docs/api-map.md`, under artificial load), is mended by no tool: the lookup
-has neither attachment, add gets the bare 400, and remove says the tag was
-not on the thought. It is taken off in TheBrain.
+A tag attached twice, which only attaches sent at once leave, is taken off
+in TheBrain (`docs/api-map.md`, L46, under artificial load).
 
 `statistics.links` does not count tags — links with `meaning=5` are excluded.
 
@@ -2333,11 +2316,11 @@ measured on a live TheBrain 15, each point with a contract test:
 | Question | Answer |
 |---|---|
 | Which of an entry's two timestamps does the API go by? | `modificationDateTime`: the response is ordered by it, and `startTime` and `endTime` are both compared with it |
-| How far apart are the two? | `modificationDateTime` is never the earlier. Of 11,205 entries 258 were filed a microsecond after their creation and the rest at it, one write at a time as often as in a burst. A type change was up to 10 µs late, a note change up to 56 µs, and five note changes in a working brain 0.8–3.9 ms |
+| How far apart are the two? | `modificationDateTime` is never the earlier. Of 11,205 entries 258 were filed a microsecond after their creation and the rest at it, one write at a time as often as several at once. A type change was up to 10 µs late, a note change up to 56 µs, and five note changes in a working brain 0.8–3.9 ms |
 | Is `endTime` inclusive? | Yes, to the microsecond; `startTime` too |
 | What zone are the timestamps in? | UTC, with no offset, microsecond precision and trailing zeros trimmed: `2026-09-30T13:48:59.61898` |
 | Does the API read an offsetless bound the same way? | Yes, as UTC. An explicit offset is honoured |
-| Can two entries share a timestamp? | Yes, under concurrent writes: 100 creates at once shared one in 57 bursts of 59, with 4 entries repeating another's at the median and 11 at the most. A single request that logs several entries stamps each one apart |
+| Can two entries share a timestamp? | Yes, writes sent at once (row L14, under artificial load). A single request that logs several entries stamps each one apart |
 | Does an entry stay where it was filed? | Not a note's `803` while it is the newest entry TheBrain has logged, in any brain: the next change to that note files it again under the new time, both timestamps, and leaves nothing at the old one. An entry with another above it never moves, nor one that an entry in another brain has followed |
 
 Each page asks for everything up to the oldest `modificationDateTime` of the
@@ -2553,14 +2536,8 @@ until then (`VectorStore`): nothing is created to be looked at.
 >   refresh, 4.5 to 5.2 s after its delete in six runs of 6 to 30 thoughts,
 >   with its own read a 404 from 0.2 s on. The lookup by exact name answers
 >   from the same index, and returned the deleted thought as long.
-> - **Now and then a deleted thought stays there for good.** Six thoughts the
->   contract tests had deleted were still returned 2 to 17 hours after
->   their delete, each with its read a 404. By the log each had been deleted
->   3 to 13 ms after a neighbour of its own. Made on purpose: of 720
->   thoughts deleted 9 to 38 ms after their parent, their type or the
->   thoughts a tag was on, 7 stayed; of 720 deleted 120 to 330 ms after,
->   none, and none of 2,340 deleted with no neighbour just before. A second
->   `DELETE` does not take one out.
+> - **A thought deleted a few milliseconds after a neighbour can stay there
+>   for good** (`docs/api-map.md`, L34, under artificial load).
 > - **Nothing in a hit tells.** The hit for a deleted thought is the one it
 >   was before the delete, to the last field.
 > - **A changed thought is found by what it used to say.** After a rename, a
@@ -2572,9 +2549,7 @@ until then (`VectorStore`): nothing is created to be looked at.
 >
 > So `brain_search` printed the identifier of a thought that was gone, in
 > the row of a thought to use: for five seconds after a delete with no
-> index, now and then for good, and with an index until someone called a
-> sync. Through the tool as it was, a search for the name of a thought
-> deleted the day before answered with its row.
+> index, and with an index until someone called a sync.
 
 A hit is where a model takes an identifier from. The next call with one that
 is gone is a write refused, or worse: a note written to an identifier nobody
@@ -2649,7 +2624,7 @@ description says nothing of it, so `tools/list` is the size it was.
   makes it whole; a loop that asked the index for more and read again would
   hide that it is behind. With no index it would mean reading every
   candidate of every phrasing, 550 at the most, where the hits that are gone
-  are few: five seconds' worth, and the rare one that stayed.
+  are few: five seconds' worth.
 - *Taking the row out of the index when its thought reads 404.* It is the
   answer a sync removes a row for (*A read that fails while the index is
   built*, below). But a search is a read: the index is written by
@@ -2683,12 +2658,11 @@ is answered, 80 times of 80, and one deleted in that moment is listed. Which
 rows a default search leaves out as types and tags still goes by the kind
 the index recorded. And none of this finds what the search does not return:
 a thought made in the last five seconds, which is why a thought is
-addressed by identifier after a write (§7). Two things were not measured:
-whether a restart of TheBrain clears the thoughts that stayed in its index,
-since the app was in use; and whether thoughts deleted together in
-TheBrain's own window, a parent with its children, stay there the same way.
-The API cannot drive that window, and the deletes that did leave one were a
-neighbour's and then the thought's, a few milliseconds apart.
+addressed by identifier after a write (§7). Not measured: whether thoughts
+deleted together in TheBrain's own window, a parent with its children, stay
+in its search as thoughts deleted through the API a few milliseconds after a
+neighbour did (`docs/api-map.md`, L34, under artificial load). The API
+cannot drive that window.
 
 ### A read that fails while the index is built
 
@@ -2808,34 +2782,32 @@ refusal is `EmbedderUnavailableError`, in the result as any error is, after
 the one request `brain_index` makes for the brain. The package stays
 optional, and nothing else asks.
 
-**A note is read on the log's word where the log has one.** The indexer
-took "has a note" from the graph alone, and for a moment the graph is wrong
-both ways. Measured on 15.0.640 (`docs/api-map.md`, L32): after a change to a
-note that is there, one read of the graph within 0.2 s lists no Notes
-attachment, after 44 of 60 `update`s and 27 of 60 `append`s watched every 10
-ms, while the note's own read had the new text at its first read 200 times
-of 200. Under bursts of a hundred creates it was 8 single reads of 150. Read
+**A note is read on the log's word where the log has one.** The indexer took
+"has a note" from the graph alone, and for a moment the graph is wrong both
+ways. Measured on 15.0.640 (`docs/api-map.md`, L32): after a change to a note
+that is there, one read of the graph within 0.2 s lists no Notes attachment,
+after 44 of 60 `update`s and 27 of 60 `append`s watched every 10 ms, while the
+note's own read had the new text at its first read 200 times of 200. Read
 then, a thought with a note was embedded as its name alone: that is the
-contract test that once failed with "expected 'zz-it-note-run-sync' to
-contain 'word0'", and it needs no second session to happen. And for up to
-0.2 s after a note is deleted the graph still lists it, while its read is the
-403: 30 deletions of 30, both at the first read. So the latest note entry
-about a thought in the log the run has read decides (`noteStates()`): written
-or changed, the note is read whatever the graph lists; deleted, it is not
-asked for. With no entry there the graph decides, as before.
+contract test that once failed with "expected 'zz-it-note-run-sync' to contain
+'word0'", and it needs no second session to happen. And for up to 0.2 s after
+a note is deleted the graph still lists it, while its read is the 403: 30
+deletions of 30, both at the first read. So the latest note entry about a
+thought in the log the run has read decides (`noteStates()`): written or
+changed, the note is read whatever the graph lists; deleted, it is not asked
+for. With no entry there the graph decides, as before.
 
-**What the overlap already covered, and what it does not.** A note written
-for the first time reads as no note for up to 0.15 s where the note had been
-read before (8 first reads of 30), and the graph of a thought read before
-lacks the attachment as long (10 of 50). A run that meets that indexes the
-thought without its note. Its watermark is ten seconds before its own start
-and its reads come after its start, so an entry that a read is less than ten
-seconds behind is after the watermark, and the next sync reads it again: a
-unit test pins that. The limit is a read more than ten seconds behind its
-entry in the log. None was measured: the longest lags are 0.2 s for a note,
-0.5 s for a tag and 5.3 s for the first patch after 600 creates (§7). Such a
-change would stay out of the index until the thought changes again or a
-rebuild.
+**What the overlap already covered, and what it does not.** A note written for
+the first time reads as no note for up to 0.15 s where the note had been read
+before (8 first reads of 30), and the graph of a thought read before lacks the
+attachment as long (10 of 50). A run that meets that indexes the thought
+without its note. Its watermark is ten seconds before its own start and its
+reads come after its start, so an entry that a read is less than ten seconds
+behind is after the watermark, and the next sync reads it again: a unit test
+pins that. The limit is a read more than ten seconds behind its entry in the
+log. None was measured: the longest lags are 0.2 s for a note, 0.5 s for a tag
+and 1–3 s for a read after one batch of up to 200 thoughts (§7). Such a change
+would stay out of the index until the thought changes again or a rebuild.
 
 **Left as they are.** A thought that never reads keeps a build unfinished
 and a sync's watermark where it was, and every run says so by name: nothing
@@ -3395,41 +3367,38 @@ its watermark at its own start (2 runs of 2).
 own.** A run notes its start in a file outside the repository, one for each
 brain, and takes it off once it has swept up. Its sweep reads the log from
 that start and deletes every thought created since and still there, whatever
-it is called: a prefix did not find a thought a test renamed to `ZZ-IT-…`, a
-type named with characters that do not show, or the thought of a create
-answered with the 403 of a busy app. A run that finds a start left in the
-file sweeps from it before its first test, because a tag an earlier run left
-is what a create of a tag of that name answers with (row L39), in the state
-it was left in. Before its first test it also deletes the tags and types
+it is called: a prefix did not find a thought a test renamed to `ZZ-IT-…`, or
+a type named with characters that do not show. A run that finds a start left
+in the file sweeps from it before its first test, because a tag an earlier run
+left is what a create of a tag of that name answers with (row L39), in the
+state it was left in. Before its first test it also deletes the tags and types
 whose names are the tests', in the way the API compares a tag's name; and
-after its last it still reads the whole log for thoughts made or named so,
-for debris from before the file or from another machine. Tag names are not
-made unique to a run: a tag or a type is made under a fixed name in some
-sixty places, tests compare those names and the documents that hold them,
-and a brain swept before the run has nothing for a name to meet.
+after its last it still reads the whole log for thoughts made or named so, for
+debris from before the file or from another machine. Tag names are not made
+unique to a run: a tag or a type is made under a fixed name in some sixty
+places, tests compare those names and the documents that hold them, and a
+brain swept before the run has nothing for a name to meet.
 
 **The start is past the brain's newest entry, and the sweep keeps a second
 between neighbours.** The start used to be a minute before the run's first
-request, and a brain made in that minute lost its home thought to the
-sweep: two did, on 2026-10-14, and with no thought left a brain's
-`statistics` is the catch-all 403. A run now reads the newest entry the
-brain logged before it writes anything and starts at the next millisecond,
-and no sweep deletes the home thought. The sweep went one thought after
-another, a parent a few milliseconds before its children, which is what
-leaves a thought in TheBrain's search for good (§8, *A hit for a thought
-that is gone*). It deletes in rounds now, no two thoughts that share a link
-by the log in one round, a second after the round before: four or five
-rounds, four or five seconds a run. `test/sweep.ts` holds the rules and
-`test/sweep.test.ts` holds them to it.
+request, and a brain made in that minute lost its home thought to the sweep:
+two did, on 2026-10-14, and with no thought left a brain's `statistics` is the
+catch-all 403. A run now reads the newest entry the brain logged before it
+writes anything and starts at the next millisecond, and no sweep deletes the
+home thought. The sweep went one thought after another, a parent a few
+milliseconds before its children, which is what leaves a thought in TheBrain's
+search for good (`docs/api-map.md`, L34, under artificial load). It deletes in
+rounds now, no two thoughts that share a link by the log in one round, a
+second after the round before: four or five rounds, four or five seconds a
+run. `test/sweep.ts` holds the rules and `test/sweep.test.ts` holds them to
+it.
 
-**A burst is not a promise of 100 answers.** Now and then one create of a
-burst is answered with the catch-all 403, and its thought is made all the
-same (4 of 4: the log had a `101` for every request; docs/api-map.md, L45).
-A test that needs a burst counts such an answer and says it aloud
-(`makeInBurst()`); it fails for what it is about. It is not made to fail on
-the 403 itself: that is the app's, under a load the server is not designed
-for, and a test of the log that went red on it would go red about one run in
-forty for nothing the test checks.
+**Load is opt-in.** Tests of bursts of writes sent at once, which the server
+is not designed for, run only with `THEBRAIN_LOAD_TESTS=1`, in the
+`describe.runIf(LOAD_TESTS)` block of `test/resources.integration.test.ts`.
+They measure TheBrain, not this server, and what they found is in
+`docs/api-map.md`, under artificial load. Every other contract test has 20 s
+(`DEFAULT_TEST_MS`), and a read-back is polled for 5 s (`eventually()`).
 
 Two testing habits worth stating, because both caught real bugs:
 
