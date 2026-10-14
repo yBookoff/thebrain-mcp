@@ -3206,6 +3206,152 @@ describe("attachments", () => {
     });
     expect(calls.map((c) => c.method)).toEqual(["POST"]);
   });
+
+  /**
+   * TheBrain as measured (L17): an attach is stored as it was sent, and
+   * `by-location` finds it at once in that spelling, scheme and trailing
+   * slashes aside, and in no other. The thought's own list is a copy that has
+   * none of it yet. `post` may answer otherwise.
+   */
+  const listBehind = (post: (url: URL) => unknown = () => 200) => {
+    const stored: AttachmentDto[] = [];
+    const bare = (location: string): string =>
+      location.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+    const routes: Array<[string, Route]> = [
+      [
+        "/by-location",
+        (url) =>
+          stored.filter((a) => bare(a.location!) === bare(url.searchParams.get("location")!)),
+      ],
+      ["/api/thoughts/", () => []],
+      [
+        "POST /api/attachments",
+        (url) => {
+          const answer = post(url);
+          if (answer === 200 || answer === "lost") {
+            const location = url.searchParams.get("url")!;
+            const sourceId = url.pathname.split("/").at(-2)!;
+            stored.push(attached(location, { id: `att-${stored.length + 1}`, sourceId }));
+          }
+          if (answer === "lost") throw new TypeError("fetch failed");
+          return answer;
+        },
+      ],
+    ];
+    const { api, calls, fetchImpl } = apiWith(routes);
+    const asked = (): string[] =>
+      calls
+        .filter((c) => c.method === "GET")
+        .map((c) => c.url.searchParams.get("location") ?? "the list");
+    return { api, calls, fetchImpl, stored, asked };
+  };
+  const UPPER = "https://Example.com/p";
+  const LOWER = "https://example.com/p";
+
+  it("the address attached a moment ago in another host case is found though the list is behind", async () => {
+    const { api, stored, asked, fetchImpl } = listBehind();
+    expect((await api.attachments.attachUrl(BRAIN, THOUGHT, UPPER)).created).toBe(true);
+
+    const again = await api.attachments.attachUrl(BRAIN, THOUGHT, LOWER);
+    expect(again.created).toBe(false);
+    expect(again.existing?.location).toBe(UPPER);
+    expect(stored).toHaveLength(1);
+    // Asked for in the spelling it was sent in, and the list was not needed.
+    expect(asked()).toEqual([UPPER, "the list", LOWER, UPPER]);
+
+    // Not guarded: another process does not know what this one attached.
+    const elsewhere = new TheBrainApi({ apiKey: "k", fetchImpl: fetchImpl as typeof fetch });
+    expect((await elsewhere.attachments.attachUrl(BRAIN, THOUGHT, LOWER)).created).toBe(true);
+    expect(stored).toHaveLength(2);
+  });
+
+  it("only the spellings of the same address, attached to the same thought, are asked for", async () => {
+    const { api, asked } = listBehind();
+    await api.attachments.attachUrl(BRAIN, THOUGHT, UPPER);
+    await api.attachments.attachUrl(BRAIN, THOUGHT, "https://Example.com/P");
+    await api.attachments.attachUrl(BRAIN, TYPE, LOWER);
+    expect(asked()).toEqual([
+      UPPER,
+      "the list",
+      "https://Example.com/P",
+      "the list",
+      LOWER,
+      "the list",
+    ]);
+  });
+
+  it("an address attached a moment ago and since deleted is attached again", async () => {
+    const { api, stored, asked } = listBehind();
+    await api.attachments.attachUrl(BRAIN, THOUGHT, UPPER);
+    stored.length = 0;
+    expect((await api.attachments.attachUrl(BRAIN, THOUGHT, LOWER)).created).toBe(true);
+    expect(asked()).toEqual([UPPER, "the list", LOWER, UPPER, "the list"]);
+  });
+
+  it("an attach that got no answer is kept, and one that was refused is not", async () => {
+    let answer: unknown = "lost";
+    const { api, stored, asked } = listBehind(() => answer);
+    await expect(api.attachments.attachUrl(BRAIN, THOUGHT, UPPER)).rejects.toMatchObject({
+      kind: "network",
+    });
+    // It had landed, and is found by the spelling it was sent in.
+    expect((await api.attachments.attachUrl(BRAIN, THOUGHT, LOWER)).existing?.location).toBe(
+      UPPER,
+    );
+    expect(stored).toHaveLength(1);
+
+    answer = 400;
+    const refused = "https://Example.com/refused";
+    await expect(api.attachments.attachUrl(BRAIN, THOUGHT, refused)).rejects.toMatchObject({
+      kind: "bad_request",
+    });
+    const before = asked().length;
+    answer = 200;
+    await api.attachments.attachUrl(BRAIN, THOUGHT, refused.toLowerCase());
+    expect(asked().slice(before)).toEqual([refused.toLowerCase(), "the list"]);
+  });
+
+  it("calls for one address on one thought sent at once go one after the other", async () => {
+    for (const [first, second] of [
+      [UPPER, LOWER],
+      [LOWER, LOWER],
+    ]) {
+      const { api, stored } = listBehind();
+      const both = await Promise.all([
+        api.attachments.attachUrl(BRAIN, THOUGHT, first!),
+        api.attachments.attachUrl(BRAIN, THOUGHT, second!),
+      ]);
+      expect(both.map((r) => r.created)).toEqual([true, false]);
+      expect(both[1]?.existing?.location).toBe(first);
+      expect(stored).toHaveLength(1);
+    }
+  });
+
+  it("calls for other addresses, or other thoughts, are not held up, nor by one that failed", async () => {
+    const { api, calls } = listBehind((url) =>
+      url.searchParams.get("url")!.endsWith("/fails") ? 400 : 200,
+    );
+    await Promise.all([
+      api.attachments.attachUrl(BRAIN, THOUGHT, UPPER),
+      api.attachments.attachUrl(BRAIN, THOUGHT, "https://example.com/q"),
+      api.attachments.attachUrl(BRAIN, TYPE, LOWER),
+    ]);
+    // Each looked before any attached.
+    expect(calls.slice(0, 3).map((c) => c.url.searchParams.get("location"))).toEqual([
+      UPPER,
+      "https://example.com/q",
+      LOWER,
+    ]);
+
+    const failing = "https://example.com/fails";
+    const [failed, next] = await Promise.allSettled([
+      api.attachments.attachUrl(BRAIN, THOUGHT, failing),
+      api.attachments.attachUrl(BRAIN, THOUGHT, failing),
+    ]);
+    expect(failed.status).toBe("rejected");
+    expect(next.status).toBe("rejected");
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(5);
+  });
 });
 
 describe("urlKey", () => {

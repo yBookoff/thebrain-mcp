@@ -1731,6 +1731,65 @@ describe("brain_create_thought", () => {
   });
 });
 
+describe("brain_attach_url", () => {
+  /**
+   * An attach stored as it was sent and found by `by-location` in that
+   * spelling alone, scheme and trailing slashes aside, with the thought's own
+   * list a copy that has none of it yet (L17).
+   */
+  const listBehind = (): Route[] => {
+    const stored: Array<Record<string, unknown>> = [];
+    const bare = (location: string): string =>
+      location.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+    return [
+      [
+        "GET /by-location",
+        (url) =>
+          stored.filter(
+            (a) => bare(String(a["location"])) === bare(url.searchParams.get("location")!),
+          ),
+      ],
+      ["GET /attachments", () => []],
+      [
+        "POST /api/attachments/",
+        (url) => {
+          stored.push({
+            id: `att-${stored.length + 1}`,
+            sourceId: THOUGHT,
+            type: 3,
+            name: "Example page",
+            location: url.searchParams.get("url"),
+          });
+          return 200;
+        },
+      ],
+    ];
+  };
+
+  it("finds the address it attached straight before in another host case, and says how it is stored", async () => {
+    const { call, calls } = await connect(listBehind());
+    const attach = (url: string) =>
+      call("brain_attach_url", { brainId: BRAIN, thoughtId: THOUGHT, url });
+
+    expect((await attach("https://Example.com/p")).text).toBe(
+      "## Done\nlink attached: https://Example.com/p",
+    );
+    const again = await attach("https://example.com/p");
+    expect(again).toEqual({
+      isError: false,
+      text:
+        "## Already there\n" +
+        'this URL is already attached as "Example page" (stored as https://Example.com/p) ' +
+        "— nothing changed",
+    });
+    // In the spelling it is stored in, it is only already there.
+    expect((await attach("https://Example.com/p")).text).toBe(
+      '## Already there\nthis URL is already attached as "Example page" — nothing changed',
+    );
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
+  });
+});
+
 describe("brain_ingest", () => {
   const routes = brainRoutes({ aliases: true });
 

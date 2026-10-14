@@ -727,3 +727,58 @@ describe("what a process wrote a moment ago, set against a graph", () => {
     }
   });
 });
+
+describe("the URLs a process attached a moment ago", () => {
+  const OTHER_BRAIN = "aaaaaaaa-0000-4000-8000-00000000000f";
+  const ROOT = "bbbbbbbb-0000-4000-8000-000000000002";
+  const ELSE = "dddddddd-0000-4000-8000-000000000004";
+
+  it("are kept for their thought, as they were sent, and for no other", () => {
+    const written = new RecentWrites();
+    written.attached(BRAIN, ROOT, "https://Example.com/p");
+    written.attached(BRAIN, ROOT.toUpperCase(), "https://example.com/q/");
+    written.attached(OTHER_BRAIN, ROOT, "https://example.com/r");
+
+    expect(written.attachedTo(BRAIN.toUpperCase(), ROOT)).toEqual([
+      "https://Example.com/p",
+      "https://example.com/q/",
+    ]);
+    expect(written.attachedTo(BRAIN, ELSE)).toEqual([]);
+    expect(written.attachedTo(OTHER_BRAIN, ROOT)).toEqual(["https://example.com/r"]);
+    // None of it is anything a graph has to show.
+    expect(
+      written.notShownBy(BRAIN, ROOT, { children: [], parents: [], jumps: [] }),
+    ).toEqual([]);
+  });
+
+  it("are forgotten with their thought", () => {
+    const written = new RecentWrites();
+    written.attached(BRAIN, ROOT, "https://Example.com/p");
+    written.attached(BRAIN, ELSE, "https://Example.com/p");
+    written.forget(BRAIN, ROOT.toUpperCase());
+    expect(written.attachedTo(BRAIN, ROOT)).toEqual([]);
+    expect(written.attachedTo(BRAIN, ELSE)).toEqual(["https://Example.com/p"]);
+  });
+
+  it("are kept for ten seconds and no longer, and go as the next write is kept", () => {
+    vi.useFakeTimers();
+    try {
+      const written = new RecentWrites();
+      written.attached(BRAIN, ROOT, "https://Example.com/p");
+      vi.advanceTimersByTime(WRITTEN_KEPT_MS);
+      expect(written.attachedTo(BRAIN, ROOT)).toEqual(["https://Example.com/p"]);
+      vi.advanceTimersByTime(1);
+      expect(written.attachedTo(BRAIN, ROOT)).toEqual([]);
+
+      // A URL a second for a minute, and none asked for in all that time.
+      for (let n = 0; n < 60; n += 1) {
+        written.attached(BRAIN, ELSE, `https://example.com/${n}`);
+        vi.advanceTimersByTime(1000);
+      }
+      expect(written.size).toBeLessThanOrEqual(11);
+      expect(written.size).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

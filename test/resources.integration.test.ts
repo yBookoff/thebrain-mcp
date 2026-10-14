@@ -3555,19 +3555,24 @@ suite("resource layer against the live API", () => {
     it("attachUrl finds the copy under another host case, and tells paths apart", async () => {
       const id = await make("attach-dedupe");
       const stored = `https://Example.com/${PREFIX}dedupe-${Date.now()}/Page`;
-      const add = (url: string) =>
-        api.attachments.attachUrl(brainId, id, url, { name: `${PREFIX}link` });
+      const add = (url: string, through = api) =>
+        through.attachments.attachUrl(brainId, id, url, { name: `${PREFIX}link` });
 
       expect((await add(stored)).created).toBe(true);
       // The same spelling straight away: by-location has it already.
       expect((await add(stored)).created).toBe(false);
 
-      // Another spelling of the host is found in the thought's list.
+      // Another spelling of the host is found in the thought's list, by a
+      // process that did not attach it and so has only the list to go by.
+      const elsewhere = new TheBrainApi({ apiKey: apiKey! });
       await eventually(
         () => locations(id),
         (all) => all.includes(stored),
       );
-      const again = await add(stored.replace("https://Example.com", "http://example.com") + "/");
+      const again = await add(
+        stored.replace("https://Example.com", "http://example.com") + "/",
+        elsewhere,
+      );
       expect(again.created).toBe(false);
       expect(again.existing?.location).toBe(stored);
 
@@ -3577,6 +3582,46 @@ suite("resource layer against the live API", () => {
         (list) => list.length >= 2,
       );
       expect(all).toHaveLength(2);
+    });
+
+    it("attachUrl finds the address it attached straight before in another host case, though the list is behind", async () => {
+      // Measured through brain_attach_url before this was guarded, a fresh
+      // thought each time: the second spelling, sent straight after the
+      // first, was attached again 18 times in 20, and sent at once with it 3
+      // times of 3. The first attach reads the list before it writes, and
+      // the copy made by that read is what the second one met.
+      const add = (id: string, url: string) =>
+        api.attachments.attachUrl(brainId, id, url, { name: `${PREFIX}link` });
+      const spelled = (i: string) => {
+        const stored = `https://Example.com/${PREFIX}again-${Date.now()}-${i}/p`;
+        return { stored, lower: stored.replace("Example.com", "example.com") };
+      };
+
+      for (const i of ["0", "1", "2"]) {
+        const id = await make(`attach-again-${i}`);
+        const { stored, lower } = spelled(i);
+        expect((await add(id, stored)).created).toBe(true);
+        const again = await add(id, lower);
+        expect(again.created, i).toBe(false);
+        expect(again.existing?.location, i).toBe(stored);
+        expect(await api.attachments.byLocation(brainId, lower), i).toEqual([]);
+      }
+
+      const id = await make("attach-at-once");
+      const { stored, lower } = spelled("at-once");
+      const both = await Promise.all([add(id, stored), add(id, lower)]);
+      expect(both.map((r) => r.created)).toEqual([true, false]);
+      expect(await api.attachments.byLocation(brainId, lower)).toEqual([]);
+
+      // Deleted, it is not held against the address: by-location, asked for
+      // the spelling this process keeps, no longer finds it (3 of 3 at the
+      // first read). The list is a copy, so it is waited for.
+      await api.attachments.delete(brainId, both[1]!.existing!.id);
+      await eventually(
+        () => locations(id),
+        (all) => all.length === 0,
+      );
+      expect((await add(id, lower)).created).toBe(true);
     });
   });
 

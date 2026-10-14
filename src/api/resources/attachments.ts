@@ -1,7 +1,13 @@
-import { assertUuid, type TheBrainClient } from "../client.js";
+import { assertUuid, mayHaveLanded, type TheBrainClient } from "../client.js";
 import { AttachmentType, type AttachmentDto } from "../types.js";
 
 export class AttachmentsResource {
+  /**
+   * The `attachUrl` calls with a check under way, by thought and address
+   * (`urlKey`): a second one waits for the first.
+   */
+  readonly #underWay = new Map<string, Promise<unknown>>();
+
   constructor(private readonly client: TheBrainClient) {}
 
   async metadata(brainId: string, attachmentId: string): Promise<AttachmentDto> {
@@ -56,21 +62,34 @@ export class AttachmentsResource {
    * returns the existing attachment instead of creating a duplicate. The API
    * itself attaches a second copy without complaint.
    *
-   * The check reads twice, because neither read is enough alone. `byLocation`
-   * finds an attachment the moment it is created, but takes `Example.com` and
-   * `example.com` for two addresses. The thought's own list can be compared
-   * with the host case set aside (`urlKey`), but it is a copy: made when a
-   * thought's attachments are first read, so that read is live, and brought
-   * up to date about every 0.1 s after that. Behind, it lacked a new
-   * attachment for 7 to 214 ms (contract test; docs/api-map.md, L17).
-   * Lower-casing the host before the lookup would not do instead: the copy
-   * already stored may be the one in capitals.
+   * No one read is enough. `byLocation` finds an attachment the moment it is
+   * created, but takes `Example.com` and `example.com` for two addresses. The
+   * thought's own list can be compared with the host case set aside
+   * (`urlKey`), but it is a copy: made when a thought's attachments are first
+   * read, so that read is live, and brought up to date about every 0.1 s
+   * after that. Behind, it lacked a new attachment for 7 to 214 ms (contract
+   * test; docs/api-map.md, L17). Lower-casing the host before the lookup
+   * would not do instead: the copy already stored may be the one in capitals.
    *
-   * Nothing here waits for that copy, so no figure is relied on. Not guarded
-   * for the same reason: the same address in another host case, attached
-   * straight after the first, is found by neither read and attached a second
-   * time (17 of 20; 1 of 10 at 0.3 s). A repeat in the same spelling is
-   * caught at once.
+   * So the address that was attached straight before, in another host case,
+   * was found by neither, and attached a second time: through
+   * `brain_attach_url`, 18 times in 20 back to back. Nothing waits for the
+   * copy. What this process attached in the last ten seconds is kept
+   * (`client.written`), as it was sent and so as it is stored, and
+   * `byLocation` is asked for each such spelling of the address as well,
+   * before the list. That read is live: an attachment deleted since is not
+   * found (6 of 6 at the first read). It costs no request unless this process
+   * attached the address to this thought in another spelling in those ten
+   * seconds, and then one, which finds it.
+   *
+   * Two calls for one address on one thought go one after the other. Sent at
+   * once, each looked before either attached, and both attached, in one
+   * spelling as in two (3 of 3 each).
+   *
+   * Not guarded: the same address in another host case attached by another
+   * process, or in the app, within the moment the list is behind; two
+   * processes attaching one address at once; and an attachment deleted in
+   * the last 0.1 s, which the list may still show (2 of 3, up to 75 ms).
    */
   async attachUrl(
     brainId: string,
@@ -81,23 +100,62 @@ export class AttachmentsResource {
     assertUuid(brainId, "brainId");
     assertUuid(thoughtId, "thoughtId");
 
-    if (options.deduplicate !== false) {
-      const sameSpelling = await this.byLocation(brainId, url);
-      const existing =
-        sameSpelling.find((a) => a.sourceId === thoughtId) ??
-        (await this.ofThought(brainId, thoughtId)).find(
-          (a) =>
-            a.type === AttachmentType.ExternalUrl &&
-            a.location !== null &&
-            urlKey(a.location) === urlKey(url),
-        );
-      if (existing) return { created: false, existing };
+    if (options.deduplicate === false) {
+      await this.#post(brainId, thoughtId, url, options.name);
+      return { created: true };
     }
 
-    await this.client.post(`/api/attachments/${brainId}/${thoughtId}/url`, {
-      query: { url, name: options.name },
-    });
-    return { created: true };
+    const slot = `${brainId.toLowerCase()} ${thoughtId.toLowerCase()} ${urlKey(url)}`;
+    const mine = (this.#underWay.get(slot) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(async () => {
+        const existing = await this.#alreadyThere(brainId, thoughtId, url);
+        if (existing) return { created: false, existing };
+        await this.#post(brainId, thoughtId, url, options.name);
+        return { created: true };
+      });
+    this.#underWay.set(slot, mine);
+    try {
+      return await mine;
+    } finally {
+      if (this.#underWay.get(slot) === mine) this.#underWay.delete(slot);
+    }
+  }
+
+  /** The attachment of `thoughtId` that is `url` in any spelling, if one is found. */
+  async #alreadyThere(
+    brainId: string,
+    thoughtId: string,
+    url: string,
+  ): Promise<AttachmentDto | undefined> {
+    const key = urlKey(url);
+    const spellings = new Set([
+      url,
+      ...this.client.written.attachedTo(brainId, thoughtId).filter((s) => urlKey(s) === key),
+    ]);
+    for (const spelling of spellings) {
+      const found = (await this.byLocation(brainId, spelling)).find(
+        (a) => a.sourceId === thoughtId,
+      );
+      if (found) return found;
+    }
+    return (await this.ofThought(brainId, thoughtId)).find(
+      (a) =>
+        a.type === AttachmentType.ExternalUrl && a.location !== null && urlKey(a.location) === key,
+    );
+  }
+
+  /** Sends the attach, and keeps the URL for `#alreadyThere` when it may have landed. */
+  async #post(brainId: string, thoughtId: string, url: string, name?: string): Promise<void> {
+    try {
+      await this.client.post(`/api/attachments/${brainId}/${thoughtId}/url`, {
+        query: { url, name },
+      });
+    } catch (error) {
+      if (mayHaveLanded(error)) this.client.written.attached(brainId, thoughtId, url);
+      throw error;
+    }
+    this.client.written.attached(brainId, thoughtId, url);
   }
 
   async delete(brainId: string, attachmentId: string): Promise<void> {

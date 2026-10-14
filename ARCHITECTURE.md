@@ -100,7 +100,9 @@ reached TheBrain, so it is reported rather than retried elsewhere. An explicit
 write came back, and `client.written` (`RecentWrites`) is what its answered
 creates, links and renames put into the graphs, kept for ten seconds. Both
 are for a reader of a graph, which is answered from a copy that is behind a
-write by no fixed time (§4, *What a second run finds*). A new write whose
+write by no fixed time (§4, *What a second run finds*). It keeps the URLs
+this process attached as well, as sent, for the list of a thought's
+attachments, which is a copy of the same kind (§7, item 13). A new write whose
 mark on a graph has been measured records it there, in the resource that
 sends it; one that takes a thought or a link away drops what was kept of it.
 
@@ -1926,6 +1928,12 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
 13. **`by-location` tells `Example.com` from `example.com`**, and a URL is
     stored as it was given, so the lookup alone cannot deduplicate links.
     `attachUrl` also compares the thought's own attachments, host case aside.
+    That list is a copy, and the other spelling attached straight after was
+    attached twice, 18 times in 20. So `attachUrl` also asks `by-location`,
+    which is live, for each spelling of the address this process attached
+    to the thought in the last ten seconds (`client.written`), and takes
+    the calls for one address on one thought one at a time: then 0 of 20.
+    Another process, or the app, is still not seen while the list is behind.
 14. **`null` clears nothing through `replace`.** A label and a colour are
     cleared with `remove`. A type is not cleared by any patch: `replace /typeId`
     with null answers 200 and leaves the type where it was, so
@@ -2189,6 +2197,7 @@ Measured against a live API by polling until the result appeared:
 | `create` next to a thought → that thought's `graph` lists it | 10–205 ms, about 80 ms at the median: a copy refreshed about every 0.1 s. First seen past 300 ms 7 times in 1,800 while the app was slow to answer, 364 ms at the latest: there is no bound. Live on its first read |
 | `attach URL` → `by-location` | instant |
 | `attach URL` → the thought's attachment list | up to 0.2 s: a copy refreshed about every 0.1 s. Live on its first read |
+| delete a URL attachment → `by-location` | instant, 6 of 6; a list read before still had it at the first read 2 of 3, up to 75 ms |
 | **`create` → `findByName`** | **~5.6 s** |
 | `create` → full-text search | 3.7–5.5 s, at the next refresh of the search's index (13 runs). The vendor's documentation says up to 15 s, which was not once seen |
 | a thought, a link, a note or a URL made or deleted → `statistics` | at the first read, every time measured |

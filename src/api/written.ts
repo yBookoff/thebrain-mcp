@@ -1,5 +1,6 @@
 /**
- * What this process wrote a moment ago that a thought's graph has to show.
+ * What this process wrote a moment ago that a thought's graph, or its list of
+ * attachments, has to show.
  *
  * A graph is answered from a copy, and the copy is behind a write by a time
  * nothing bounds. It had the new thought within 0.2 s as a rule; while the
@@ -22,6 +23,15 @@
  *
  * It knows this process's writes alone, and the answered ones: a create that
  * got no answer has no identifier to look for.
+ *
+ * The URLs this process attached are kept as well, as they were sent, and so
+ * as TheBrain stores them (L17). A thought's list of attachments is a copy
+ * of the same kind, and `by-location`, which is not, tells `Example.com` from
+ * `example.com`: the same address in another host case, attached straight
+ * after, was attached a second time 18 times in 20. `attachedTo()` gives
+ * `attachments.attachUrl()` the spellings to ask `by-location` for. That read
+ * is live, so a URL kept here that is no longer attached is not taken for
+ * one that is.
  */
 
 import { Relation } from "./types.js";
@@ -62,7 +72,8 @@ export type WrittenFact =
  * How long a write is kept. The copy of a graph has to be this far behind for
  * a write to go unseen again: some twenty-five times the longest lag measured
  * for a graph, 364 ms, and about twice the 5.3 s that a write queued behind a
- * burst of 600 creates took to read back.
+ * burst of 600 creates took to read back. A list of attachments was behind
+ * by 214 ms at the most.
  *
  * It is also how long a write made here can be contradicted from outside. A
  * thought this process linked somewhere and a person then unlinked in the app
@@ -86,8 +97,17 @@ const SEEN_FROM_THE_OTHER_END: Readonly<Record<Relation, Relation>> = {
 /** Case aside: the API reads a UUID in capitals too. */
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 
+/** A URL this process attached to a thought, as it was sent. */
+interface AttachedUrl {
+  brainId: string;
+  thoughtId: string;
+  location: string;
+  at: number;
+}
+
 export class RecentWrites {
   #facts: WrittenFact[] = [];
+  #urls: AttachedUrl[] = [];
 
   /**
    * `thoughtId` was made `relation` to `sourceId`: created next to it, or
@@ -140,6 +160,29 @@ export class RecentWrites {
         same(f.brainId, brainId) &&
         (same(f.thoughtId, thoughtId) || (f.of === "listed" && same(f.anchorId, thoughtId))),
     );
+    this.#urls = this.#urls.filter(
+      (u) => !(same(u.brainId, brainId) && same(u.thoughtId, thoughtId)),
+    );
+  }
+
+  /**
+   * `location` was attached to `thoughtId`, or was sent to be and got no
+   * answer: as it was sent, which is how TheBrain stores it.
+   */
+  attached(brainId: string, thoughtId: string, location: string): void {
+    const at = Date.now();
+    this.#drop((f) => this.#old(f, at));
+    this.#urls = this.#urls.filter((u) => !this.#old(u, at));
+    this.#urls.push({ brainId, thoughtId, location, at });
+  }
+
+  /** The URLs this process attached to `thoughtId` in the time a write is kept. */
+  attachedTo(brainId: string, thoughtId: string): string[] {
+    const now = Date.now();
+    this.#urls = this.#urls.filter((u) => !this.#old(u, now));
+    return this.#urls
+      .filter((u) => same(u.brainId, brainId) && same(u.thoughtId, thoughtId))
+      .map((u) => u.location);
   }
 
   /**
@@ -175,13 +218,13 @@ export class RecentWrites {
    * Past its time. Dropped as each write is kept as well as on a look: a
    * process that writes for hours and never looks would keep them all.
    */
-  #old(fact: WrittenFact, now: number): boolean {
-    return now - fact.at > WRITTEN_KEPT_MS;
+  #old(write: { at: number }, now: number): boolean {
+    return now - write.at > WRITTEN_KEPT_MS;
   }
 
   /** How many writes are kept: for a test of what is not. */
   get size(): number {
-    return this.#facts.length;
+    return this.#facts.length + this.#urls.length;
   }
 
   #drop(which: (fact: WrittenFact) => boolean): void {

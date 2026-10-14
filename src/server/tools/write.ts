@@ -994,12 +994,15 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       const result = await ctx.api.attachments.attachUrl(bid, thoughtId, url, {
         ...(name !== undefined ? { name } : {}),
       });
+      // Found under another spelling, the one stored is what the thought shows.
+      const stored = result.existing?.location;
+      const as = stored != null && stored !== url ? ` (stored as ${stored})` : "";
       return ok(
         result.created
           ? section("Done", `link attached: ${url}`)!
           : section(
               "Already there",
-              `this URL is already attached as "${result.existing?.name ?? "unnamed"}" — nothing changed`,
+              `this URL is already attached as "${result.existing?.name ?? "unnamed"}"${as} — nothing changed`,
             )!,
       );
     }),
