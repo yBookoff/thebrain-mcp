@@ -79,8 +79,8 @@ below the server layer may import from it.
 Tool descriptions are how the model decides what to call, so they are part of the
 interface, not documentation. Write them to say **when** to reach for the tool,
 not only what it does. Keep them tight — the nineteen descriptions together run
-about 1240 tokens, and the whole `tools/list` payload with schemas about 5080:
-4,958 and 20,318 characters, with a token at four. That budget is spent on
+about 1230 tokens, and the whole `tools/list` payload with schemas about 5040:
+4,910 and 20,151 characters, with a token at four. That budget is spent on
 every request.
 
 The same applies to a skill's frontmatter `description`: it drives routing.
