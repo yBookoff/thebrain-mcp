@@ -164,9 +164,12 @@ silent wrong behaviour rather than a loud failure:
   an *answer* it is `zero_id` (`createdId()`).
 - **Two thoughts share one link only when the posts come one after another.**
   Two `POST /api/links` at once for a pair with none were two links 51 times
-  in 60; from then on `between()` is a 404 where both go the same way, and a
-  further post a 400. `ingest()` sends one link a pair and one attach for a
-  tag on a thought: never write to one pair twice at once.
+  in 60; from then on `between()` is a 404 where both go the same way, and
+  any further post is the bare 400 `Link could not be created.`, of any kind,
+  from either end, a tag attached twice included. `describeError()` explains
+  it, and only `brain_unlink` mends the pair. `ingest()` sends one link a pair
+  and one attach for a tag on a thought: never write to one pair twice at
+  once.
 - **Asking for what is there is not free, and `between()` is how to look.** A
   link posted over the pair's own, a tag attached again included, is a 200
   with the same identifier and a `402` in the log; `PATCH /name` with the name
@@ -177,7 +180,9 @@ silent wrong behaviour rather than a loud failure:
   parent's link is stored as a child's from the other end, so `thoughtIdA` is
   the upper end, the tag or the type. Never compare a stored `relation` with
   the one asked for: use `linkFound()`. Nothing is posted over a link that is
-  there, since it would replace it. A label goes onto an ordinary link
+  there, since it would replace it, except by `brain_link` with `replace`, and
+  then over an ordinary link only (`isTagLink()`, `isTypeLink()` say which are
+  not). A label goes onto an ordinary link
   whatever its relation, never onto a tag's attachment or a type's link.
 - **Nothing is written as a sibling.** The spec's `relation: 4` is a 400 for a
   link, a 200 and a thought linked to nothing for a create, and a 200 that
@@ -186,7 +191,17 @@ silent wrong behaviour rather than a loud failure:
   `Relation` has no fourth, and `thoughts.create()` and `planLevels()` refuse
   any other relation before the first write. `links.update()` takes no
   relation either: a patch with 2 swaps the ends on every send. Change what a
-  link is through `links.create()`, which rewrites the link two thoughts share.
+  link is through `links.create()`, which rewrites the link two thoughts share
+  and keeps its identifier, label, colour, thickness and direction (L43).
+- **A link removed is a deletion; a link's kind changed is not.**
+  `brain_unlink` is behind `THEBRAIN_ALLOW_DESTRUCTIVE=1` and
+  `confirmDestructive()`, as `brain_delete_thought` is, and refuses a tag's
+  attachment and a type's link; `brain_link` with `replace` asks no one, since
+  the same call with the old relation puts the link back. A pair's links are
+  `linksOfPair()`'s: both graphs and `between()` from both ends. The one link
+  both lookups give is the only one, whatever a graph behind a deletion lists;
+  two 404s beside one listed link tell nothing. A `DELETE` of a link that is
+  gone is a 400, not a thought's 200.
 - **A note keeps a code block that is closed; a ` ``` ` line with no partner
   is deleted.** Of the lines that begin with three backticks, whatever
   follows them, the last goes when their number is odd, whole, and a pair
@@ -298,6 +313,13 @@ silent wrong behaviour rather than a loud failure:
   encoding it. A write
   result marks a thought where the kind is already in what the tool read; the
   ends of a link are not marked.
+- **A read result prints a label only where it is not the name.** Every type
+  has its name for a label (L38), so `labelOf()` and `labelMark()` in
+  `src/server/respond.ts` drop one equal to the name, and a thought with no
+  other reads as it did, to the character. Under a type whose label is not
+  its name, `TYPE_LABEL` says it may be a name the type had and that
+  `label: null` clears it. It costs no request: the label is on every thought
+  in a graph's lists and in `/types` and `/tags`.
 - **The search refuses a long query without a word about length.** Past 8,192
   bytes of request line it is a 414 with no body, which 1,346 Cyrillic letters
   reach, and for 513 to 1,024 words it is the catch-all 403.
@@ -354,9 +376,10 @@ silent wrong behaviour rather than a loud failure:
   is about five seconds behind.** Until its next refresh `search/{brainId}`
   and `?nameExact=` return a thought that was deleted, the hit the same to the
   last field, and a changed one by its old text under its old name. A thought
-  deleted some tens of milliseconds after a neighbour stayed there for good
-  about once in a hundred. `SemanticSearch.find()` reads every hit's thought
-  before it returns: a 404 goes to `gone`, any other failure to `unverified`.
+  deleted within some tens of milliseconds of a neighbour (up to 215 ms with
+  the app busy) stayed there for good about once in a hundred.
+  `SemanticSearch.find()` reads every hit's thought before it returns: a 404
+  goes to `gone`, any other failure to `unverified`.
   Anything new that takes an identifier from a search or from `findByName`
   needs that read.
 
@@ -431,6 +454,12 @@ Write tests demand an explicit throwaway brain and refuse any brain over 500
 thoughts. Suites skip cleanly when the variables are absent. They search no
 other brain. A run sweeps what it made by identifier from the log, and the
 next run sweeps for one that died (a per-brain file in the OS temp directory).
+The sweep starts past the newest entry the brain logged before the run's first
+write, never deletes the home thought, and deletes in rounds a second apart
+with no two thoughts that share a link in one round (`test/sweep.ts`). A test
+that a read is behind a write writes until one first read is behind, forty
+tries at most; never "stale > 0 of N". A read-back is polled, not given a few
+fixed seconds: under writes to another brain it lagged up to 30 s.
 
 When a claim about the API goes into a document, it should have a test behind it.
 Two documented claims in this project's history turned out to be wrong precisely
