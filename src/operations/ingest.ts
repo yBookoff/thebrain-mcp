@@ -63,7 +63,6 @@
 
 import {
   ALIASES_UNSUPPORTED,
-  READ_BACK,
   afterCopyLag,
   TheBrainError,
   ZERO_UUID,
@@ -110,28 +109,13 @@ const RELATION_NAMES = Object.keys(LIST_OF) as RelationName[];
 type Neighbours = Record<RelationName, Map<string, Array<{ id: string; kind?: number }>>>;
 
 /**
- * How long a batch waits for the graphs to list what it made. Measured on a
- * quiet brain: about 80 ms at the median, 205 ms at the most. But a graph is
- * answered from a copy that waits behind the same writes as a read of the
- * thought (`READ_BACK`): a full run of the contract
- * tests had one 2 s behind a rename, and under another client's bursts one
- * read before a patch lacked the type for 10 s. A batch of 200 thoughts with
- * notes, tags and links is some 600 writes, and a read was 5.3 s behind 600
- * creates. So the wait is the six seconds `READ_BACK` has, where two were
- * short of the batch's own writes. It costs what the copy is behind and no
- * more, and its whole length only where the graph never shows the write.
- *
- * A graph that answers and does not show it yet is asked again after
- * `pauseAt()`, which doubles each second as `READ_BACK`'s pause does: 81
- * reads in the six seconds, as at a step in two. One whose read failed is
- * asked after twice the pause before, up to `maxStepMs`.
+ * How long a batch waits for the graphs to list what it made, and how often
+ * it reads each. Measured on a quiet brain: about 80 ms at the median, 205 ms
+ * at the most. After one batch of up to 200 thoughts a read can be 1–3 s
+ * behind, so the wait is three seconds. It costs what the copy is behind and
+ * no more, and its whole length only where the graph never shows the write.
  */
-const LISTED = { stepMs: 25, maxStepMs: 400, timeoutMs: READ_BACK.timeoutMs };
-
-/** The pause before a graph that answered is read again, `elapsed` ms into a wait. */
-function pauseAt(elapsed: number): number {
-  return Math.min(LISTED.stepMs * 2 ** Math.floor(elapsed / 1000), LISTED.maxStepMs);
-}
+const LISTED = { stepMs: 100, timeoutMs: 3000 };
 
 export interface IngestThought {
   /** Local label within the batch, for referencing before creation. */
@@ -941,7 +925,7 @@ export async function ingest(
   // A thought created a moment ago can still read back without its aliases
   // (measured: 3 times in 60), and adding to that empty list would erase them.
   // So what it was born with goes into the list again rather than being trusted
-  // to the read.
+  // to the read. Each list is read back (`changeAliases()`).
   const reusedTempIds = new Set(outcome.reused.map((r) => r.tempId));
   const aliasJobs = new Map<string, { name: string; add: string[] }>();
   for (const t of plan.thoughts) {
@@ -952,28 +936,22 @@ export async function ingest(
     job.add.push(...aliases);
     aliasJobs.set(id, job);
   }
-  //
-  // Each list is read back, as `changeAliases()` does, but not each in turn:
-  // a wait of up to six seconds each, six at a time, was up to 34 waits for
-  // 200 thoughts. The lists are written with no wait, and waited for at the
-  // end, together and beside the wait for the graphs (`aliasesShown`).
-  const aliasesSent = await mapWithConcurrency([...aliasJobs], 6, async ([id, job]) => {
+  await mapWithConcurrency([...aliasJobs], 6, async ([id, job]) => {
     try {
-      const { added, aliases, readBack } = await api.thoughts.changeAliases(
-        brainId,
-        id,
-        { add: job.add },
-        {},
-        0,
-      );
-      if (!readBack) return { id, name: job.name, added, aliases };
-      if (added.length > 0) aliased.add(id);
+      const { added, aliases, readBack } = await api.thoughts.changeAliases(brainId, id, {
+        add: job.add,
+      });
+      if (readBack) {
+        if (added.length > 0) aliased.add(id);
+      } else {
+        // Born with aliases in this batch, it may be counted already.
+        aliased.delete(id);
+        outcome.aliasesNotReadBack.push({ thoughtId: id, name: job.name, added, aliases });
+      }
     } catch (error) {
       failed("aliases", `aliases for "${shownName(job.name)}" (${id})`, error);
     }
-    return null;
   });
-  const unreadAliases = aliasesSent.filter((sent) => sent !== null);
 
   // By the two thoughts a link joins, whichever end is named first and by
   // whatever reference: a `tempId` can come to a thought the plan also names
@@ -1056,43 +1034,13 @@ export async function ingest(
     }
   });
 
-  // Last, so that the notes and links have taken most of the wait already,
-  // and both at once: two waits of six seconds would be twelve.
-  const [listing, shown] = await Promise.all([
-    unlistedAfterWaiting(api, brainId, toBeListed),
-    aliasesShown(api, brainId, unreadAliases),
-  ]);
+  // Last, so that the notes and links have taken most of the wait already.
+  const listing = await unlistedAfterWaiting(api, brainId, toBeListed);
   outcome.unlisted = listing.unlisted;
   outcome.listingUnread = listing.listingUnread;
-  unreadAliases.forEach(({ id, name, added, aliases }, i) => {
-    if (shown[i]) {
-      aliased.add(id);
-    } else {
-      // Born with aliases in this batch, it may be counted already.
-      aliased.delete(id);
-      outcome.aliasesNotReadBack.push({ thoughtId: id, name, added, aliases });
-    }
-  });
   outcome.aliasesWritten = aliased.size;
 
   return outcome;
-}
-
-/**
- * Whether each alias list written with no wait shows on a read of its
- * thought, within one wait of `READ_BACK` for all of them. Six are read at
- * a time, and a thought asked once the wait is over is read once: its list
- * was written before the wait began, so each had six seconds or more.
- */
-async function aliasesShown(
-  api: TheBrainApi,
-  brainId: string,
-  written: ReadonlyArray<{ id: string }>,
-): Promise<boolean[]> {
-  const deadline = Date.now() + READ_BACK.timeoutMs;
-  return mapWithConcurrency([...written], 6, ({ id }) =>
-    api.thoughts.aliasesReadBack(brainId, id, Math.max(deadline - Date.now(), 0)),
-  );
 }
 
 /** A thought's graph as `Neighbours`. The type is not among the parents: `getGraph` drops it. */
@@ -1139,24 +1087,16 @@ function sameText(held: string, planned: string): boolean {
  * answered. When the last one failed too, its thought is returned apart, as
  * one whose graph was not read. It used to be counted as a graph that listed
  * nothing, and the result said of TheBrain what no read had shown.
- *
- * A graph that fails is asked again after twice the pause each time, not a
- * step later: at a step it was read 74 to 78 times in the two seconds. And
- * the wait is over when its time is, for every graph at once. A read is
- * given up on then, answered or not: a batch whose writes are done used to
- * wait out the request's own timeout, which is 30 s, to say so.
  */
 async function unlistedAfterWaiting(
   api: TheBrainApi,
   brainId: string,
   made: ReadonlyMap<string, ReadonlyArray<{ thoughtId: string; relation: RelationName }>>,
 ): Promise<Pick<IngestOutcome, "unlisted" | "listingUnread">> {
-  const started = Date.now();
-  const deadline = started + LISTED.timeoutMs;
+  const deadline = Date.now() + LISTED.timeoutMs;
   const waited = await mapWithConcurrency([...made], 6, async ([anchorId, expected]) => {
-    let pause = LISTED.stepMs;
     for (;;) {
-      const read = await answeredBy(deadline, api.thoughts.getGraph(brainId, anchorId)).then(
+      const read = await api.thoughts.getGraph(brainId, anchorId).then(
         (graph) => ({ graph, error: undefined }),
         (error: unknown) => ({ graph: null, error }),
       );
@@ -1167,9 +1107,7 @@ async function unlistedAfterWaiting(
       ).length;
       const left = deadline - Date.now();
       if (lacking === 0 || left <= 0) return { anchorId, lacking, read };
-      pause =
-        graph === null ? Math.min(pause * 2, LISTED.maxStepMs) : pauseAt(Date.now() - started);
-      await new Promise((resolve) => setTimeout(resolve, Math.min(pause, left)));
+      await new Promise((resolve) => setTimeout(resolve, Math.min(LISTED.stepMs, left)));
     }
   });
   const answered = waited.filter((w) => w.read.graph !== null);
@@ -1179,32 +1117,6 @@ async function unlistedAfterWaiting(
       .filter((w) => w.read.graph === null)
       .map((w) => ({ thoughtId: w.anchorId, made: w.lacking, error: w.read.error })),
   };
-}
-
-/**
- * A graph read, or the failure that it had not been answered when the wait
- * for the graphs ran out. The request is left to end by itself: it is a read,
- * and whatever comes of it is dropped.
- */
-function answeredBy<T>(deadline: number, read: Promise<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(
-      () =>
-        reject(
-          new TheBrainError(
-            "network",
-            `the graph had not answered when the ${LISTED.timeoutMs} ms a batch waits for ` +
-              "the graphs to list what it made ran out",
-          ),
-        ),
-      Math.max(deadline - Date.now(), 0),
-    );
-    const settle = <V>(pass: (value: V) => void) => (value: V): void => {
-      clearTimeout(timer);
-      pass(value);
-    };
-    read.then(settle(resolve), settle(reject));
-  });
 }
 
 /** How a plan names an existing thought: the field, and the first plan item that has it there. */

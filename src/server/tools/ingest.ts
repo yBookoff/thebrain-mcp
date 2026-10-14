@@ -368,10 +368,9 @@ function aliasesNotReadBack(unread: IngestOutcome["aliasesNotReadBack"]): string
     `TheBrain accepted the aliases of ${one ? "this thought" : "these thoughts"}, and ` +
     `${one ? "it" : "they"} did not read back with them within ` +
     `${READ_BACK.timeoutMs / 1000} s: ${READ_LAG}.\n${bullet(lines)}\n` +
-    "Do not send them again: brain_get_thought shows them once TheBrain catches up. An " +
-    `alias edit of ${one ? "this thought" : "one of these thoughts"} sent before then ` +
-    "waits for them, and is not sent while they do not show, since built on the old list " +
-    "it would undo them."
+    "Do not send them again: brain_get_thought shows them once TheBrain catches up, and an " +
+    `alias edit of ${one ? "this thought" : "one of these thoughts"} sent before then would ` +
+    "undo them."
   );
 }
 

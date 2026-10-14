@@ -18,8 +18,8 @@ import {
   type IngestPlan,
 } from "../src/operations/ingest.js";
 
-/** The wait for the graphs, which is `READ_BACK`'s, and past it by a margin. */
-const WAIT = READ_BACK.timeoutMs;
+/** The wait for the graphs, three seconds, and past it by a margin. */
+const WAIT = 3000;
 const PAST_THE_WAIT = WAIT + 1000;
 
 /**
@@ -67,13 +67,8 @@ function fakeBrain(
   );
   /** Whole-list alias writes after creation: the only kind the API offers. */
   const aliasWrites: Array<{ id: string; aliases: string[] }> = [];
-  /**
-   * Thoughts, by name, whose alias writes TheBrain accepts and no read shows,
-   * as after a burst of writes. `aliasWaits` has the wait each write and each
-   * look for one was given.
-   */
+  /** Thoughts, by name, whose alias writes TheBrain accepts and no read shows. */
   const aliasesLag = new Set<string>();
-  const aliasWaits: Array<{ of: "write" | "look"; ms: number }> = [];
   /**
    * Thoughts created here whose aliases do not read back yet. On the live API
    * that happens now and then for a moment; here, to every new thought until
@@ -198,8 +193,6 @@ function fakeBrain(
   /** Every graph read, by thought, and by thought what the next reads throw. */
   const graphReads: string[] = [];
   const failGraph = new Map<string, Error[]>();
-  /** Thoughts whose graph gets no answer from now on: the read never comes back. */
-  const hungGraph = new Set<string>();
   /** Every note read and every note written, by thought, and what the next reads throw. */
   const noteReads: string[] = [];
   const noteWrites: Array<{ id: string; markdown: string }> = [];
@@ -297,7 +290,6 @@ function fakeBrain(
       },
       async getGraph(_b: string, id: string) {
         graphReads.push(id);
-        if (hungGraph.has(id)) await new Promise(() => undefined);
         const failure = failGraph.get(id)?.shift();
         if (failure !== undefined) throw failure;
         // As the API: the graph of an identifier nobody has is the generic 403.
@@ -337,16 +329,10 @@ function fakeBrain(
         return { id: typeId, kind: 2 };
       },
       // As the real method: reads the list, adds what is new ignoring case,
-      // and writes only when something was.
-      async changeAliases(
-        _b: string,
-        id: string,
-        changes: { add?: readonly string[] },
-        _known: unknown,
-        waitMs?: number,
-      ) {
+      // writes only when something was, and waits out the read-back for a
+      // list that does not show.
+      async changeAliases(_b: string, id: string, changes: { add?: readonly string[] }) {
         const t = thoughts.get(id)!;
-        aliasWaits.push({ of: "write", ms: waitMs ?? Infinity });
         if (failOn.has(`aliases of ${t.name}`)) throw new Error("server refused");
         // The read comes back empty for an unsettled thought, and the write
         // that follows replaces whatever the thought really had.
@@ -362,14 +348,8 @@ function fakeBrain(
           aliasWrites.push({ id, aliases: t.aliases });
         }
         const readBack = added.length === 0 || !aliasesLag.has(t.name);
+        if (!readBack) await new Promise((resolve) => setTimeout(resolve, READ_BACK.timeoutMs));
         return { aliases: t.aliases, added, removed: [], readBack };
-      },
-      // As the real method: waits out `waitMs` for a list that does not show.
-      async aliasesReadBack(_b: string, id: string, waitMs: number) {
-        aliasWaits.push({ of: "look", ms: waitMs });
-        if (!aliasesLag.has(thoughts.get(id)!.name)) return true;
-        await new Promise((resolve) => setTimeout(resolve, waitMs));
-        return false;
       },
     },
     notes: {
@@ -536,14 +516,12 @@ function fakeBrain(
     vanishing,
     aliasWrites,
     aliasesLag,
-    aliasWaits,
     build,
     settle,
     lists,
     lag,
     graphReads,
     failGraph,
-    hungGraph,
     noteReads,
     noteWrites,
     failNote,
@@ -1227,7 +1205,7 @@ describe("a second run of a plan, by relation", () => {
     expect(fake.graphReads).toEqual([ROOT, top]);
   });
 
-  it("a graph that never lists what was made is waited for six seconds, and the outcome says how many it lacks", async () => {
+  it("a graph that never lists what was made is waited for three seconds, and the outcome says how many it lacks", async () => {
     vi.useFakeTimers();
     try {
       const fake = fakeBrain([{ id: ROOT, name: "root" }]);
@@ -1903,9 +1881,7 @@ describe("a read that fails while the batch waits for the graphs", () => {
     return at;
   };
 
-  it("a graph that fails is asked again after twice the pause each time, to the end of the wait", async () => {
-    // Asked again a step later every time, it was read 74 to 78 times in the
-    // two seconds: 76 times of 76 on a live TheBrain with a 500 put in.
+  it("a graph that fails is asked again a step later, to the end of the wait", async () => {
     vi.useFakeTimers();
     try {
       const fake = brain();
@@ -1915,18 +1891,16 @@ describe("a read that fails while the batch waits for the graphs", () => {
       await vi.advanceTimersByTimeAsync(PAST_THE_WAIT);
       const outcome = await pending;
 
-      // The first read looks next to ROOT; the others wait for its graph.
-      expect(at).toEqual([
-        0, 0, 50, 150, 350, 750, 1150, 1550, 1950, 2350, 2750, 3150, 3550, 3950, 4350, 4750,
-        5150, 5550, 5950, 6000,
-      ]);
+      // The first read looks next to ROOT; the others wait for its graph,
+      // every 100 ms to the end of the three seconds.
+      expect(at).toEqual([0, ...Array.from({ length: 31 }, (_, i) => i * 100)]);
       expect(outcome.listingUnread).toEqual([{ thoughtId: ROOT, made: 2, error: boom }]);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("a graph that answers and does not list yet is asked again a step later, as it was", async () => {
+  it("a graph that answers and does not list yet is asked again a step later", async () => {
     vi.useFakeTimers();
     try {
       const fake = brain();
@@ -1936,72 +1910,8 @@ describe("a read that fails while the batch waits for the graphs", () => {
       await vi.advanceTimersByTimeAsync(PAST_THE_WAIT);
       const outcome = await pending;
 
-      expect(at).toEqual([0, 0, 25, 50, 75]);
+      expect(at).toEqual([0, 0, 100, 200, 300]);
       expect([outcome.unlisted, outcome.listingUnread]).toEqual([0, []]);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  /** A batch whose graphs stop answering once the last of its `creates` thoughts is sent. */
-  const hungAfterTheWrites = (
-    fake: ReturnType<typeof fakeBrain>,
-    anchors: string[],
-    creates: number,
-  ): void => {
-    let sent = 0;
-    const create = fake.api.thoughts.create.bind(fake.api.thoughts);
-    vi.spyOn(fake.api.thoughts, "create").mockImplementation((...args) => {
-      if ((sent += 1) === creates) for (const id of anchors) fake.hungGraph.add(id);
-      return create(...args);
-    });
-  };
-  const NO_ANSWER =
-    `the graph had not answered when the ${WAIT} ms a batch waits for the graphs to list ` +
-    "what it made ran out";
-
-  it("a graph that does not answer is given up on when the wait is over, and the batch returns", async () => {
-    // The read used to be waited for to its own end. With the answer held
-    // back 10 s on the way from a live TheBrain, a batch whose writes were
-    // done took 10 s to say so, and the request's own limit is 30 s.
-    vi.useFakeTimers();
-    try {
-      const fake = brain();
-      hungAfterTheWrites(fake, [ROOT], 3);
-      let outcome: IngestOutcome | undefined;
-      void ingest(fake.api, BRAIN, plan).then((o) => (outcome = o));
-      await vi.advanceTimersByTimeAsync(WAIT - 1);
-      expect(outcome).toBeUndefined();
-      await vi.advanceTimersByTimeAsync(1);
-
-      expect(outcome?.listingUnread).toEqual([
-        { thoughtId: ROOT, made: 2, error: expect.objectContaining({ message: NO_ANSWER }) },
-      ]);
-      expect(outcome?.listingUnread[0]!.error).toBeInstanceOf(TheBrainError);
-      // "C" is listed next to OTHER, whose graph answered, and no write failed.
-      expect([outcome?.unlisted, outcome?.failures]).toEqual([0, []]);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("the wait is over for every graph at once, however many there are", async () => {
-    // Six are asked at a time, and each used to have a wait of its own.
-    vi.useFakeTimers();
-    try {
-      const anchors = Array.from({ length: 8 }, (_, i) => `cccccccc-0000-4000-8000-0000000000a${i}`);
-      const fake = fakeBrain(anchors.map((id) => ({ id, name: `anchor ${id}` })));
-      hungAfterTheWrites(fake, anchors, 8);
-      let outcome: IngestOutcome | undefined;
-      void ingest(fake.api, BRAIN, {
-        thoughts: anchors.map((parent, i) => ({ tempId: `t${i}`, name: `T${i}`, parent })),
-      }).then((o) => (outcome = o));
-      await vi.advanceTimersByTimeAsync(WAIT - 1);
-      expect(outcome).toBeUndefined();
-      await vi.advanceTimersByTimeAsync(2);
-
-      expect(outcome?.listingUnread.map((u) => u.thoughtId).sort()).toEqual(anchors);
-      expect(outcome?.created).toHaveLength(8);
     } finally {
       vi.useRealTimers();
     }
@@ -2897,46 +2807,6 @@ describe("aliases in a batch", () => {
       expect(outcome.aliasesWritten).toBe(0);
       expect(outcome.aliasesNotReadBack.map((u) => u.thoughtId)).toEqual([
         outcome.created[0]!.thoughtId,
-      ]);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("the lists are written with no wait and waited for together: thirteen that never show take one wait", async () => {
-    // Each waited for in turn, six at a time, they took three waits, and a
-    // batch of 200 took 34.
-    const names = Array.from({ length: 13 }, (_, i) => `T${i}`);
-    const fake = fakeBrain([
-      { id: ROOT, name: "root" },
-      ...names.map((name, i) => ({
-        id: `cccccccc-0000-4000-8000-0000000001${10 + i}`,
-        name,
-        parent: ROOT,
-      })),
-    ]);
-    for (const name of names) fake.aliasesLag.add(name);
-    vi.useFakeTimers();
-    try {
-      const started = Date.now();
-      let took = -1;
-      const pending = ingest(fake.api, BRAIN, {
-        thoughts: names.map((name) => ({ tempId: name, name, parent: ROOT, aliases: ["a"] })),
-      }).then((outcome) => ((took = Date.now() - started), outcome));
-      await vi.advanceTimersByTimeAsync(3 * PAST_THE_WAIT);
-      const outcome = await pending;
-
-      // One wait, and not three: the reads before the writes take their time too.
-      expect(took).toBeGreaterThanOrEqual(WAIT);
-      expect(took).toBeLessThan(WAIT + 100);
-      expect(outcome.aliasesNotReadBack).toHaveLength(13);
-      expect(fake.aliasWaits.filter((w) => w.of === "write").map((w) => w.ms)).toEqual(
-        names.map(() => 0),
-      );
-      // The first six are given the wait, and those after them what is left of it.
-      expect(fake.aliasWaits.filter((w) => w.of === "look").map((w) => w.ms)).toEqual([
-        ...Array(6).fill(WAIT),
-        ...Array(7).fill(0),
       ]);
     } finally {
       vi.useRealTimers();

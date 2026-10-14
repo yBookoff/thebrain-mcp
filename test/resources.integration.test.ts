@@ -9479,12 +9479,11 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
       ]);
     });
 
-    it("a batch writes the aliases of the thoughts it finds with no wait each, and each reads back by its end", async (ctx) => {
+    it("a batch writes the aliases of the thoughts it finds, and each has read back by the batch's end", async (ctx) => {
       await requireAliases(ctx);
-      // `ingest()` writes each list with no wait and waits for them all at
-      // once, beside the wait for the graphs: one wait each, six at a time,
-      // was up to 34 of six seconds for 200 thoughts. Each counts as written
-      // only once a read showed it, and the next edit builds on it.
+      // `ingest()` writes each list through `changeAliases()`, which waits for
+      // it to read back. Each counts as written only once a read showed it,
+      // and the next edit builds on it.
       const root = await make("alias-batch-root");
       const names = ["one", "two", "three"].map((n) => `${PREFIX}alias-batch-${n}`);
       const ids: string[] = [];

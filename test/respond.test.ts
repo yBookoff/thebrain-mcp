@@ -596,11 +596,10 @@ describe("reporting an alias edit", () => {
       aliasesNotReadBack({ aliases: ["a", "b"], added: ["b"], removed: ["c"], readBack: false }),
     ).toBe(
       'TheBrain accepted the aliases (added ["b"], removed ["c"]; the list is now ["a","b"]), ' +
-        "and the thought did not read back with them within 6 s: reads lag behind writes for " +
-        "seconds after a burst of them, and longer while writes keep coming. Do not send them " +
-        "again: brain_get_thought shows them once TheBrain catches up. An alias edit of this " +
-        "thought sent before then waits for them, and is not sent while they do not show, " +
-        "since built on the old list it would undo them",
+        "and the thought did not read back with them within 3 s: TheBrain answers a read from " +
+        "a copy that is behind its writes, by a fraction of a second as a rule and by seconds " +
+        "while it is busy. Do not send them again: brain_get_thought shows them once TheBrain " +
+        "catches up, and an alias edit of this thought sent before then would undo them",
     );
   });
 });
