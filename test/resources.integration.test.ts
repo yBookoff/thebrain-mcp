@@ -2130,6 +2130,396 @@ suite("resource layer against the live API", () => {
     }
   });
 
+  describe("a type and a tag made through the API", () => {
+    const { Normal, Type, Tag } = ThoughtKind;
+    /** Unique to the run: a tag left by an earlier one would be answered with. */
+    const run = Date.now().toString(36);
+    const named = (name: string): string => `${PREFIX}vocab-${run}-${name}`;
+    /** The create as the API takes it, with none of the client's checks. */
+    const rawCreate = async (body: Record<string, unknown>): Promise<string> => {
+      const { id } = await api.client.post<{ id: string }>(`/api/thoughts/${brainId}`, {
+        json: { acType: 0, ...body },
+      });
+      created.push(id);
+      return id;
+    };
+    /** A thought's own entries, the ones `createTypeOrTag` reads. */
+    const own = (id: string): Promise<ModificationLogDto[]> =>
+      api.thoughts.modifications(brainId, id, { maxLogs: 100, includeRelated: false });
+    const listOf = (kind: number): Promise<ThoughtDto[]> =>
+      kind === Type ? api.thoughts.listTypes(brainId) : api.thoughts.listTags(brainId);
+
+    it("is made with kind 2 or 4 and answered with an identifier alone; it reads at once, with one 101 of its own", async () => {
+      for (const kind of [Type, Tag]) {
+        const answer = await api.client.post<Record<string, unknown>>(
+          `/api/thoughts/${brainId}`,
+          { json: { name: named(`made-${kind}`), kind, acType: 0 } },
+        );
+        const id = answer["id"] as string;
+        created.push(id);
+        expect(Object.keys(answer)).toEqual(["id"]);
+        const read = await api.thoughts.get(brainId, id);
+        // A type reads with its name for a label, and no 202 says so.
+        expect([read.kind, read.label, read.typeId]).toEqual([
+          kind,
+          kind === Type ? read.name : null,
+          null,
+        ]);
+        expect((await own(id)).map((l) => [l.modType, l.sourceType, l.newValue])).toEqual([
+          [ModType.Created, EntityType.Thought, named(`made-${kind}`)],
+        ]);
+      }
+    });
+
+    it("/types and /tags list a new one a moment after its create, not always at once", async () => {
+      let atOnce = 0;
+      const rounds = 6;
+      for (let i = 0; i < rounds; i++) {
+        for (const kind of [Type, Tag]) {
+          const id = await rawCreate({ name: named(`listed-${kind}-${i}`), kind });
+          if ((await listOf(kind)).some((t) => t.id === id)) atOnce += 1;
+          const later = await eventually(
+            () => listOf(kind),
+            (list) => list.some((t) => t.id === id),
+            { timeoutMs: 5000, stepMs: 20 },
+          );
+          expect(later.some((t) => t.id === id)).toBe(true);
+        }
+      }
+      // Measured: 10 of 66 at the first read, the last listed 417 ms on.
+      expect(atOnce).toBeLessThan(2 * rounds);
+    });
+
+    it("a tag made again under its name is the one there: at once, after another write, in another case, and nothing of it changes", async () => {
+      const name = named("again");
+      const first = await rawCreate({ name, kind: Tag });
+      await api.thoughts.update(brainId, first, { label: "kept", foregroundColor: "#ff0000" });
+      const before = await eventually(
+        () => api.thoughts.get(brainId, first),
+        (t) => t.label === "kept" && t.foregroundColor === "#ff0000",
+      );
+      const entries = await eventually(
+        () => own(first),
+        (l) => l.length === 3,
+      );
+
+      expect(await rawCreate({ name, kind: Tag })).toBe(first);
+      await make("again-between");
+      expect(await rawCreate({ name, kind: Tag })).toBe(first);
+      expect(await rawCreate({ name: name.toUpperCase(), kind: Tag })).toBe(first);
+
+      await settle(500);
+      const after = await api.thoughts.get(brainId, first);
+      const kept = (t: ThoughtDto) => [
+        t.name,
+        t.label,
+        t.foregroundColor,
+        aliasesOf(t),
+        t.modificationDateTime,
+      ];
+      expect(kept(after)).toEqual(kept(before));
+      expect(await own(first)).toEqual(entries);
+    });
+
+    it("a label, aliases or a source sent with the name of a tag that is there are written onto that tag", async () => {
+      const labelled = await rawCreate({ name: named("onto"), kind: Tag });
+      expect(
+        await rawCreate({
+          name: named("onto"),
+          kind: Tag,
+          label: "written over",
+          aliases: [named("onto-alias")],
+        }),
+      ).toBe(labelled);
+      const read = await eventually(
+        () => api.thoughts.get(brainId, labelled),
+        (t) => t.label === "written over" && aliasesOf(t).length === 1,
+      );
+      expect([read.label, aliasesOf(read)]).toEqual(["written over", [named("onto-alias")]]);
+
+      // Under each relation the tag that is there is attached to the source.
+      for (const relation of [Relation.Child, Relation.Parent, Relation.Jump]) {
+        const tag = await rawCreate({ name: named(`sourced-${relation}`), kind: Tag });
+        const source = await make(`vocab-${run}-source-${relation}`);
+        expect(
+          await rawCreate({
+            name: named(`sourced-${relation}`),
+            kind: Tag,
+            sourceThoughtId: source,
+            relation,
+          }),
+        ).toBe(tag);
+        const link = await eventually(
+          () => api.links.between(brainId, source, tag),
+          (l) => l !== null,
+        );
+        expect([link?.meaning, link?.thoughtIdA], `relation ${relation}`).toEqual([
+          LinkMeaning.Tag,
+          tag,
+        ]);
+      }
+    });
+
+    it("a tag deleted is not answered with: its name makes a new one at once", async () => {
+      const name = named("deleted");
+      const gone = await rawCreate({ name, kind: Tag });
+      await settle(300);
+      await api.thoughts.delete(brainId, gone);
+      const again = await rawCreate({ name, kind: Tag });
+      expect(again).not.toBe(gone);
+      expect((await api.thoughts.get(brainId, again)).kind).toBe(Tag);
+    });
+
+    it("tag names are one when they differ in letter case, in characters that do not show and in the form of a character, and not otherwise", async () => {
+      // On 15.0.640 on macOS: 95 pairs, each two or three times, every one
+      // the same answer each time. These are some of each.
+      const ONE: Array<[string, string]> = [
+        ["Tag name", "TAG NAME"],
+        ["\u0442\u0435\u0433", "\u0422\u0415\u0413"],
+        ["r\u00e9sum\u00e9", "re\u0301sume\u0301"],
+        ["tagname", "tag\u200bname"],
+        ["tagname", "tag\u0001name"],
+        ["tag name", "tag\u00a0name"],
+        ["file", "\ufb01le"],
+        ["tag 2", "tag \u00b2"],
+        ["tag 1", "tag \u0661"],
+        ["wait...", "wait\u2026"],
+      ];
+      const TWO: Array<[string, string]> = [
+        ["r\u00e9sum\u00e9", "resume"],
+        ["tag name", "tag  name"],
+        ["Tag", "\uff34\uff41\uff47"],
+        ["co-op", "coop"],
+        ["stra\u00dfe", "strasse"],
+        ["tagname", "tag\u2800name"],
+        ["title", "t\u0131tle"],
+        ["\u30ab\u30ca", "\u304b\u306a"],
+        ["tag name", "tag\rname"],
+      ];
+      let i = 0;
+      const same = async ([a, b]: [string, string]): Promise<boolean> => {
+        const prefix = named(`pair-${(i += 1)}`);
+        const first = await rawCreate({ name: `${prefix} ${a}`, kind: Tag });
+        return (await rawCreate({ name: `${prefix} ${b}`, kind: Tag })) === first;
+      };
+      for (const pair of ONE) expect(await same(pair), JSON.stringify(pair)).toBe(true);
+      for (const pair of TWO) expect(await same(pair), JSON.stringify(pair)).toBe(false);
+
+      // A name of such characters alone is one name with any other.
+      const blank = await rawCreate({ name: "\u200b", kind: Tag });
+      expect(await rawCreate({ name: "\ufeff", kind: Tag })).toBe(blank);
+      expect(await rawCreate({ name: "\u0001", kind: Tag })).toBe(blank);
+      expect((await api.thoughts.get(brainId, blank)).name).toBe("\u200b");
+    });
+
+    it("a type is made again under a name a type has, and a tag's name is matched among tags alone", async () => {
+      const name = named("namesake");
+      const type = await rawCreate({ name, kind: Type });
+      const second = await rawCreate({ name, kind: Type });
+      expect(second).not.toBe(type);
+      expect(await rawCreate({ name: name.toUpperCase(), kind: Type })).not.toBe(second);
+
+      const thought = await rawCreate({ name, kind: Normal });
+      const tag = await rawCreate({ name, kind: Tag });
+      expect([type, second, thought]).not.toContain(tag);
+      expect(await rawCreate({ name, kind: Normal })).not.toBe(thought);
+    });
+
+    it("two creates of one new tag name sent at once are now and then two tags", async () => {
+      let rounds = 0;
+      let split = 0;
+      for (; rounds < 8 && split === 0; rounds += 1) {
+        const name = named(`at-once-${rounds}`);
+        const ids = await Promise.all([1, 2, 3, 4].map(() => rawCreate({ name, kind: Tag })));
+        if (new Set(ids).size > 1) split += 1;
+      }
+      // Measured: two at once made two tags 5 times of 10, four at once more
+      // than one 9 times of 10.
+      expect(split).toBe(1);
+    });
+
+    it("createTypeOrTag tells a tag it made from one it was answered with, one call at a time", async () => {
+      const name = named("told");
+      const made = await api.thoughts.createTypeOrTag(brainId, { name, kind: Tag });
+      created.push(made.id);
+      expect([made.created, made.thought?.name, made.thought?.kind]).toEqual([true, name, Tag]);
+
+      // Straight after, with the newest entry of the log its own 101.
+      const again = await api.thoughts.createTypeOrTag(brainId, {
+        name: name.toUpperCase(),
+        kind: Tag,
+      });
+      expect([again.id, again.created, again.thought?.name]).toEqual([made.id, false, name]);
+
+      // In use: its own entries are its own alone, and its 101 among them.
+      for (const n of [1, 2, 3]) await api.links.attachTag(brainId, await make(`told-${n}`), made.id);
+      const ownEntries = await own(made.id);
+      expect(ownEntries.map((l) => l.modType)).toEqual([ModType.Created]);
+      expect(
+        (await api.thoughts.modifications(brainId, made.id, { includeRelated: true })).length,
+      ).toBeGreaterThan(1);
+      expect(
+        (await api.thoughts.createTypeOrTag(brainId, { name, kind: Tag })).created,
+      ).toBe(false);
+
+      // A type is made every time, and said to be.
+      for (const n of [1, 2]) {
+        const type = await api.thoughts.createTypeOrTag(brainId, { name, kind: Type });
+        created.push(type.id);
+        expect([type.created, type.thought?.kind], `type ${n}`).toEqual([true, Type]);
+      }
+
+      // Four at once from one process are one tag: the second and later
+      // wait for the one ahead, and are answered with what it made.
+      for (let round = 0; round < 3; round++) {
+        const outcomes = await Promise.all(
+          [1, 2, 3, 4].map(() =>
+            api.thoughts.createTypeOrTag(brainId, { name: named(`chained-${round}`), kind: Tag }),
+          ),
+        );
+        created.push(...outcomes.map((o) => o.id));
+        expect(new Set(outcomes.map((o) => o.id)).size, `round ${round}`).toBe(1);
+        expect(outcomes.map((o) => o.created)).toEqual([true, false, false, false]);
+      }
+    }, 30_000);
+
+    it("a source or a typeId makes a link whose meaning goes by the kinds at its ends", async () => {
+      const source: Record<number, string> = {
+        [Normal]: await make(`vocab-${run}-src`),
+        [Type]: await rawCreate({ name: named("src-type"), kind: Type }),
+        [Tag]: await rawCreate({ name: named("src-tag"), kind: Tag }),
+      };
+      const C = Relation.Child;
+      const P = Relation.Parent;
+      const J = Relation.Jump;
+      /** What a new thought of `kind` made by `how` towards a thought of kind `at` is to it. */
+      const CASES: Array<[kind: number, at: number, how: number | "typeId", made: string]> = [
+        [Type, Normal, C, "1 r1, the source above"],
+        [Type, Normal, P, "2 r1, the new one above; the source's type"],
+        [Type, Normal, J, "1 r3, the source above"],
+        [Type, Type, C, "403"],
+        [Type, Type, P, "3 r1, the new one above; the source's type"],
+        [Type, Type, J, "1 r3, the source above"],
+        [Type, Tag, C, "5 r1, the source above"],
+        [Type, Tag, P, "no link"],
+        [Type, Tag, J, "1 r3, the source above"],
+        [Type, Normal, "typeId", "1 r1, the source above"],
+        [Type, Type, "typeId", "403"],
+        [Type, Tag, "typeId", "5 r1, the source above"],
+        [Tag, Normal, C, "1 r1, the source above"],
+        [Tag, Normal, P, "5 r1, the new one above"],
+        [Tag, Normal, J, "1 r3, the source above"],
+        [Tag, Type, C, "no link"],
+        [Tag, Type, P, "5 r1, the new one above"],
+        [Tag, Type, J, "1 r3, the source above"],
+        [Tag, Tag, C, "403"],
+        [Tag, Tag, P, "7 r1, the new one above"],
+        [Tag, Tag, J, "1 r3, the source above"],
+        [Tag, Normal, "typeId", "1 r1, the source above"],
+        [Tag, Type, "typeId", "no link"],
+        [Tag, Tag, "typeId", "403"],
+      ];
+      const made: Array<{ id: string | null; at: string; name: string }> = [];
+      for (const [i, [kind, at, how]] of CASES.entries()) {
+        const name = named(`case-${i}`);
+        const body =
+          how === "typeId"
+            ? { name, kind, typeId: source[at]! }
+            : { name, kind, sourceThoughtId: source[at]!, relation: how };
+        let id: string | null = null;
+        try {
+          id = await rawCreate(body);
+        } catch (error) {
+          expect((error as TheBrainError).kind, `case ${i}`).toBe("forbidden");
+        }
+        made.push({ id, at: source[at]!, name });
+      }
+      await settle(600);
+      const typeOf = new Map<string, string | null>();
+      for (const at of [source[Normal]!, source[Type]!]) {
+        typeOf.set(at, (await api.thoughts.get(brainId, at)).typeId);
+      }
+      const listed = new Set(
+        [...(await api.thoughts.listTypes(brainId)), ...(await api.thoughts.listTags(brainId))].map(
+          (t) => t.name,
+        ),
+      );
+      for (const [i, { id, at, name }] of made.entries()) {
+        let seen: string;
+        if (id === null) {
+          // Nothing of that name was made.
+          seen = listed.has(name) ? "403, and made" : "403";
+        } else {
+          const link = await api.links.between(brainId, at, id);
+          seen =
+            link === null
+              ? "no link"
+              : `${link.meaning} r${link.relation}, ` +
+                `${link.thoughtIdA === at ? "the source" : "the new one"} above` +
+                (typeOf.get(at) === id ? "; the source's type" : "");
+        }
+        expect(seen, `case ${i}: ${JSON.stringify(CASES[i]!.slice(0, 3))}`).toBe(CASES[i]![3]);
+      }
+    }, 60_000);
+
+    it("a label and aliases are stored with a new one, colours are not taken, and a name past 1,024 units is cut", async () => {
+      for (const kind of [Type, Tag]) {
+        const id = await rawCreate({
+          name: named(`dressed-${kind}`),
+          kind,
+          label: "a caption",
+          aliases: [named(`dressed-alias-${kind}`)],
+          foregroundColor: "#ff0000",
+          backgroundColor: "#00ff00",
+        });
+        const read = await api.thoughts.get(brainId, id);
+        expect([read.label, aliasesOf(read), read.foregroundColor, read.backgroundColor]).toEqual([
+          "a caption",
+          [named(`dressed-alias-${kind}`)],
+          null,
+          null,
+        ]);
+        const long = await rawCreate({ name: named(`long-${kind}-`).padEnd(1025, "x"), kind });
+        expect((await api.thoughts.get(brainId, long)).name).toHaveLength(1024);
+      }
+    });
+
+    it("a sync gives a type and a tag made through createTypeOrTag rows of their kind, and a default search leaves them out", async () => {
+      const plain = await make(`vocab-${run}-index-plain`);
+      const embedder: Embedder = {
+        id: "contract@v1",
+        dimensions: 1,
+        embedDocuments: async (texts) => texts.map(() => new Float32Array([1])),
+        embedQuery: async () => new Float32Array([1]),
+      };
+      const store = new VectorStore(":memory:");
+      const indexer = new SemanticIndexer(api, store, embedder);
+      const search = new SemanticSearch(api, store, embedder);
+      await indexer.rebuild(brainId);
+
+      const tag = await api.thoughts.createTypeOrTag(brainId, { name: named("index-tag"), kind: Tag });
+      const type = await api.thoughts.createTypeOrTag(brainId, {
+        name: named("index-type"),
+        kind: Type,
+      });
+      created.push(tag.id, type.id);
+      await indexer.sync(brainId);
+
+      const kinds = store.kinds();
+      expect([kinds.get(plain), kinds.get(tag.id), kinds.get(type.id)]).toEqual([Normal, Tag, Type]);
+      const found = async (includeAuxiliary: boolean): Promise<string[]> =>
+        (
+          await search.find(brainId, "anything", { limit: store.size(), includeAuxiliary })
+        ).matches.map((m) => m.thoughtId);
+      const plainly = await found(false);
+      expect(plainly).toContain(plain);
+      expect(plainly).not.toContain(tag.id);
+      expect(plainly).not.toContain(type.id);
+      expect(await found(true)).toEqual(expect.arrayContaining([plain, tag.id, type.id]));
+      store.close();
+    }, 90_000);
+  });
+
   it("the log reconstructs contents that agree with statistics", async () => {
     // Holds for a brain whose thoughts were all created in it, like a test
     // brain. Imported and old brains fall short, which is why a rebuild also

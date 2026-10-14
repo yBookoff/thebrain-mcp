@@ -273,8 +273,23 @@ parent, and nothing can be put under it.
 `brain_get_thought` shows a thought's own type with its identifier, ready to
 reuse.
 
-Through the API a tag can only be attached by the identifier of an existing tag.
-If you need a new one, first create it as a thought of kind tag, then use it.
+A tag is attached, and a type set, by the identifier of one the brain has. When
+none fits, `brain_create_type_or_tag` makes one, by name; `brain_create_thought`
+and a plan make ordinary thoughts only. A new type or tag is vocabulary the
+person sees in every list of their brain, so propose it and make it once they
+agree, unless they asked for it. Make it before the plan, and put the
+identifier it returns in `typeId` or `tagIds`.
+
+- Under the name of a tag the brain has, no second tag is made: the result is
+  `## Already there` with that tag. Its name can differ from the one you asked
+  for, in letter case, in a character that does not show, or in the form of a
+  character. Use the identifier it gives, and tell the person when the name is
+  not the one they chose.
+- A type is made again under a name another type has. Look in
+  `brain_list_types_and_tags` first, every time, and if a create of a type got
+  no answer look there before sending it again. A type made a moment ago can
+  take half a second to be listed.
+- A caption or a colour for the new one is `brain_update_thought`.
 
 ## What not to do
 

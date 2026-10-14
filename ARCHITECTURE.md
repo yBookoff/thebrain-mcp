@@ -33,7 +33,7 @@ That requires two things the raw API does not provide:
   decomposition must land in one call — atomic in intent, validated before the
   first write, and idempotent on re-run.
 
-So: 17 tools instead of 48 endpoints, plus a local vector index, plus a batch
+So: 18 tools instead of 48 endpoints, plus a local vector index, plus a batch
 ingest operation.
 
 ---
@@ -178,9 +178,9 @@ So the agent thinks, and the server's job is to make that thinking *informed*
 
 ## 4. Tool design
 
-Seventeen tools. Measured on the built server: the descriptions total about 1080
-tokens, and the full `tools/list` payload including schemas about 4500. That is
-4,309 and 18,103 characters, with a token at four: the tools of `tools/list` as
+Eighteen tools. Measured on the built server: the descriptions total about 1160
+tokens, and the full `tools/list` payload including schemas about 4750. That is
+4,648 and 19,028 characters, with a token at four: the tools of `tools/list` as
 JSON, asked for in process, which is the figure the sections below count their
 own cost against.
 
@@ -424,6 +424,132 @@ log has none of carry, a thought pasted in (`104`) among them: only `101`,
 entry about its thought: in that log 14 entries, attachments made and
 removed, name a thought after its `102`, which was not reproduced. Nothing
 here goes by its being the last.
+
+### A type or a tag, made
+
+No tool could make a tag or a type. `brain_tag` said to "create a new tag via
+brain_create_thought", which has no kind and makes an ordinary thought, and
+since `brain_tag` refuses an identifier that is no tag (§7, item 17) the advice
+led straight into a refusal. A plan of `brain_ingest` makes ordinary thoughts
+alone as well. `brain_create_type_or_tag` makes either, by name.
+
+**What the API does, measured on 15.0.640** (`docs/api-map.md`, row L39). A
+create with `kind: 2` or `kind: 4` is answered with `{id}` and nothing else. A
+type reads with its name for a label, a tag with none. Under the name of a
+type the brain has, a second type is made, 95 pairs of names of 95 and the
+same name 15 times of 15. Under the name of a tag the brain has, no tag is
+made: the answer is that tag's identifier, the tag keeps its name, and nothing
+of it changes or is logged. The names need not be the same. Of 95 pairs, each
+tried two or three times with the same answer every time, these were taken for
+one name: letter case, Greek final sigma for sigma, a capital sharp s; a
+character and its canonical equivalent, decomposed or not; a ligature, a
+superscript or circled digit, a digit of another script, a Roman numeral, a
+mathematical bold letter, an ellipsis, or a sign such as ™, ㎏, № or the micro
+sign, for what it stands for; a no-break, narrow, em, thin or ideographic
+space for a space; and any character that does not show, a zero width space or
+joiner, a byte order mark, a soft hyphen, a control, wherever it stands. These
+were not: an accent, ß for ss, Turkish İ and ı for i, a long s, full width
+letters and digits, hiragana for katakana, two spaces for one, a carriage
+return, a next line or a line separator for a space, a Hangul filler or a
+braille blank, a punctuation mark dropped, added or swapped for another, ½ for
+1/2, œ for oe, another emoji or skin tone. Every name of characters that do
+not show alone is one name. The rule looks like the platform's comparison of
+text with case set aside; that is an inference, and this was measured on macOS
+alone.
+
+So the tool says which it was. "Created" for a tag that was there would be
+untrue, and the name asked for need not be the name the tag has: asked for
+`GOTCHA`, the brain has `gotcha`. The result reads `## Already there` with the
+tag by its identifier and its own name, and a note that nothing was created,
+that the name differs and why, and that the tag is as it was.
+
+**The log tells the two apart.** The answer is an identifier either way. A
+thought a create makes has its `101` among its own entries when the create
+is answered, and later than every entry the log had before it, 30 of 30; one
+that was there has its `101` earlier or not at all, 40 of 40, the call before
+included. So `thoughts.createTypeOrTag()` reads the newest entry of the log,
+creates, and reads the thought's own entries (`includeRelatedLogs=false`, so
+that the entries of the thoughts a tag is on do not push its `101` out) and
+then the thought. The lists cannot tell it: `/types` and `/tags` are a copy,
+and listed a new one at the first read 10 times of 66, 417 ms later at the
+latest. Four requests a call, where a create alone is one; a tool that makes
+vocabulary is not called often, and a guess at the API's rule for names
+would be wrong where the rule is not known.
+
+**One at a time in a brain.** Two creates of one new tag name sent at once
+were two tags 5 times of 10, and four at once more than one tag 9 times of
+10. Sent after the other's answer it was the same tag 25 times of 25. A
+model calls tools in parallel, and subagents share the server process. So the
+calls of one process for a brain go one after the other, from the read of the
+log to the read of the thought, and a call that failed does not hold up the
+next. Through the handlers, two calls at once for one name were one tag, one
+"Done" and one "Already there", 3 times of 3. Two server processes are not
+kept apart.
+
+**A name and a kind, and nothing else.** What else a create carries does
+something of its own (row L39). A label or aliases sent with the name of a
+tag that is there are written onto that tag. A source makes a link whose
+meaning goes by the kinds at its two ends: a type created as the parent of a
+thought becomes its type; a tag created as its parent is attached to it; a type under a type and a tag under a tag are the
+catch-all 403 and make nothing; a tag created as a thought's child is an
+ordinary link with a tag below. And a source with the name of a tag that is
+there attaches that tag to the source. None of that is a parent in any sense
+the tools have, and a type or a tag is reached from a thought by `typeId` and
+`brain_tag`. A caption and colours are `brain_update_thought` afterwards, as
+for any thought; the create takes no colour at all.
+
+**Refusals before any write.** A name of white space or past 1,024 units is
+refused by `nameRefusal()`, as for a thought: the API refuses the first and
+cuts the second for a type and a tag too. An empty name and a kind that is
+neither are refused by the schema. A `brainId` that is no brain stops at the
+read of the log, which is the first request, with nothing written. A read of
+the log that fails otherwise says that nothing was created and that the call
+can be sent again. A create with no answer is hedged by kind: for a tag,
+send the call again, since TheBrain makes no second tag of the name; for a
+type, look in `brain_list_types_and_tags` first, since a second call makes a
+second type. A read that fails after the create does not fail it: the result
+is `writtenInPart()`'s, with the identifier under "Done" and what was not
+read under "Failed".
+
+**Why a tool of its own.** Two other ways were weighed.
+
+- *A `kind` argument on `brain_create_thought`.* About 445 characters of
+  `tools/list` where the tool costs 925, so some 120 tokens a session
+  cheaper. But every other argument of that tool would have to be refused
+  with a type or a tag, for the reasons above: `parentId`, `relation`, `note`
+  beside them for one already there, `typeId`, `tagIds`, `label`, `aliases`.
+  Its description tells the model always to give a parent. And a tag that
+  was there turns "create" into "find or create", which a thought never is.
+  One tool per intent (above): making vocabulary is not adding a thought.
+- *Taking the advice out of `brain_tag` and saying that tags and types are
+  made in TheBrain.* No new cost, and the server makes no vocabulary. But a
+  model sent away mid-task either stops or does what this card began with:
+  makes an ordinary thought to tag with, which `brain_tag` refuses.
+
+The cost of the tool is 925 characters of `tools/list`, 231 tokens, which
+every session pays: 18,103 to 19,028. `brain_tag` grew by four characters.
+
+**Left as they were.** A plan cannot make a type or a tag: its `typeId` and
+`tagIds` take identifiers of the brain's, checked before the first write. A
+tag made inside a batch would be one more thing to report per line, its
+"existed under another name" lost in a table, and a plan's writes run
+several at a time, which is when a tag name is made twice. Making vocabulary
+is rare and deliberate, so it is one call ahead of the plan. A type is not
+deduplicated by the server: the API makes a second type of a name, the tool
+does as asked, and the description and the result for a lost answer say so.
+Finding a type by its exact name in `/types` first would keep a duplicate
+out except within the copy's lag, and is a decision of its own. When to make
+a type or a tag at all is the skills' (§3): the tool's description says only
+to look in `brain_list_types_and_tags` first.
+
+**The index.** A new type or tag is logged as a `101`, which a sync reads,
+and its row has its kind: a default search leaves it out (contract test).
+Nothing about the index changed.
+
+**Not known.** What TheBrain's own window does with a tag name it has, and
+whether the rule for names holds on Windows, where the comparison of text is
+another library's. A type created as the parent of a thought that has a
+type already.
 
 ### `brain_ingest` — the tool the product is built around
 
@@ -1686,6 +1812,17 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     looked for under and the name a result gives. A name of characters that
     do not show is none of this: the API stores a zero width space as it
     stores a letter (§4, *A name that does not show*).
+24. **A tag is made once a name, by a rule of its own, and a create says
+    nothing of it.** A create with `kind: 4` under the name of a tag the
+    brain has makes nothing and answers with that tag's identifier, as it
+    answers for a new one; the names are matched with letter case,
+    characters that do not show and the form of a character set aside. A
+    type is made again under any name. Two creates of one new tag name sent
+    at once are two tags as often as not. And what a create carries beside
+    the name is written to the tag that is there, or makes a link the kinds
+    at its ends decide. So `brain_create_type_or_tag` sends a name and a kind
+    alone, one call at a time in a brain, and tells a tag it made from one it
+    was answered with by the log (§4, *A type or a tag, made*).
 
 ### Write visibility
 
@@ -1709,6 +1846,8 @@ Measured against a live API by polling until the result appeared:
 | a note changed → the thought's `graph` | lists no Notes attachment at one read within 0.2 s of the change, then lists it again; the note itself reads at once |
 | a note deleted → the thought's `graph` | still lists it for up to 0.2 s, while the note's read is a 403 |
 | `attachTag` → `graph.tags` | ~0.1–0.5 s |
+| a type or a tag created → `/types` or `/tags` lists it | 2–417 ms: a copy; at the first read 10 times of 66 |
+| a type or a tag created → its own `101` in its log, later than the newest entry before the create | at once, 30 of 30 |
 | a tag attached or detached, a link posted, a link's name patched → the lookup of the pair (`GET /api/links/{a}/{b}`) | at once, 20 times of 20 each, the lookup having been answered before the write |
 | `create` next to a thought → that thought's `graph` lists it | 10–205 ms, about 80 ms at the median: a copy refreshed about every 0.1 s. First seen past 300 ms 7 times in 1,800 while the app was slow to answer, 364 ms at the latest: there is no bound. Live on its first read |
 | `attach URL` → `by-location` | instant |
@@ -1736,7 +1875,7 @@ the target thought.
 
 | Operation | How |
 |---|---|
-| Create a tag | `POST /api/thoughts` with `kind: 4` |
+| Create a tag | `POST /api/thoughts` with `kind: 4` and a name. Under the name of a tag that is there it answers with that tag (§7, item 24) |
 | Attach | `POST /api/links`, `thoughtIdA` = thought, `thoughtIdB` = tag, **`relation: 2`**. The server rewrites it to `relation=1, meaning=5` |
 | Detach | `DELETE /api/links/{brainId}/{linkId}` |
 | Read | `graph.tags` — a tag does **not** pollute `parents` |

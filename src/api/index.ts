@@ -72,6 +72,8 @@ export {
   type AliasOutcome,
   type CleanGraph,
   type CreateThoughtInput,
+  type CreateTypeOrTagInput,
+  type TypeOrTagOutcome,
   type UpdateThoughtInput,
 } from "./resources/thoughts.js";
 export {

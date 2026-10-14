@@ -9,6 +9,7 @@ import { TheBrainError } from "../errors.js";
 import { compareLogTime, logTime } from "../log.js";
 import { nameRefusal, shownName, thoughtNameAsStored } from "../names.js";
 import {
+  EntityType,
   ModType,
   aliasesOf,
   type AttachmentDto,
@@ -40,6 +41,28 @@ export interface CreateThoughtInput {
   /** Has to name a type, which is read first: see `requireType`. */
   typeId?: string;
   acType?: number;
+}
+
+/** What `createTypeOrTag` is asked for: a name, and which of the two it is to be. */
+export interface CreateTypeOrTagInput {
+  name: string;
+  kind: typeof ThoughtKind.Type | typeof ThoughtKind.Tag;
+}
+
+/** What `createTypeOrTag` made, or was answered with. */
+export interface TypeOrTagOutcome {
+  /** What the create answered with: by it the type or the tag is addressed. */
+  id: string;
+  /**
+   * True when this call made it. False when TheBrain answered with one the
+   * brain had, which it does for a tag under the name of a tag that is there.
+   * Null when the log that tells the two apart could not be read: `notRead`.
+   */
+  created: boolean | null;
+  /** The thought as it read after the create: its name need not be the one asked for. */
+  thought: ThoughtDto | null;
+  /** The failure of a read made after the create, which is no failure of the create. */
+  notRead: unknown;
 }
 
 /**
@@ -131,6 +154,8 @@ export const ALIASES_UNSUPPORTED =
 export class ThoughtsResource {
   /** Only a yes is remembered: an update can add aliases while we run. */
   #aliasesSeen = false;
+  /** The last `createTypeOrTag` of each brain, settled or not: the next one waits for it. */
+  #typesAndTags = new Map<string, Promise<void>>();
 
   constructor(
     private readonly client: TheBrainClient,
@@ -328,6 +353,109 @@ export class ThoughtsResource {
       );
     }
     return id;
+  }
+
+  /**
+   * Makes a type or a tag, with a name and nothing else, and says whether it
+   * was made: for a tag TheBrain answers with the one the brain has under
+   * that name, and the answer is an identifier either way.
+   *
+   * **A tag's name is matched, loosely.** A create with `kind: 4` under the
+   * name of a tag that is there makes nothing and answers with that tag's
+   * identifier. The names need not be the same: letter case, a character
+   * that does not show, a ligature or a superscript for its letters, and a
+   * no-break space for a space are all taken for one name (docs/api-map.md,
+   * L39). The tag keeps the name it had. A type is not matched at all: a
+   * second create makes a second type of the same name.
+   *
+   * **The log tells the two apart.** A thought made by a create has its
+   * `101` in the log when the create is answered, and that entry is later
+   * than every entry the log had before. So the newest entry is read ahead
+   * of the create and the thought's own entries after it. A list would not
+   * do: `/types` and `/tags` are a copy, behind a create by up to 0.42 s.
+   *
+   * **One at a time in a brain.** Two creates of one new tag name sent at
+   * once were two tags 5 times of 10, where one sent straight after the
+   * other's answer was the same tag 25 times of 25. And a create that
+   * overtook another's read of the log would pass for what that call made.
+   *
+   * **Nothing beside the name is sent.** A label or aliases sent with the
+   * name of a tag that is there are written onto that tag. A source or a
+   * `typeId` makes a link whose meaning goes by the kinds at its two ends, a
+   * type set on the source among them, and a type under a type and a tag
+   * under a tag are the catch-all 403. A caption and colours are a patch of
+   * the thought afterwards.
+   *
+   * A read that fails after the create does not fail it: the identifier is
+   * returned with what was read, and the failure in `notRead`.
+   */
+  async createTypeOrTag(
+    brainId: string,
+    input: CreateTypeOrTagInput,
+  ): Promise<TypeOrTagOutcome> {
+    assertUuid(brainId, "brainId");
+    assertName(input.name);
+    // Ahead of the request, which takes 1 as well and makes an ordinary thought.
+    if (input.kind !== ThoughtKind.Type && input.kind !== ThoughtKind.Tag) {
+      throw new TheBrainError(
+        "bad_request",
+        `kind must be 2 (type) or 4 (tag), got ${String(input.kind)}: ` +
+          "an ordinary thought is made by create()",
+      );
+    }
+    const before = this.#typesAndTags.get(brainId) ?? Promise.resolve();
+    const mine = before.then(() => this.#typeOrTag(brainId, input));
+    // What the next one waits for is that this one is over, not how it ended.
+    this.#typesAndTags.set(
+      brainId,
+      mine.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return mine;
+  }
+
+  async #typeOrTag(brainId: string, input: CreateTypeOrTagInput): Promise<TypeOrTagOutcome> {
+    const [newest] = await this.client.get<ModificationLogDto[]>(
+      `/api/brains/${brainId}/modifications`,
+      { query: { maxLogs: 1 } },
+    );
+    const path = `/api/thoughts/${brainId}`;
+    const answer = await this.client.post<{ id: string }>(path, {
+      json: { name: input.name, kind: input.kind, acType: 0 },
+    });
+    const id = createdId(
+      answer,
+      path,
+      `TheBrain answered 200 with an identifier of zeros for "${shownName(input.name)}", so ` +
+        "there is nothing to address it by. That answer has not been seen for a type or a " +
+        "tag, so look for it before creating it again",
+    );
+
+    let created: boolean | null = null;
+    let thought: ThoughtDto | null = null;
+    let notRead: unknown = null;
+    try {
+      // Its own entries alone: a tag in use has an entry for each thought it
+      // is on, and its `101` would be past the newest hundred of those.
+      const own = await this.modifications(brainId, id, { maxLogs: 100, includeRelated: false });
+      const made = own.find(
+        (l) =>
+          l.modType === ModType.Created &&
+          l.sourceType === EntityType.Thought &&
+          l.sourceId.toLowerCase() === id.toLowerCase(),
+      );
+      // With no `101` among them it was there before: one made a moment ago
+      // has no other entry. A log with nothing in it had none to be later than.
+      created =
+        made !== undefined &&
+        (newest === undefined || compareLogTime(logTime(made), logTime(newest)) > 0);
+      thought = await this.get(brainId, id);
+    } catch (error) {
+      notRead = error;
+    }
+    return { id, created, thought, notRead };
   }
 
   /**

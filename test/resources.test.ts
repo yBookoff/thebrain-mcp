@@ -925,6 +925,278 @@ describe("type and tag lists", () => {
   });
 });
 
+describe("creating a type or a tag", () => {
+  const NEW = "eeeeeeee-0000-4000-8000-000000000005";
+  const NEWEST = "2026-10-13T21:01:39.153181";
+
+  /**
+   * A brain whose log's newest entry is `newest`, whose create answers `NEW`,
+   * and where that thought's own entries are `own` and it reads as `read`. A
+   * route in `first` goes ahead of these.
+   */
+  const brain = (
+    own: () => ModificationLogDto[],
+    read: ThoughtDto,
+    {
+      newest = [log("other", 103, NEWEST)],
+      first = [],
+    }: { newest?: ModificationLogDto[]; first?: Array<[string, Route]> } = {},
+  ) =>
+    apiWith([
+      ...first,
+      ["/api/brains/", () => newest],
+      ["POST /api/thoughts/", () => ({ id: NEW })],
+      ["/modifications", own],
+      ["/api/thoughts/", () => read],
+    ]);
+  const requests = (calls: Array<{ method: string; url: URL }>): string[] =>
+    calls.map((c) => `${c.method} ${c.url.pathname}${c.url.search}`);
+
+  it("reads the newest log entry, creates with a name and a kind alone, then reads the thought's own entries and the thought", async () => {
+    const tag = thought(NEW, "gotcha", { kind: 4 });
+    const { api, calls } = brain(() => [log(NEW, 101, "2026-10-13T21:01:40.546889")], tag);
+    const outcome = await api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 });
+
+    expect(requests(calls)).toEqual([
+      `GET /api/brains/${BRAIN}/modifications?maxLogs=1`,
+      `POST /api/thoughts/${BRAIN}`,
+      `GET /api/thoughts/${BRAIN}/${NEW}/modifications?maxLogs=100&includeRelatedLogs=false`,
+      `GET /api/thoughts/${BRAIN}/${NEW}`,
+    ]);
+    // No label, no aliases, no source and no typeId: each does something to
+    // a tag that is there, or makes a link the kinds at its ends decide.
+    expect(calls[1]!.body).toEqual({ name: "gotcha", kind: 4, acType: 0 });
+    expect(outcome).toEqual({ id: NEW, created: true, thought: tag, notRead: null });
+  });
+
+  it("a type is asked for with kind 2", async () => {
+    const type = thought(NEW, "Pattern", { kind: 2, label: "Pattern" });
+    const { api, calls } = brain(() => [log(NEW, 101, "2026-10-13T21:01:40")], type);
+    const outcome = await api.thoughts.createTypeOrTag(BRAIN, { name: "Pattern", kind: 2 });
+    expect(calls[1]!.body).toEqual({ name: "Pattern", kind: 2, acType: 0 });
+    expect(outcome).toMatchObject({ id: NEW, created: true, thought: type });
+  });
+
+  it("one whose 101 is not later than the newest entry the log had was there before", async () => {
+    // TheBrain answers a tag's create with the tag the brain has under that
+    // name, and the answer is an identifier like any other.
+    const there = thought(NEW, "Gotcha", { kind: 4 });
+    for (const madeAt of [
+      "2026-10-01T08:00:00",
+      "2026-10-13T21:01:39.15318",
+      // The newest entry is this tag's own 101: made by the call before.
+      NEWEST,
+    ]) {
+      const { api } = brain(() => [log(NEW, 202, "2026-10-13T21:00:00"), log(NEW, 101, madeAt)], there);
+      const outcome = await api.thoughts.createTypeOrTag(BRAIN, { name: "GOTCHA", kind: 4 });
+      expect(outcome, madeAt).toEqual({ id: NEW, created: false, thought: there, notRead: null });
+    }
+  });
+
+  it("tells the two apart by a microsecond, which Date would not", async () => {
+    const tag = thought(NEW, "gotcha", { kind: 4 });
+    const made = (at: string) =>
+      brain(() => [log(NEW, 101, at)], tag).api.thoughts.createTypeOrTag(BRAIN, {
+        name: "gotcha",
+        kind: 4,
+      });
+    expect((await made("2026-10-13T21:01:39.153182")).created).toBe(true);
+    // The API trims trailing zeros: .1532 is .153200, later than .153181.
+    expect((await made("2026-10-13T21:01:39.1532")).created).toBe(true);
+    expect((await made("2026-10-13T21:01:39.15318")).created).toBe(false);
+  });
+
+  it("goes by when the entry was filed, as the log is ordered", async () => {
+    const tag = thought(NEW, "gotcha", { kind: 4 });
+    const entry = {
+      ...log(NEW, 101, "2026-10-13T21:01:39.153181"),
+      modificationDateTime: "2026-10-13T21:01:39.153182",
+    };
+    const { api } = brain(() => [entry], tag);
+    expect((await api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 })).created).toBe(
+      true,
+    );
+  });
+
+  it("with no 101 among its own entries it was there before", async () => {
+    // A tag with more than a hundred entries of its own, or one from a brain
+    // that was imported: a thought made a moment ago has its 101 and no more.
+    const there = thought(NEW, "gotcha", { kind: 4 });
+    for (const own of [[], [log(NEW, 202, "2026-10-13T21:01:40")]]) {
+      const { api } = brain(() => own, there);
+      const outcome = await api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 });
+      expect(outcome.created).toBe(false);
+    }
+  });
+
+  it("an entry about another thought, or of a link, is not its 101", async () => {
+    const there = thought(NEW, "gotcha", { kind: 4 });
+    const { api } = brain(
+      () => [log(TAG, 101, "2026-10-13T21:01:40"), log(NEW, 101, "2026-10-13T21:01:40", 3)],
+      there,
+    );
+    expect((await api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 })).created).toBe(
+      false,
+    );
+  });
+
+  it("in a brain whose log was empty, a 101 is the call's own", async () => {
+    const tag = thought(NEW, "gotcha", { kind: 4 });
+    const made = brain(() => [log(NEW, 101, "2026-10-13T21:01:40")], tag, { newest: [] });
+    expect(
+      (await made.api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 })).created,
+    ).toBe(true);
+    const there = brain(() => [], tag, { newest: [] });
+    expect(
+      (await there.api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 })).created,
+    ).toBe(false);
+  });
+
+  it("a read that fails after the create does not fail it: the identifier comes back with what was read", async () => {
+    const tag = thought(NEW, "gotcha", { kind: 4 });
+    // The thought's own entries are not read: nothing says which it was.
+    const noLog = brain(() => [], tag, { first: [[`/${NEW}/modifications`, () => 500]] });
+    const first = await noLog.api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 });
+    expect(first).toMatchObject({ id: NEW, created: null, thought: null });
+    expect(first.notRead).toMatchObject({ kind: "server", status: 500 });
+
+    // The thought is not read: whether it was made is known all the same.
+    const noRead = apiWith([
+      ["/api/brains/", () => [log("other", 103, NEWEST)]],
+      ["POST /api/thoughts/", () => ({ id: NEW })],
+      ["/modifications", () => [log(NEW, 101, "2026-10-13T21:01:40")]],
+      ["/api/thoughts/", () => 500],
+    ]);
+    const second = await noRead.api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 });
+    expect(second).toMatchObject({ id: NEW, created: true, thought: null });
+    expect(second.notRead).toMatchObject({ kind: "server", status: 500 });
+  });
+
+  it("a log that cannot be read, and a create that is refused, are thrown with nothing after them", async () => {
+    const tag = thought(NEW, "gotcha", { kind: 4 });
+    const noLog = brain(() => [], tag, { first: [["/api/brains/", () => 500]] });
+    await expect(
+      noLog.api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 }),
+    ).rejects.toMatchObject({ kind: "server", method: "GET" });
+    expect(requests(noLog.calls)).toEqual([`GET /api/brains/${BRAIN}/modifications?maxLogs=1`]);
+
+    const refused = brain(() => [], tag, { first: [["POST /api/thoughts/", () => 400]] });
+    await expect(
+      refused.api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 }),
+    ).rejects.toMatchObject({ kind: "bad_request", method: "POST" });
+    expect(refused.calls.map((c) => c.method)).toEqual(["GET", "POST"]);
+  });
+
+  it("an answer of zeros is no identifier", async () => {
+    const tag = thought(NEW, "gotcha", { kind: 4 });
+    const { api, calls } = brain(() => [], tag, {
+      first: [["POST /api/thoughts/", () => ({ id: "00000000-0000-0000-0000-000000000000" })]],
+    });
+    await expect(
+      api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 }),
+    ).rejects.toMatchObject({ kind: "zero_id" });
+    expect(calls.map((c) => c.method)).toEqual(["GET", "POST"]);
+  });
+
+  it("sends nothing for a name TheBrain would not keep, for another kind, or for a brainId that is none", async () => {
+    const { api, calls } = brain(() => [], thought(NEW, "x", { kind: 4 }));
+    const create = (name: string, kind: number, brainId = BRAIN): Promise<unknown> =>
+      api.thoughts.createTypeOrTag(brainId, { name, kind: kind as 2 | 4 });
+
+    await expect(create(" \u00a0", 4)).rejects.toMatchObject({
+      kind: "bad_request",
+      message: "name is white space alone (U+0020 U+00A0), and a thought has to have a name",
+    });
+    await expect(create("x".repeat(MAX_NAME_LENGTH + 1), 2)).rejects.toMatchObject({
+      kind: "bad_request",
+    });
+    // The API takes 1 here and makes an ordinary thought, and refuses 3 and 5.
+    for (const kind of [1, 3, 5]) {
+      await expect(create("x", kind)).rejects.toMatchObject({
+        kind: "bad_request",
+        message: `kind must be 2 (type) or 4 (tag), got ${kind}: an ordinary thought is made by create()`,
+      });
+    }
+    await expect(create("x", 4, "nope")).rejects.toMatchObject({ kind: "invalid_uuid" });
+    await expect(create("x", 4, "00000000-0000-0000-0000-000000000000")).rejects.toMatchObject({
+      kind: "invalid_uuid",
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("two calls for one brain go one after the other, each from its read of the log to its last read", async () => {
+    // Sent at once, two creates of one new tag name are two tags as often as
+    // not, and a create that overtook another's read of the log would pass
+    // for what that call made.
+    const { api, calls } = brain(
+      () => [log(NEW, 101, "2026-10-13T21:01:40")],
+      thought(NEW, "gotcha", { kind: 4 }),
+    );
+    await Promise.all([
+      api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 }),
+      api.thoughts.createTypeOrTag(BRAIN, { name: "GOTCHA", kind: 4 }),
+    ]);
+    const steps = calls.map((c) => {
+      if (c.method === "POST") return `create ${(c.body as { name: string }).name}`;
+      return c.url.pathname.includes("/api/brains/") ? "log" : "read";
+    });
+    expect(steps).toEqual([
+      "log",
+      "create gotcha",
+      "read",
+      "read",
+      "log",
+      "create GOTCHA",
+      "read",
+      "read",
+    ]);
+  });
+
+  it("a call that failed does not hold up the next, and another brain does not wait", async () => {
+    const OTHER = "aaaaaaaa-0000-4000-8000-00000000000f";
+    let refuse = true;
+    let release = (): void => {};
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const tag = thought(NEW, "gotcha", { kind: 4 });
+    const answered: string[] = [];
+    const api = new TheBrainApi({
+      apiKey: "k",
+      fetchImpl: (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const url = new URL(String(input));
+        const json = (value: unknown, status = 200): Response =>
+          new Response(JSON.stringify(value), {
+            status,
+            headers: { "content-type": "application/json" },
+          });
+        if (url.pathname.includes("/api/brains/")) {
+          // The other brain's log is not answered until the test lets it be.
+          if (url.pathname.includes(OTHER)) await held;
+          return json([]);
+        }
+        if (init?.method === "POST") {
+          if (refuse) {
+            refuse = false;
+            return json("Could not create thought.", 400);
+          }
+          return json({ id: NEW });
+        }
+        if (url.pathname.endsWith("/modifications")) return json([]);
+        answered.push(url.pathname);
+        return json(tag);
+      }) as unknown as typeof fetch,
+    });
+
+    const stuck = api.thoughts.createTypeOrTag(OTHER, { name: "slow", kind: 4 });
+    const failed = api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 });
+    const next = api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 });
+    await expect(failed).rejects.toMatchObject({ kind: "bad_request" });
+    await expect(next).resolves.toMatchObject({ id: NEW });
+    expect(answered).toEqual([`/api/thoughts/${BRAIN}/${NEW}`]);
+    release();
+    await expect(stuck).resolves.toMatchObject({ id: NEW });
+  });
+});
+
 describe("exact name lookup", () => {
   it("404 means \"no such thought\" rather than an error", async () => {
     const { api } = apiWith([["/api/thoughts/", () => 404]]);

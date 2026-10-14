@@ -1195,15 +1195,15 @@ describe("brain_recent_changes, the names the log keeps and the identifiers it h
 describe("tools/list", () => {
   it("is the size the documents give for it", async () => {
     // ARCHITECTURE.md §4 and CONTRIBUTING.md count it in tokens at four
-    // characters each, "about 1080" for the descriptions and "about 4500"
+    // characters each, "about 1160" for the descriptions and "about 4750"
     // for the whole of it, and had gone stale apart: 4200 in one and 3900 in
     // the other. A description or a schema that changes these numbers
     // changes those two sentences.
     const { client } = await connect([]);
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(17);
-    expect(tools.reduce((sum, tool) => sum + (tool.description ?? "").length, 0)).toBe(4309);
-    expect(JSON.stringify(tools).length).toBe(18103);
+    expect(tools).toHaveLength(18);
+    expect(tools.reduce((sum, tool) => sum + (tool.description ?? "").length, 0)).toBe(4648);
+    expect(JSON.stringify(tools).length).toBe(19028);
   });
 });
 
@@ -8847,5 +8847,426 @@ describe("a thought's name: none, white space alone, too long, and one that does
         all.map((name, i) => `- ${name} — ${OTHER.slice(0, -2)}${String(i).padStart(2, "0")}`),
       );
     });
+  });
+});
+
+describe("brain_create_type_or_tag", () => {
+  const NEW = "eeeeeeee-0000-4000-8000-000000000005";
+  /** The newest entry the brain's log has before the call. */
+  const NEWEST = "2026-10-13T21:01:39.153181";
+  const entry = (sourceId: string, modType: number, at: string) => ({
+    sourceId,
+    sourceType: 2,
+    extraAId: "00000000-0000-0000-0000-000000000000",
+    extraAType: -1,
+    extraBId: "00000000-0000-0000-0000-000000000000",
+    extraBType: -1,
+    modType,
+    oldValue: null,
+    newValue: null,
+    userId: "00000000-0000-0000-0000-000000000000",
+    brainId: BRAIN,
+    creationDateTime: at,
+    modificationDateTime: at,
+    syncUpdateDateTime: null,
+  });
+  /** A thought made by the call has its `101` after the newest entry; one that was there, before it. */
+  const MADE_NOW = "2026-10-13T21:01:40.546889";
+  const MADE_BEFORE = "2026-10-02T08:00:00";
+
+  /**
+   * A brain that answers a create with `NEW`, which then reads as `read`
+   * and has its `101` at `madeAt`. A route in `first` goes ahead of these.
+   */
+  const routes = (
+    read: Record<string, unknown>,
+    madeAt: string,
+    first: Route[] = [],
+  ): Route[] => [
+    ...first,
+    ["GET /api/brains/", () => [entry(THOUGHT, 103, NEWEST)]],
+    ["POST /api/thoughts/", () => ({ id: NEW })],
+    [`GET /${NEW}/modifications`, () => [entry(NEW, 101, madeAt)]],
+    ["GET /api/thoughts/", () => ({ ...thought(""), id: NEW, ...read })],
+  ];
+  const requests = (calls: Array<{ method: string; path: string }>): string[] =>
+    calls.map((c) => `${c.method} ${c.path}`);
+  const FOUR = [
+    `GET /api/brains/${BRAIN}/modifications`,
+    `POST /api/thoughts/${BRAIN}`,
+    `GET /api/thoughts/${BRAIN}/${NEW}/modifications`,
+    `GET /api/thoughts/${BRAIN}/${NEW}`,
+  ];
+
+  const USE_TAG = "pass it to brain_tag, or in tagIds to brain_create_thought or brain_ingest";
+  const USE_TYPE =
+    "pass it as typeId to brain_create_thought, brain_update_thought or brain_ingest";
+  const next = (kind: string, use: string): string =>
+    `## Next\nThe identifier above works immediately: ${use}. brain_list_types_and_tags ` +
+    `lists the new ${kind} within half a second or so, and brain_update_thought gives it a ` +
+    "caption or colours.";
+  const LOOSE =
+    "TheBrain takes two names for one tag when they differ in letter case, in characters " +
+    "that do not show, or in the form of a character, such as a ligature, a superscript or " +
+    "a no-break space.";
+
+  it("makes a tag with a name and a kind alone, and gives it by identifier, marked", async () => {
+    const { call, calls, sent } = await connect(routes({ name: "gotcha", kind: 4 }, MADE_NOW));
+    const result = await call("brain_create_type_or_tag", {
+      brainId: BRAIN,
+      kind: "tag",
+      name: "gotcha",
+    });
+
+    expect(result).toEqual({
+      isError: false,
+      text: `## Done\n- created tag "gotcha" — ${NEW} [tag]\n\n${next("tag", USE_TAG)}`,
+    });
+    expect(requests(calls)).toEqual(FOUR);
+    expect(sent("POST")).toEqual([{ name: "gotcha", kind: 4, acType: 0 }]);
+  });
+
+  it("makes a type, and says where a type's identifier goes", async () => {
+    const { call, sent } = await connect(
+      routes({ name: "Pattern", kind: 2, label: "Pattern" }, MADE_NOW),
+    );
+    const result = await call("brain_create_type_or_tag", {
+      brainId: BRAIN,
+      kind: "type",
+      name: "Pattern",
+    });
+
+    expect(result).toEqual({
+      isError: false,
+      text: `## Done\n- created type "Pattern" — ${NEW} [type]\n\n${next("type", USE_TYPE)}`,
+    });
+    expect(sent("POST")).toEqual([{ name: "Pattern", kind: 2, acType: 0 }]);
+  });
+
+  it("a tag that was there is not reported as created", async () => {
+    // TheBrain answers the create with the identifier of the tag the brain
+    // has, as it answers with a new one, and "created" would be untrue.
+    const { call, calls } = await connect(routes({ name: "gotcha", kind: 4 }, MADE_BEFORE));
+    const result = await call("brain_create_type_or_tag", {
+      brainId: BRAIN,
+      kind: "tag",
+      name: "gotcha",
+    });
+
+    expect(result).toEqual({
+      isError: false,
+      text:
+        `## Already there\n- tag "gotcha" — ${NEW} [tag]\n\n## Note\n` +
+        "No tag was created: the brain had this one, and TheBrain answered the create with " +
+        `it. It is as it was, and the identifier above is the one to use: ${USE_TAG}.`,
+    });
+    expect(requests(calls)).toEqual(FOUR);
+  });
+
+  it("one that was there under another name is given by the name it has", async () => {
+    for (const [asked, has, shownAsked] of [
+      ["GOTCHA", "Gotcha", "GOTCHA"],
+      ["m\u00b2", "m2", "m\u00b2"],
+      // As it would be stored: the padding is not what tells the names apart.
+      ["  gotcha\t", "Gotcha", "gotcha"],
+    ] as const) {
+      const { call } = await connect(routes({ name: has, kind: 4 }, MADE_BEFORE));
+      const result = await call("brain_create_type_or_tag", {
+        brainId: BRAIN,
+        kind: "tag",
+        name: asked,
+      });
+      expect(result, asked).toEqual({
+        isError: false,
+        text:
+          `## Already there\n- tag "${has}" — ${NEW} [tag]\n\n## Note\n` +
+          "No tag was created: the brain had this one, and TheBrain answered the create with " +
+          `it. Its name is "${has}", not "${shownAsked}" as asked for: ${LOOSE} It is as it ` +
+          `was, and the identifier above is the one to use: ${USE_TAG}.`,
+      });
+    }
+  });
+
+  it("a name that does not show is spelled out, the one asked for and the one found", async () => {
+    // Every name of such characters alone is one name to TheBrain.
+    const { call } = await connect(routes({ name: "\ufeff", kind: 4 }, MADE_BEFORE));
+    const result = await call("brain_create_type_or_tag", {
+      brainId: BRAIN,
+      kind: "tag",
+      name: "\u200b",
+    });
+    expect(result.text).toContain(`- tag "(no visible character: U+FEFF)" — ${NEW} [tag]`);
+    expect(result.text).toContain(
+      'Its name is "(no visible character: U+FEFF)", not "(no visible character: U+200B)" as asked for',
+    );
+  });
+
+  it("the name of a tag just made is the one read, as TheBrain stored it", async () => {
+    const { call, sent } = await connect(routes({ name: "got cha", kind: 4 }, MADE_NOW));
+    const result = await call("brain_create_type_or_tag", {
+      brainId: BRAIN,
+      kind: "tag",
+      name: " got\tcha ",
+    });
+    expect(result.text).toContain(`- created tag "got cha" — ${NEW} [tag]`);
+    // The request carries the name as it was given.
+    expect(sent("POST")).toEqual([{ name: " got\tcha ", kind: 4, acType: 0 }]);
+  });
+
+  it("a type that was there would be said to be there, should TheBrain ever answer with one", async () => {
+    // Not seen: a type is made under a name another has. The result goes by
+    // the log for a type as for a tag, and not by what was seen.
+    const { call } = await connect(routes({ name: "pattern", kind: 2 }, MADE_BEFORE));
+    const result = await call("brain_create_type_or_tag", {
+      brainId: BRAIN,
+      kind: "type",
+      name: "Pattern",
+    });
+    expect(result).toEqual({
+      isError: false,
+      text:
+        `## Already there\n- type "pattern" — ${NEW} [type]\n\n## Note\n` +
+        "No type was created: the brain had this one, and TheBrain answered the create with " +
+        'it. Its name is "pattern", not "Pattern" as asked for. It is as it was, and the ' +
+        `identifier above is the one to use: ${USE_TYPE}.`,
+    });
+  });
+
+  it("a name TheBrain would not keep is refused before any request", async () => {
+    const { call, calls } = await connect(routes({ name: "x", kind: 4 }, MADE_NOW));
+    const refused = async (name: string): Promise<string> => {
+      const result = await call("brain_create_type_or_tag", { brainId: BRAIN, kind: "tag", name });
+      expect(result.isError, JSON.stringify(name)).toBe(true);
+      return result.text;
+    };
+    expect(await refused(" \u00a0")).toBe(
+      "name is white space alone (U+0020 U+00A0), and a thought has to have a name. Nothing was written.",
+    );
+    expect(await refused("\u0085")).toBe(
+      "name is white space alone (U+0085), and a thought has to have a name. Nothing was written.",
+    );
+    expect(await refused("a".repeat(1025))).toBe(
+      "name is 1025 UTF-16 units long, and TheBrain keeps the first 1024 of a name and drops " +
+        "the rest with a 200. Nothing was written.",
+    );
+    // The schema's own refusals: an empty name, and a kind that is neither.
+    expect(await refused("")).toContain("name");
+    const ordinary = await call("brain_create_type_or_tag", {
+      brainId: BRAIN,
+      kind: "thought",
+      name: "x",
+    });
+    expect(ordinary.isError).toBe(true);
+    expect(ordinary.text).toContain("Expected 'type' | 'tag'");
+    expect(calls).toEqual([]);
+  });
+
+  it("a brainId that is malformed or of zeros sends nothing, and one that is no brain stops at the first read", async () => {
+    const unknown = (): Response =>
+      new Response(JSON.stringify(`Access to brain ${BRAIN} is unauthorized.`), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
+    const { call, calls } = await connect(
+      routes({ name: "x", kind: 4 }, MADE_NOW, [["GET /api/brains/", unknown]]),
+    );
+    for (const brainId of ["nope", "00000000-0000-0000-0000-000000000000"]) {
+      const result = await call("brain_create_type_or_tag", { brainId, kind: "tag", name: "x" });
+      expect(result.isError, brainId).toBe(true);
+      expect(result.text, brainId).toContain("brainId");
+    }
+    expect(calls).toEqual([]);
+
+    const result = await call("brain_create_type_or_tag", {
+      brainId: BRAIN,
+      kind: "tag",
+      name: "x",
+    });
+    expect(result).toEqual({
+      isError: true,
+      text:
+        `Access to brain ${BRAIN} is unauthorized. The key was accepted: it is brainId that ` +
+        "names no brain open to it. Take brainId from brain_list. The other identifiers in " +
+        "the call were not looked at.",
+    });
+    expect(requests(calls)).toEqual([`GET /api/brains/${BRAIN}/modifications`]);
+  });
+
+  it("with the log not read nothing is created, and the result says what the read was for", async () => {
+    const { call, calls } = await connect(
+      routes({ name: "x", kind: 4 }, MADE_NOW, [
+        ["GET /api/brains/", () => new Response(JSON.stringify("boom"), { status: 500 })],
+      ]),
+    );
+    for (const kind of ["tag", "type"]) {
+      const result = await call("brain_create_type_or_tag", { brainId: BRAIN, kind, name: "x" });
+      expect(result, kind).toEqual({
+        isError: true,
+        text:
+          `Nothing was created. The brain's log is read before a ${kind} is made, to tell ` +
+          "one this call makes from one that was there, and that read failed: " +
+          `${boomAt(`GET /api/brains/${BRAIN}/modifications`)} This call can be sent again as it is.`,
+      });
+    }
+    expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+  });
+
+  it("a create that is refused is the API's answer, with nothing read after it", async () => {
+    const { call, calls } = await connect(
+      routes({ name: "x", kind: 4 }, MADE_NOW, [
+        ["POST /api/thoughts/", () => new Response(JSON.stringify("boom"), { status: 500 })],
+      ]),
+    );
+    const result = await call("brain_create_type_or_tag", { brainId: BRAIN, kind: "tag", name: "x" });
+    expect(result).toEqual({ isError: true, text: boomAt(`POST /api/thoughts/${BRAIN}`) });
+    expect(requests(calls)).toEqual(FOUR.slice(0, 2));
+  });
+
+  describe("a create that gets no answer", () => {
+    const NO_ANSWER =
+      "request exceeded 30000 ms. Check that the TheBrain desktop app is running and its " +
+      "local API is enabled.";
+    const unanswered = async (kind: string) => {
+      const { call, calls } = await connect(
+        routes({ name: "x", kind: 4 }, MADE_NOW, [
+          [
+            "POST /api/thoughts/",
+            () => {
+              // What the client makes of a timeout: the request may have reached TheBrain.
+              throw new DOMException("timed out", "TimeoutError");
+            },
+          ],
+        ]),
+      );
+      const result = await call("brain_create_type_or_tag", {
+        brainId: BRAIN,
+        kind,
+        name: " Gotcha ",
+      });
+      return { result, calls };
+    };
+
+    it("for a tag says to send the call again: TheBrain makes no second tag of the name", async () => {
+      const { result, calls } = await unanswered("tag");
+      expect(result).toEqual({
+        isError: true,
+        text:
+          `${NO_ANSWER}\n\n## Next\n` +
+          'No answer came to the create, so TheBrain may have made the tag "Gotcha" all the ' +
+          "same, and there is no identifier to give for it. Send this call again: under the " +
+          "name of a tag the brain has TheBrain makes no second one, and the result gives the " +
+          "tag that is there.",
+      });
+      expect(requests(calls)).toEqual(FOUR.slice(0, 2));
+    });
+
+    it("for a type says to look first: sent again, the call makes a second type", async () => {
+      const { result } = await unanswered("type");
+      expect(result).toEqual({
+        isError: true,
+        text:
+          `${NO_ANSWER}\n\n## Next\n` +
+          'No answer came to the create, so TheBrain may have made the type "Gotcha" all the ' +
+          "same, and there is no identifier to give for it. Before creating it again, look " +
+          "for it with brain_list_types_and_tags, which lists a new type within half a second " +
+          "or so: sent again, this call makes a second type of the same name.",
+      });
+    });
+  });
+
+  describe("a read that fails after the create", () => {
+    const IN_PART =
+      "The call stopped at its first failure, and nothing is rolled back. What is under " +
+      "Done was done. What is under Failed was not, unless its line says otherwise. ";
+    const boom = (): Response => new Response(JSON.stringify("boom"), { status: 500 });
+    const failed500 = (request: string): string =>
+      `TheBrain failed with a 500 (${request}): boom. The fault is inside the app, not in the ` +
+      "arguments of this call. A read is safe to repeat; before repeating a write, check what it left.";
+
+    it("does not lose the identifier: whether the tag was made is said to be unknown", async () => {
+      // Thrown to guard(), the 500 was the whole result, and for a type the
+      // call sent again would have made a second one.
+      const { call, calls } = await connect(
+        routes({ name: "x", kind: 4 }, MADE_NOW, [[`GET /${NEW}/modifications`, boom]]),
+      );
+      const result = await call("brain_create_type_or_tag", {
+        brainId: BRAIN,
+        kind: "tag",
+        name: "gotcha",
+      });
+      expect(result).toEqual({
+        isError: true,
+        text:
+          `## Done\n- the brain has the tag ${NEW}, asked for as "gotcha"\n\n` +
+          "## Failed\n- whether this call made it, or TheBrain answered with a tag that was " +
+          `there: ${failed500(`GET /api/thoughts/${BRAIN}/${NEW}/modifications`)}\n\n` +
+          `## Next\n${IN_PART}The identifier works immediately: do not create the tag again. ` +
+          `Read it with brain_get_thought, then ${USE_TAG}.`,
+      });
+      expect(requests(calls)).toEqual(FOUR.slice(0, 3));
+    });
+
+    it("says what is known when only the thought was not read: made by this call, or there before", async () => {
+      for (const [madeAt, had] of [
+        [MADE_NOW, "has, made by this call,"],
+        [MADE_BEFORE, "had"],
+      ] as const) {
+        const { call } = await connect([
+          ["GET /api/brains/", () => [entry(THOUGHT, 103, NEWEST)]],
+          ["POST /api/thoughts/", () => ({ id: NEW })],
+          [`GET /${NEW}/modifications`, () => [entry(NEW, 101, madeAt)]],
+          ["GET /api/thoughts/", boom],
+        ]);
+        const result = await call("brain_create_type_or_tag", {
+          brainId: BRAIN,
+          kind: "type",
+          name: "Pattern",
+        });
+        expect(result, madeAt).toEqual({
+          isError: true,
+          text:
+            `## Done\n- the brain ${had} the type ${NEW}, asked for as "Pattern"\n\n` +
+            "## Failed\n- the read of the type after the create: " +
+            `${failed500(`GET /api/thoughts/${BRAIN}/${NEW}`)}\n\n` +
+            `## Next\n${IN_PART}The identifier works immediately: do not create the type again. ` +
+            `Read it with brain_get_thought, then ${USE_TYPE}.`,
+        });
+      }
+    });
+  });
+
+  it("takes a kind of two values and a name, and nothing a tag that is there would be changed by", async () => {
+    const { client } = await connect([]);
+    const { tools } = await client.listTools();
+    const schema = tools.find((t) => t.name === "brain_create_type_or_tag")!.inputSchema;
+    expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["brainId", "kind", "name"]);
+    expect(schema.properties).toMatchObject({ kind: { type: "string", enum: ["type", "tag"] } });
+    expect(schema.required).toEqual(["brainId", "kind", "name"]);
+  });
+
+  it("every tool a description sends the model to is a tool", async () => {
+    // brain_tag said to "create a new tag via brain_create_thought", which
+    // makes an ordinary thought, and brain_tag then refuses that as no tag.
+    const { client } = await connect([]);
+    const { tools } = await client.listTools();
+    const names = new Set(tools.map((t) => t.name));
+    const mentioned = [...JSON.stringify(tools).matchAll(/brain_[a-z_]+/g)].map((m) => m[0]);
+    expect(mentioned.filter((name) => !names.has(name))).toEqual([]);
+
+    const tag = tools.find((t) => t.name === "brain_tag")!.description ?? "";
+    expect(tag).toContain("create a new tag via brain_create_type_or_tag");
+    expect(tag).not.toContain("brain_create_thought");
+    // And nothing sends the model to brain_create_thought for a tag or a type.
+    const create = tools.find((t) => t.name === "brain_create_thought")!;
+    expect(JSON.stringify(create.inputSchema)).not.toContain('"kind"');
+  });
+
+  it("a plan still makes ordinary thoughts alone", async () => {
+    const { client } = await connect([]);
+    const { tools } = await client.listTools();
+    const plan = tools.find((t) => t.name === "brain_ingest")!.inputSchema.properties as {
+      thoughts: { items: { properties: Record<string, unknown> } };
+    };
+    expect(Object.keys(plan.thoughts.items.properties)).not.toContain("kind");
   });
 });

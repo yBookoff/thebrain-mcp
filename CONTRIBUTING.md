@@ -75,9 +75,9 @@ below the server layer may import from it.
 
 Tool descriptions are how the model decides what to call, so they are part of the
 interface, not documentation. Write them to say **when** to reach for the tool,
-not only what it does. Keep them tight — the seventeen descriptions together run
-about 1080 tokens, and the whole `tools/list` payload with schemas about 4500:
-4,309 and 18,103 characters, with a token at four. That budget is spent on
+not only what it does. Keep them tight — the eighteen descriptions together run
+about 1160 tokens, and the whole `tools/list` payload with schemas about 4750:
+4,648 and 19,028 characters, with a token at four. That budget is spent on
 every request.
 
 The same applies to a skill's frontmatter `description`: it drives routing.
@@ -89,7 +89,7 @@ Reopen these only with new evidence, not new preference:
 - **TypeScript** over Python — [`docs/stack-evaluation.md`](docs/stack-evaluation.md).
 - **stdio transport.** HTTP only if the server ever needs to run off-machine.
 - **Embeddings are an optional peer dependency.** 380 MB is not a default.
-- **Semantic tools, not an API mirror.** 17 tools, not 48.
+- **Semantic tools, not an API mirror.** 18 tools, not 48.
 - **Claude Code is the priority client.** Claude Desktop is supported on a
   best-effort basis; a capability that exists only in Code is still fair game.
 

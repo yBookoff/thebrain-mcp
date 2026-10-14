@@ -22,6 +22,7 @@ import {
   thoughtNameAsStored,
   type AliasOutcome,
   type ApiErrorKind,
+  type TypeOrTagOutcome,
   type UpdateThoughtInput,
 } from "../../api/index.js";
 import { linkFound } from "../../operations/ingest.js";
@@ -60,6 +61,9 @@ const RELATION_VALUES = {
   parent: Relation.Parent,
   jump: Relation.Jump,
 } as const;
+
+/** The two kinds a tool makes beside an ordinary thought: the API makes no other. */
+const VOCABULARY_KINDS = { type: ThoughtKind.Type, tag: ThoughtKind.Tag } as const;
 
 export function registerWriteTools(server: McpServer, ctx: ServerContext): void {
   server.registerTool(
@@ -548,7 +552,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       description:
         "Attaches and removes a thought's tags. Tags are separate thoughts of a special " +
         "kind; take their identifiers from brain_list_types_and_tags, and create a new tag " +
-        "via brain_create_thought. A single call can both add and remove.",
+        "via brain_create_type_or_tag. A single call can both add and remove.",
       inputSchema: {
         brainId,
         thoughtId: z.string(),
@@ -606,6 +610,136 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
             "Note",
             "Tag changes are not visible in the graph immediately — up to half a second. " +
               "Re-reading the thought right away may still show the old tags.",
+          ),
+        ]),
+      );
+    }),
+  );
+
+  server.registerTool(
+    "brain_create_type_or_tag",
+    {
+      description:
+        "Creates a thought type or a tag: the vocabulary thoughts are classified with, " +
+        "which brain_create_thought cannot make. Call it when brain_list_types_and_tags " +
+        "has none that fits. Under the name of a tag the brain has, in any letter case, no " +
+        "second tag is made and the result gives that one. A type is made even when " +
+        "another has the name.",
+      inputSchema: {
+        brainId,
+        kind: z
+          .enum(["type", "tag"])
+          .describe("A type is what typeId takes; a tag is what brain_tag and tagIds take."),
+        name: z.string().min(1).describe("Its name, as TheBrain will show it."),
+      },
+    },
+    guard(async ({ brainId: bid, kind, name }) => {
+      // Ahead of every request, as for a thought: a name of white space is a
+      // 400 for a type and a tag too, and one too long to keep is cut.
+      const noName = nameRefusal(name, "name");
+      if (noName !== null) return fail(`${noName}. Nothing was written.`);
+      const asked = shownName(thoughtNameAsStored(name));
+
+      let outcome: TypeOrTagOutcome;
+      try {
+        outcome = await ctx.api.thoughts.createTypeOrTag(bid, {
+          name,
+          kind: VOCABULARY_KINDS[kind],
+        });
+      } catch (error) {
+        if (mayHaveLanded(error)) {
+          // A create with no answer is not a create that failed. What a
+          // second call does is the API's, and not the same for the two: a
+          // tag of the name is answered with, and a type is made again.
+          return fail(
+            join([
+              describeError(error),
+              section(
+                "Next",
+                `No answer came to the create, so TheBrain may have made the ${kind} ` +
+                  `"${asked}" all the same, and there is no identifier to give for it. ` +
+                  (kind === "tag"
+                    ? "Send this call again: under the name of a tag the brain has TheBrain " +
+                      "makes no second one, and the result gives the tag that is there."
+                    : "Before creating it again, look for it with brain_list_types_and_tags, " +
+                      "which lists a new type within half a second or so: sent again, this " +
+                      "call makes a second type of the same name."),
+              ),
+            ]),
+          );
+        }
+        // The one GET ahead of the create is the read of the log, and its
+        // failure alone said nothing of what it was for or of the create.
+        const atTheRead = error instanceof TheBrainError && error.method === "GET";
+        if (!atTheRead || aboutTheCall(error)) throw error;
+        return fail(
+          `Nothing was created. The brain's log is read before a ${kind} is made, to tell ` +
+            "one this call makes from one that was there, and that read failed: " +
+            `${sentence(describeError(error))} This call can be sent again as it is.`,
+        );
+      }
+
+      const { id, created, thought } = outcome;
+      const use =
+        kind === "tag"
+          ? "pass it to brain_tag, or in tagIds to brain_create_thought or brain_ingest"
+          : "pass it as typeId to brain_create_thought, brain_update_thought or brain_ingest";
+      if (thought === null) {
+        // The create was answered, so its identifier is not to be lost to a
+        // read that failed after it: thrown, the call sent again would make
+        // a second type. No name was read, and a tag that was there keeps
+        // its own, so the name is given as the one asked for and no more.
+        const had = created === null ? "has" : created ? "has, made by this call," : "had";
+        return writtenInPart(
+          [`the brain ${had} the ${kind} ${id}, asked for as "${asked}"`],
+          {
+            what:
+              created === null
+                ? `whether this call made it, or TheBrain answered with a ${kind} that was there`
+                : `the read of the ${kind} after the create`,
+            error: outcome.notRead,
+            skipped: [],
+          },
+          `The identifier works immediately: do not create the ${kind} again. Read it with ` +
+            `brain_get_thought, then ${use}.`,
+        );
+      }
+
+      // By what was read, name and kind: the mark is the thought's own.
+      const line = `${kind} "${shownName(thought.name)}" — ${id}${kindMark(thought.kind)}`;
+      if (created) {
+        return ok(
+          join([
+            section("Done", bullet([`created ${line}`])),
+            section(
+              "Next",
+              `The identifier above works immediately: ${use}. brain_list_types_and_tags ` +
+                `lists the new ${kind} within half a second or so, and brain_update_thought ` +
+                "gives it a caption or colours.",
+            ),
+          ]),
+        );
+      }
+      // "Existed" is not "created", and the name is the one the brain has:
+      // TheBrain matches a tag's name loosely, and answers with a tag whose
+      // name is not the one asked for (docs/api-map.md, L39).
+      const otherName =
+        thought.name === thoughtNameAsStored(name)
+          ? ""
+          : `Its name is "${shownName(thought.name)}", not "${asked}" as asked for` +
+            (kind === "tag"
+              ? ": TheBrain takes two names for one tag when they differ in letter case, in " +
+                "characters that do not show, or in the form of a character, such as a " +
+                "ligature, a superscript or a no-break space. "
+              : ". ");
+      return ok(
+        join([
+          section("Already there", bullet([line])),
+          section(
+            "Note",
+            `No ${kind} was created: the brain had this one, and TheBrain answered the create ` +
+              `with it. ${otherName}It is as it was, and the identifier above is the one to ` +
+              `use: ${use}.`,
           ),
         ]),
       );

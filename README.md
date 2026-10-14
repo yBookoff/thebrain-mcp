@@ -4,7 +4,7 @@ An MCP server for [TheBrain 15](https://www.thebrain.com/), built on its local A
 
 It gives an agent semantic operations over your brain: search by meaning, read a
 neighbourhood of the graph, and write a decomposed piece of material into the
-brain as a whole connected structure. It is not a mirror of the API — 17 tools
+brain as a whole connected structure. It is not a mirror of the API — 18 tools
 instead of 48 endpoints.
 
 The point is not "save this text". The point is that when you hand an agent an
@@ -109,6 +109,7 @@ exactly as Settings shows it (`http://localhost:11522/api/`) is fine.
 | `brain_set_note` / `brain_append_note` | Replace or extend a note |
 | `brain_link` | Connect two thoughts, with a label |
 | `brain_tag` | Attach and detach tags |
+| `brain_create_type_or_tag` | A new type or tag; a tag of a name the brain has is given back, not made twice |
 | `brain_attach_url` | Attach a link, without duplicates |
 | `brain_activate` | Open a thought on the user's screen |
 | `brain_delete_thought` | Delete, with human confirmation |
