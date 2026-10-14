@@ -2165,7 +2165,7 @@ Measured against a live API by polling until the result appeared:
 | Operation | Delay |
 |---|---|
 | `create` → `get(id)` | instant |
-| `rename` → `get(id)` | ~0.1 s |
+| `rename` → `get(id)` | ~0.1 s, 102 ms at the most of 40; 130 ms beside another contract run. Behind what else the app was given to write: 1–30 s beside bursts of 300 creates in another brain, longer with each burst (24 renames in four minutes) |
 | `set aliases` → `get(id)` | ~0.1 s, 0.2 s at the most |
 | `create` with aliases → `get(id)` shows them | usually instant, up to 0.15 s |
 | clear a label or a colour → `get(id)` | up to 0.2 s |

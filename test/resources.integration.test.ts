@@ -3228,7 +3228,17 @@ suite("resource layer against the live API", () => {
           foregroundColor: "#ff0000",
           backgroundColor: "#00ff00",
         });
-        const read = await api.thoughts.get(brainId, id);
+        // Read until the label and the aliases are there, as aliases are
+        // behind a create now and then (*aliases*, below). With another
+        // session at work in the app, a first read here had neither, and
+        // the test went red on it. Measured on 2026-10-14, 40 creates each:
+        // every first read had both with the app to itself, and 39 of 40
+        // with another contract run at work in it, the 40th 80 ms later.
+        // The colours were not there 0.3 s on either, 80 times of 80.
+        const read = await eventually(
+          () => api.thoughts.get(brainId, id),
+          (t) => t.label === "a caption" && aliasesOf(t).length > 0,
+        );
         expect([read.label, aliasesOf(read), read.foregroundColor, read.backgroundColor]).toEqual([
           "a caption",
           [named(`dressed-alias-${kind}`)],
@@ -8907,6 +8917,21 @@ suite("resource layer against the live API", () => {
       });
     const nameOf = async (id: string): Promise<string | null> =>
       (await api.thoughts.get(brainId, id)).name;
+    /**
+     * How long a rename is given to read back. Measured on 2026-10-14: about
+     * 0.1 s with the app to itself, 102 ms at the most of 40, and 130 ms of
+     * 40 with another contract run at work in it. But a rename reads back
+     * behind whatever else the app was given to write: beside bursts of 300
+     * creates in another brain it took 1 to 30 s, longer with each burst, 24
+     * renames in four minutes, and the first after the bursts 13.7 s. One
+     * burst of 600 held a patch back 5.3 s (*a typeId that is not a type*).
+     * Three seconds were not enough once beside another session; polled, a
+     * longer bound costs nothing when the rename is quick.
+     */
+    const RENAMED_MS = 20_000;
+    /** The thought's name once it reads `name`, or the last one it read. */
+    const renamedTo = (id: string, name: string): Promise<string | null> =>
+      eventually(() => nameOf(id), (n) => n === name, { timeoutMs: RENAMED_MS, stepMs: 50 });
     /** The thought's own log entries, oldest first, as `101 "name"` or `103 "old"→"new"`. */
     const logged = async (id: string): Promise<string[]> =>
       (await api.thoughts.modifications(brainId, id, { includeRelated: false }))
@@ -8990,11 +9015,7 @@ suite("resource layer against the live API", () => {
           expect(await logged(made), where).toEqual([`101 ${JSON.stringify(name)}`]);
 
           await rawRename(renamed, name);
-          const read = await eventually(() => nameOf(renamed), (n) => n === name, {
-            timeoutMs: 3000,
-            stepMs: 50,
-          });
-          expect(read, where).toBe(name);
+          expect(await renamedTo(renamed, name), where).toBe(name);
         }
         // Left under a name the sweep of leftovers can find.
         await rawRename(renamed, `${PREFIX}name-unseen-${kind}`);
@@ -9025,7 +9046,10 @@ suite("resource layer against the live API", () => {
         // Each white space code point at both ends.
         ...WHITE_SPACE.map((c, i) => `${c}${n} ws-${i}${c}`),
       ];
-      const renamed = await make("name-stored");
+      // A thought of its own to rename for each, every one renamed before
+      // any is read back: the waits run side by side, and an app slow to
+      // read a rename back costs the test that once, not 41 times.
+      const renamed: string[] = [];
       for (const sent of samples) {
         const stored = thoughtNameAsStored(sent);
         const made = await rawCreate(sent);
@@ -9033,12 +9057,13 @@ suite("resource layer against the live API", () => {
         // The log has the name as it is stored, too.
         expect(await logged(made), hex(sent)).toEqual([`101 ${JSON.stringify(stored)}`]);
 
-        await rawRename(renamed, sent);
-        const read = await eventually(() => nameOf(renamed), (name) => name === stored, {
-          timeoutMs: 3000,
-          stepMs: 50,
-        });
-        expect(read, hex(sent)).toBe(stored);
+        const target = await make(`name-stored-${renamed.length}`);
+        await rawRename(target, sent);
+        renamed.push(target);
+      }
+      for (const [i, sent] of samples.entries()) {
+        const stored = thoughtNameAsStored(sent);
+        expect(await renamedTo(renamed[i]!, stored), hex(sent)).toBe(stored);
       }
       // What `trim()` would have made of two of them is not what is stored.
       expect(thoughtNameAsStored(`\u0085${n}\u0085`)).toBe(n);
@@ -9057,7 +9082,7 @@ suite("resource layer against the live API", () => {
       expect(await logged(id)).toEqual([`101 ${JSON.stringify(name)}`]);
       // Another name is logged, with the old one beside it. Case alone is another name.
       await rawRename(id, name.toUpperCase());
-      await eventually(() => nameOf(id), (n) => n === name.toUpperCase(), { timeoutMs: 3000, stepMs: 50 });
+      await renamedTo(id, name.toUpperCase());
       expect(await logged(id)).toEqual([
         `101 ${JSON.stringify(name)}`,
         `103 ${JSON.stringify(name)}→${JSON.stringify(name.toUpperCase())}`,
@@ -9090,11 +9115,7 @@ suite("resource layer against the live API", () => {
         expect(await nameOf(made), where).toBe(kept);
 
         await rawRename(renamed, sent);
-        const read = await eventually(() => nameOf(renamed), (name) => name === kept, {
-          timeoutMs: 3000,
-          stepMs: 50,
-        });
-        expect(read, where).toBe(kept);
+        expect(await renamedTo(renamed, kept), where).toBe(kept);
         // The server refuses exactly the ones that are cut.
         expect(nameRefusal(sent, "name") === null, where).toBe(thoughtNameAsStored(sent) === kept);
       }
