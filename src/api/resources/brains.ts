@@ -63,7 +63,8 @@ export class BrainsResource {
   }
 
   /**
-   * The log from `since` (inclusive) to now, newest first, a page at a time.
+   * The log from `since` (inclusive) to now, or to `until` (inclusive) when
+   * one is given, newest first, a page at a time.
    *
    * A single request cannot reach past the newest `maxLogs` entries, so this
    * pages back on `endTime`. Measured on a live TheBrain 15, each fact pinned
@@ -85,14 +86,26 @@ export class BrainsResource {
    * above the boundary. A changed note can move an entry, its `803` filed
    * again under the new time, but only while nothing has been logged after
    * it, so never one from a page still to be read.
+   *
+   * `until` is where the first page starts, in place of now. It is a log
+   * timestamp as the API wrote it, and goes to the API as it is: a `Date`
+   * would lose its microseconds, as it would at a boundary between pages.
+   * With it a stretch in the middle of a long log is read at the cost of
+   * that stretch. Without `since` every request costs time by the length of
+   * the whole log, however few entries it asks for: 135 ms for the newest 50
+   * of 170,000, and 15 ms with a `since` an hour back.
    */
   async *modificationPages(
     brainId: string,
-    options: { since?: Date | string | undefined; pageSize?: number } = {},
+    options: {
+      since?: Date | string | undefined;
+      until?: string | undefined;
+      pageSize?: number;
+    } = {},
   ): AsyncGenerator<ModificationLogDto[]> {
     assertUuid(brainId, "brainId");
     let size = Math.max(1, Math.floor(options.pageSize ?? LOG_PAGE_SIZE));
-    let until: string | undefined;
+    let until: string | undefined = options.until;
     // Entries stamped exactly `until` that were already yielded.
     let seen = new Set<string>();
 
@@ -125,10 +138,17 @@ export class BrainsResource {
     }
   }
 
-  /** The whole log from `since` (inclusive) to now, newest first. */
+  /**
+   * The whole log from `since` (inclusive) to now, newest first, or to
+   * `until` (inclusive) when one is given.
+   */
   async allModifications(
     brainId: string,
-    options: { since?: Date | string | undefined; pageSize?: number } = {},
+    options: {
+      since?: Date | string | undefined;
+      until?: string | undefined;
+      pageSize?: number;
+    } = {},
   ): Promise<ModificationLogDto[]> {
     const all: ModificationLogDto[] = [];
     for await (const page of this.modificationPages(brainId, options)) all.push(...page);

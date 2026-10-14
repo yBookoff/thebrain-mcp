@@ -61,6 +61,7 @@ import {
   ingest,
   linkFound,
 } from "../src/operations/ingest.js";
+import { indexModelId } from "../src/semantic/document.js";
 import type { Embedder } from "../src/semantic/embedder.js";
 import {
   SemanticIndexer,
@@ -126,6 +127,107 @@ suite("resource layer against the live API", () => {
     return id;
   };
 
+  /**
+   * A create that is one of many sent at once, or null when it was answered
+   * with the API's catch-all 403.
+   *
+   * With the app busy, one create in a burst is now and then answered so:
+   * one in 100 in three bursts of five while four writers were at work in
+   * another brain, and in none of three bursts with the app to itself. The
+   * thought is made all the same: the log had a `101` for every request of
+   * each of those bursts, the refused one included (4 of 4). What that 403
+   * is belongs to another card; a test that needs a burst is about what
+   * the burst leaves, and used to go red on it whenever a second session
+   * was at work. So it is counted and said aloud here, and the thought,
+   * which nothing has the identifier of, is left to the sweep after the
+   * run. Any other refusal is thrown as it came.
+   */
+  let unanswered = 0;
+  const makeInBurst = async (name: string): Promise<string | null> => {
+    try {
+      return await make(name);
+    } catch (error) {
+      if (!(error instanceof TheBrainError) || error.kind !== "forbidden") throw error;
+      unanswered += 1;
+      console.warn(`[burst] the create of ${PREFIX}${name} was answered with the catch-all 403`);
+      return null;
+    }
+  };
+  /** Thoughts created at once: the identifiers of those whose create was answered. */
+  const makeAtOnce = async (names: readonly string[]): Promise<string[]> =>
+    (await Promise.all(names.map(makeInBurst))).filter((id) => id !== null);
+
+  /**
+   * A minute before this run made its first request. Every entry a test
+   * looks for in the log is later, since it is the test that wrote it.
+   */
+  const runStart = new Date(Date.now() - 60_000).toISOString();
+
+  /**
+   * The newest `maxLogs` entries of this run.
+   *
+   * With a `startTime`, because a log request without one is answered in
+   * time that goes by the length of the whole log, however few entries it
+   * asks for. Measured on two brains with logs of 165,000 and 171,000
+   * entries: the newest 50 took 135 ms with no bound and 15 ms from an hour
+   * back, and the newest one 45 ms. A test brain's log only grows, by about
+   * 2,800 entries a run, and these reads are polled: they are what made a
+   * run on an old brain several times as long as on a new one.
+   */
+  const newestLogs = (maxLogs: number): Promise<ModificationLogDto[]> =>
+    api.brains.modifications(brainId, { maxLogs, since: runStart });
+
+  /**
+   * An index of what the brain has logged since a little before `since`,
+   * and of nothing older: for a test that needs the rows of the thoughts it
+   * has just made, and says nothing of a rebuild. `since` is taken before
+   * the test's first write.
+   *
+   * A rebuild reads the whole log and walks the whole brain, 3.5 s for the
+   * log alone at 170,000 entries, and five tests ran one to get three rows.
+   * Here the index starts empty with a watermark, so the sync that fills it
+   * reads the log from there.
+   *
+   * The watermark is a quarter of a minute before `since`, not at it. A sync
+   * leaves its own ten seconds before its start (`SYNC_OVERLAP_MS`), so the
+   * test's next sync reads what the tests before this one logged in those
+   * seconds. Indexed here, those thoughts are skipped by their hash then;
+   * left out, they were encoded as new among what the test counts.
+   */
+  const indexedSince = async (
+    since: string,
+    embedder: Embedder,
+  ): Promise<{ store: VectorStore; indexer: SemanticIndexer }> => {
+    const store = new VectorStore(":memory:");
+    store.setMeta({
+      brainId,
+      model: indexModelId(embedder.id),
+      dimensions: embedder.dimensions,
+      syncedThrough: new Date(Date.parse(since) - 15_000).toISOString(),
+    });
+    const indexer = new SemanticIndexer(api, store, embedder);
+    const filled = await indexer.sync(brainId);
+    expect(filled).toMatchObject({ ran: "sync", unread: [] });
+    return { store, indexer };
+  };
+
+  /**
+   * Leaves an index as one synced after everything the brain has logged so
+   * far, so that its next sync hears of nothing older.
+   *
+   * A sync leaves its watermark ten seconds before its own start, and a
+   * test's thoughts are seconds old: their `101` is in what the next sync
+   * reads, and each is read again for that, whatever else the log says of
+   * it. With a sync that passed over every label, type, kind and note entry,
+   * three tests of what a sync reads a thought again for still passed. A
+   * test that is about one entry calls this before the write that logs it.
+   * One that is about the ten seconds does not.
+   */
+  const caughtUp = async (store: VectorStore): Promise<void> => {
+    const [newest] = await newestLogs(1);
+    store.setSyncedThrough(shiftMicros(logTime(newest!), 1));
+  };
+
   beforeAll(async () => {
     if (!isUuid(testBrainId!)) {
       throw new Error(
@@ -137,7 +239,19 @@ suite("resource layer against the live API", () => {
 
     // Second seatbelt: the brain must exist and be small. If someone pointed
     // these tests at a real working brain, they refuse to touch it.
-    const stats = await api.brains.statistics(brainId);
+    //
+    // `statistics.thoughts` was right at the first read after every write
+    // measured: 19 creates, 19 deletes, eight bursts of 30 and of 100, and
+    // eight sweeps of 100 to 350 deleted one after another, which is what
+    // the run before this one ends with. It is asked again for five seconds
+    // all the same before the run is refused. Two other counts of the same
+    // answer are seconds behind a write (L40), and what waiting costs is
+    // five seconds for a brain that is over the limit and stays over it.
+    const stats = await eventually(
+      () => api.brains.statistics(brainId),
+      (s) => s.thoughts <= MAX_THOUGHTS_IN_TEST_BRAIN,
+      { timeoutMs: 5_000, stepMs: 500 },
+    );
     if (stats.thoughts > MAX_THOUGHTS_IN_TEST_BRAIN) {
       throw new Error(
         `brain "${stats.brainName}" holds ${stats.thoughts} thoughts, which does ` +
@@ -145,15 +259,20 @@ suite("resource layer against the live API", () => {
           `Create a separate brain and point THEBRAIN_TEST_BRAIN_ID at it.`,
       );
     }
-  });
+  }, 30_000);
 
+  // The sweep is as long as the run made thoughts: some 850 deletes, 7 s
+  // when the app has nothing else to do and 47 s when another session is at
+  // it, which with the read of the log was more than the minute it had.
   afterAll(async () => {
     for (const id of created) {
       await api.thoughts.delete(brainId, id).catch(() => undefined);
     }
 
     // Sweep up debris from earlier failed runs. The API has no "list all"
-    // endpoint, but everything these tests create is in the log.
+    // endpoint, but everything these tests create is in the log. All of the
+    // log, since a run that failed may be any run: one read of it, 3.5 s at
+    // 170,000 entries, outside every test's own time.
     const leftovers: string[] = [];
     for (const id of replayThoughtIds(await api.brains.allModifications(brainId))) {
       const t = await api.thoughts.get(brainId, id).catch(() => null);
@@ -165,7 +284,7 @@ suite("resource layer against the live API", () => {
     if (leftovers.length > 0) {
       console.warn(`[cleanup] removed leftovers from earlier runs: ${leftovers.length}`);
     }
-  }, 60_000);
+  }, 300_000);
 
   it("a freshly created thought reads back immediately by identifier", async () => {
     const id = await make("basic");
@@ -382,7 +501,7 @@ suite("resource layer against the live API", () => {
     expect(withNote.attachments.some((a) => a.isNotes)).toBe(true);
 
     const logs = await eventually(
-      () => api.brains.modifications(brainId, { maxLogs: 200 }),
+      () => newestLogs(200),
       (entries) => entries.some((l) => isNoteMod(l.modType) && l.extraAId === id),
     );
     const event = logs.find((l) => isNoteMod(l.modType) && l.extraAId === id);
@@ -608,7 +727,7 @@ suite("resource layer against the live API", () => {
       for (const [what, interrupt] of interruptions) {
         await interrupt();
         // The premise: the interruption is in the log, above the note's 803.
-        const [top] = await api.brains.modifications(brainId, { maxLogs: 1 });
+        const [top] = await newestLogs(1);
         expect(logEntryKey(top!), what).not.toBe(logEntryKey(stays.at(-1)!));
         const entries = changesIn(
           await afterChange(id, since, () => api.notes.append(brainId, id, what), stays.at(-1)),
@@ -638,9 +757,8 @@ suite("resource layer against the live API", () => {
         },
         embedQuery: async () => new Float32Array([1]),
       };
-      const store = new VectorStore(":memory:");
-      const indexer = new SemanticIndexer(api, store, embedder);
-      await indexer.rebuild(brainId);
+      const { store, indexer } = await indexedSince(since, embedder);
+      expect(store.contentHashes().has(id)).toBe(true);
 
       let changes = changesIn(
         await afterChange(id, since, () => api.notes.set(brainId, id, "two")),
@@ -692,7 +810,7 @@ suite("resource layer against the live API", () => {
     const linkId = await api.links.create(brainId, { thoughtIdA: a, thoughtIdB: b });
 
     const logs = await eventually(
-      () => api.brains.modifications(brainId, { maxLogs: 200 }),
+      () => newestLogs(200),
       (entries) => entries.some((l) => l.sourceId === linkId),
     );
     const event = logs.find((l) => l.sourceId === linkId && l.modType === ModType.Created);
@@ -716,7 +834,7 @@ suite("resource layer against the live API", () => {
     const isOurs = (l: ModificationLogDto): boolean =>
       l.sourceType === EntityType.Attachment && l.extraAId === id && !isNoteMod(l.modType);
     const logs = await eventually(
-      () => api.brains.modifications(brainId, { maxLogs: 200 }),
+      () => newestLogs(200),
       (entries) => entries.some(isOurs),
     );
     const event = logs.find((l) => isOurs(l) && l.modType === ModType.Created);
@@ -744,7 +862,7 @@ suite("resource layer against the live API", () => {
       atLeast = 1,
     ): Promise<ModificationLogDto[]> => {
       const logs = await eventually(
-        () => api.brains.modifications(brainId, { maxLogs: 300 }),
+        () => newestLogs(300),
         (entries) => entries.filter(matches).length >= atLeast,
       );
       return logs
@@ -980,6 +1098,7 @@ suite("resource layer against the live API", () => {
     it("sync re-embeds a thought after each of these, read from the live log", async () => {
       // The whole path, not its parts: the entries above are only worth
       // anything if sync turns them into the right thoughts to read again.
+      const since = new Date().toISOString();
       const tagId = await make("sync-tag", ThoughtKind.Tag);
       const typeId = await make("sync-type", ThoughtKind.Type);
       const id = await make("sync-thought");
@@ -995,15 +1114,16 @@ suite("resource layer against the live API", () => {
         },
         embedQuery: async () => new Float32Array([1]),
       };
-      const store = new VectorStore(":memory:");
-      const indexer = new SemanticIndexer(api, store, embedder);
-      await indexer.rebuild(brainId);
+      const { store, indexer } = await indexedSince(since, embedder);
+      expect(documents).toContain(name);
 
       /** What sync embeds once the thought's graph shows the change. */
       const embeddedAfter = async (
         change: () => Promise<unknown>,
         shown: (graph: CleanGraph) => boolean,
       ): Promise<string[]> => {
+        // So that the entry of this change is all the sync has to go by.
+        await caughtUp(store);
         await change();
         await eventually(() => api.thoughts.getGraph(brainId, id), shown);
         const from = documents.length;
@@ -1066,6 +1186,7 @@ suite("resource layer against the live API", () => {
       // later. A sync in between reads the old graph. Measured: one tag in
       // four, each followed at once by a sync, and with the watermark at the
       // sync's own start that tag stayed out of the index until a rebuild.
+      const since = new Date().toISOString();
       const tagId = await make("race-tag", ThoughtKind.Tag);
       const ids = [await make("race-0"), await make("race-1"), await make("race-2")];
 
@@ -1079,10 +1200,11 @@ suite("resource layer against the live API", () => {
         },
         embedQuery: async () => new Float32Array([1]),
       };
-      const store = new VectorStore(":memory:");
-      const indexer = new SemanticIndexer(api, store, embedder);
-      await indexer.rebuild(brainId);
+      const { store, indexer } = await indexedSince(since, embedder);
       const from = documents.length;
+      expect(documents).toEqual(
+        expect.arrayContaining([0, 1, 2].map((i) => `${PREFIX}race-${i}`)),
+      );
 
       for (const id of ids) {
         await api.links.attachTag(brainId, id, tagId);
@@ -1117,7 +1239,7 @@ suite("resource layer against the live API", () => {
       const mine = (l: ModificationLogDto): boolean =>
         l.sourceType === EntityType.Thought && l.sourceId === id;
       const logs = await eventually(
-        () => api.brains.modifications(brainId, { maxLogs: 300 }),
+        () => newestLogs(300),
         (entries) => entries.filter(mine).length >= atLeast,
       );
       return logs.filter(mine).sort((a, b) => compareLogTime(logTime(a), logTime(b)));
@@ -1213,7 +1335,7 @@ suite("resource layer against the live API", () => {
         const id = await make(`log-name-at-once-${i}`);
         const to = `${PREFIX}log-name-at-once-${i} renamed`;
         await api.thoughts.update(brainId, id, { name: to });
-        const logs = await api.brains.modifications(brainId, { maxLogs: 50 });
+        const logs = await newestLogs(50);
         expect(loggedThoughts(logs).get(id)?.name, `rename ${i}`).toBe(to);
       }
     }, 30_000);
@@ -1286,7 +1408,7 @@ suite("resource layer against the live API", () => {
         [l.sourceId, l.extraAId, l.extraBId].includes(id) &&
         !(l.sourceType === EntityType.Thought && l.modType === ModType.Created);
       const logs = await eventually(
-        () => api.brains.modifications(brainId, { maxLogs: 300 }),
+        () => newestLogs(300),
         (entries) => entries.filter(about).length >= 6,
       );
       const others = logs.filter(about);
@@ -1339,7 +1461,7 @@ suite("resource layer against the live API", () => {
 
     /** Every entry that names one of `ids`, in any position, oldest first. */
     const about = async (ids: readonly string[]): Promise<ModificationLogDto[]> =>
-      (await api.brains.modifications(brainId, { maxLogs: 300 }))
+      (await newestLogs(300))
         .filter((l) => [l.sourceId, l.extraAId, l.extraBId].some((id) => ids.includes(id)))
         .sort((a, b) => compareLogTime(logTime(a), logTime(b)));
 
@@ -1766,12 +1888,14 @@ suite("resource layer against the live API", () => {
       const store = new VectorStore(":memory:");
       const indexer = new SemanticIndexer(api, store, embedder);
       const search = new SemanticSearch(api, store, embedder);
+      // A rebuild, here and below, because the second half is about one: it
+      // is set against an index of the whole brain, which only a rebuild
+      // makes. Each reads the whole log and walks the brain.
       await indexer.rebuild(brainId);
       // As an index synced some time ago: the watermark is past everything
       // that made these thoughts, so a sync hears of them from the kind
       // change alone. A rebuild leaves it ten seconds back.
-      const [newest] = await api.brains.modifications(brainId, { maxLogs: 1 });
-      store.setSyncedThrough(shiftMicros(logTime(newest!), 1));
+      await caughtUp(store);
 
       const kinds = (): Record<string, number | undefined> => {
         const rows = store.kinds();
@@ -1850,16 +1974,16 @@ suite("resource layer against the live API", () => {
       expect(documents.slice(from)).toEqual([]);
       expect(rebuilt).toMatchObject({ indexed: 0, kindUpdated: 2, removed: 0 });
       store.close();
-    }, 90_000);
+    }, 180_000);
 
     it("a sync that runs before the graph shows the kind does not lose it", async () => {
       // The 304 is in the log when the patch is answered, and a graph that
       // has been read before shows the kind up to a quarter of a second later.
+      const since = new Date().toISOString();
       const ids = [await make("kind-race-0"), await make("kind-race-1"), await make("kind-race-2")];
       const { embedder } = recorder();
-      const store = new VectorStore(":memory:");
-      const indexer = new SemanticIndexer(api, store, embedder);
-      await indexer.rebuild(brainId);
+      const { store, indexer } = await indexedSince(since, embedder);
+      expect(ids.map((id) => store.kinds().get(id))).toEqual([Normal, Normal, Normal]);
 
       for (const id of ids) {
         await api.thoughts.update(brainId, id, { kind: Tag });
@@ -1884,30 +2008,35 @@ suite("resource layer against the live API", () => {
   it("the log returns the newest entries first and truncates at maxLogs", async () => {
     // brain_recent_changes filters out settings before applying its limit
     // because of this: the newest entries can all be settings.
+    const since = new Date().toISOString();
     for (const n of [1, 2, 3]) await make(`log-order-${n}`);
     const last = await make("log-order-4");
     // Both reads below must see the same log, so wait for the last write.
-    await eventually(
-      () => api.brains.modifications(brainId, { maxLogs: 50 }),
+    const range = await eventually(
+      () => api.brains.modifications(brainId, { maxLogs: 1000, since }),
       (entries) => entries.some((l) => l.sourceId === last),
     );
+    // Nothing is written after the four creates, so the newest entries of
+    // the brain are the newest of this range. It was the whole log that was
+    // read for them, 3.5 s of it at 170,000 entries.
+    expect(range.length).toBeGreaterThan(3);
 
-    const newestFirst = (x: string, y: string): number => compareLogTime(y, x);
-    const all = await api.brains.allModifications(brainId);
+    // No bound here, which is what the claim is about: the three kept are
+    // the newest of the whole log, not its first three.
     const few = await api.brains.modifications(brainId, { maxLogs: 3 });
-
-    expect(all.length).toBeGreaterThan(3);
     expect(few).toHaveLength(3);
-    const newest = all.map(logTime).sort(newestFirst).slice(0, 3);
+    const newestFirst = (x: string, y: string): number => compareLogTime(y, x);
+    const newest = range.map(logTime).sort(newestFirst).slice(0, 3);
     expect(few.map(logTime).sort(newestFirst)).toEqual(newest); // truncation keeps the newest
     expect(few.map(logTime)).toEqual(newest); // and returns them newest first
+    expect(few.map(logEntryKey)).toEqual(range.slice(0, 3).map(logEntryKey));
   }, 30_000);
 
   /** Creates a thought and returns its `created` log entry. */
   const createdEntry = async (name: string): Promise<ModificationLogDto> => {
     const id = await make(name);
     const logs = await eventually(
-      () => api.brains.modifications(brainId, { maxLogs: 50 }),
+      () => newestLogs(50),
       (entries) => entries.some((l) => l.sourceId === id && l.modType === ModType.Created),
     );
     return logs.find((l) => l.sourceId === id && l.modType === ModType.Created)!;
@@ -1925,7 +2054,7 @@ suite("resource layer against the live API", () => {
     expect(skew, `${t} read as UTC is ${skew} ms from the local clock`).toBeLessThan(60_000);
 
     const includes = async (until: string): Promise<boolean> =>
-      (await api.brains.modifications(brainId, { maxLogs: 5, until })).some(
+      (await api.brains.modifications(brainId, { maxLogs: 5, since: runStart, until })).some(
         (l) => logEntryKey(l) === logEntryKey(entry),
       );
     expect(await includes(t)).toBe(true);
@@ -1941,8 +2070,10 @@ suite("resource layer against the live API", () => {
     const entry = await createdEntry("log-bounds");
     const t = logTime(entry);
     const key = logEntryKey(entry);
+    // From the start of the run where the range names no start: a range
+    // open at that end costs a request the length of the log.
     const within = async (range: { since?: string; until?: string }): Promise<boolean> =>
-      (await api.brains.modifications(brainId, { maxLogs: 1000, ...range })).some(
+      (await api.brains.modifications(brainId, { maxLogs: 1000, since: runStart, ...range })).some(
         (l) => logEntryKey(l) === key,
       );
 
@@ -1965,15 +2096,16 @@ suite("resource layer against the live API", () => {
     // A type change was up to 10 µs late, a note change up to 56 µs, and five
     // note changes in a working brain 0.8 to 3.9 ms. The log reader pages on
     // the later one because of what this test pins.
-    const newest = (): Promise<ModificationLogDto[]> =>
-      api.brains.modifications(brainId, { maxLogs: 10_000 });
+    // Among what this run has logged, some thousand entries by now: one in
+    // forty is such an entry. The whole log is not read for it.
+    const newest = (): Promise<ModificationLogDto[]> => newestLogs(10_000);
     const late = (l: ModificationLogDto): boolean =>
       compareLogTime(l.modificationDateTime, l.creationDateTime) > 0;
     let logs = await newest();
-    // A new brain may hold none yet. Three hundred creates gave three.
+    // A run may have logged none yet. Three hundred creates gave three.
     for (let round = 0; !logs.some(late) && round < 10; round++) {
       const ids = new Set(
-        await Promise.all(Array.from({ length: 100 }, (_, i) => make(`log-late-${round}-${i}`))),
+        await makeAtOnce(Array.from({ length: 100 }, (_, i) => `log-late-${round}-${i}`)),
       );
       logs = await eventually(
         newest,
@@ -1992,7 +2124,7 @@ suite("resource layer against the live API", () => {
     const created = entry!.creationDateTime;
     const filed = entry!.modificationDateTime;
     const within = async (range: { since?: string; until?: string }): Promise<boolean> =>
-      (await api.brains.modifications(brainId, { maxLogs: 1000, ...range })).some(
+      (await api.brains.modifications(brainId, { maxLogs: 1000, since: runStart, ...range })).some(
         (l) => logEntryKey(l) === key,
       );
     // startTime: compared with creation, this range would start after the entry.
@@ -2039,20 +2171,33 @@ suite("resource layer against the live API", () => {
     // entries (a cascade delete, a first note) stamps each one apart. Measured
     // over repeated bursts of concurrent creates: 30 at once shared a timestamp
     // in about half the bursts, 100 at once in 57 bursts of 59, 4 times at the
-    // median and 11 at the most. Hence the three rounds.
+    // median and 11 at the most. That is with the app to itself. With four
+    // writers at work in another brain a burst shared one 2 times in 5, and
+    // three rounds, which is what this had, came up empty in a run beside
+    // another session's. Hence the eight, of which a quiet app needs one.
     const BURST = 100;
-    const since = new Date().toISOString();
+    const ROUNDS = 8;
+    // Of the last round alone, so that what is paged below is one burst
+    // however many it took.
+    let since = "";
     let tied = false;
-    for (let round = 0; round < 3 && !tied; round++) {
-      await Promise.all(Array.from({ length: BURST }, (_, i) => make(`log-tie-${round}-${i}`)));
+    for (let round = 0; round < ROUNDS && !tied; round++) {
+      since = new Date().toISOString();
+      const before = unanswered;
+      const made = await makeAtOnce(Array.from({ length: BURST }, (_, i) => `log-tie-${round}-${i}`));
+      // A create that got the 403 is logged as well, and may be a moment
+      // behind its answer: nothing below may be written between two reads.
+      if (unanswered > before) await settle(1000);
       const burst = await eventually(
         () => api.brains.modifications(brainId, { maxLogs: 10_000, since }),
-        (entries) => entries.length >= BURST * (round + 1),
+        (entries) => entries.length >= made.length,
       );
       const times = burst.map(logTime);
       tied = new Set(times).size < times.length;
     }
-    expect(tied).toBe(true);
+    expect(tied, `no two creates of ${BURST} sent at once shared a timestamp, ${ROUNDS} times`).toBe(
+      true,
+    );
 
     // A page of two is bound to split a tie, and often to be filled by one: a
     // pager that dropped the entries stamped at its boundary lost one in each
@@ -2065,48 +2210,80 @@ suite("resource layer against the live API", () => {
     // another page size. This was the whole log, and a test brain's log only
     // grows: at 52,000 entries it took 2,291 requests and 34 s, and past
     // 100,000 the one request it was compared with would have come back short.
-    const recent = await api.brains.modifications(brainId, { maxLogs: 1_000 });
+    const recent = await newestLogs(1_000);
     const from = logTime(recent.at(-1)!);
     sameEntries(
       await api.brains.allModifications(brainId, { since: from, pageSize: 25 }),
       await api.brains.modifications(brainId, { maxLogs: 10_000, since: from }),
     );
-  }, 90_000);
+  }, 120_000);
 
   it("a page that ends on an entry filed after its creation keeps the one filed beside it", async (ctx) => {
     // What the first pager lost. It took a page's oldest creationDateTime as
     // the next endTime, and a range that ends there leaves out whatever was
     // filed later. That takes an entry filed a microsecond after its creation
-    // and listed just ahead of one filed in that same microsecond: 6 pairs
-    // among 68,967 entries of two test brains, all from concurrent creates,
-    // about one burst of 100 in twelve. The comparisons above do not show it
-    // unless a page happens to end on such a pair: with a copy of that pager
-    // they came out equal, at pages of 2 and of 25, over ranges that held one.
-    // A pair cannot be had to order: a burst gives one in twelve, and a note
-    // changed alongside a burst was filed at its creation 8 times of 8. So
-    // this looks for the nearest and ends a page on it. A log with none in
-    // its newest 50,000 entries cannot show it, and that many is all this
-    // reads, however long the log.
-    const WINDOW = 50_000;
-    const newest = await api.brains.modifications(brainId, { maxLogs: WINDOW });
-    const at = newest.findIndex((entry, i) => {
-      const next = newest[i + 1];
-      return next !== undefined && compareLogTime(logTime(next), entry.creationDateTime) > 0;
-    });
-    if (at < 0) ctx.skip("no entry filed between another's creation and its filing");
+    // and listed just ahead of one filed in that same microsecond: 23 pairs
+    // among the 336,066 entries of two test brains, every one of them two
+    // creates sent at once, about one burst of 100 in twelve. The comparisons
+    // above do not show it unless a page happens to end on such a pair: with
+    // a copy of that pager they came out equal, at pages of 2 and of 25, over
+    // ranges that held one. A pair cannot be had to order: a burst gives one
+    // in twelve, and a note changed alongside a burst was filed at its
+    // creation 8 times of 8. So this looks back for the nearest one and
+    // reads the stretch of the log around it.
+    //
+    // It looked through the newest 50,000 entries and no further, and on a
+    // brain whose nearest pair was 111,039 entries back it skipped itself
+    // run after run: the pairs lie 9,000 entries apart in one of those logs
+    // and 34,000 in the other. It now looks five times as far, a page at a
+    // time, and stops at the first pair. That is the most it reads however
+    // long the log is, and a log with no pair in that stretch still cannot
+    // show it: a new brain has none.
+    const REACH = 250_000;
+    const PAGE = 50_000;
+    const newest: ModificationLogDto[] = [];
+    let at = -1;
+    for await (const page of api.brains.modificationPages(brainId, { pageSize: PAGE })) {
+      let i = Math.max(newest.length - 1, 0);
+      newest.push(...page);
+      for (; i < newest.length - 1 && at < 0; i++) {
+        if (compareLogTime(logTime(newest[i + 1]!), newest[i]!.creationDateTime) > 0) at = i;
+      }
+      if (at >= 0 || newest.length >= REACH) break;
+    }
+    if (at < 0) {
+      ctx.skip(
+        `no entry filed between another's creation and its filing in the newest ${newest.length}`,
+      );
+    }
     const last = newest[at]!;
     const since = logTime(newest[at + 1]!);
+    // The stretch starts a few entries above the pair, at one that is not
+    // tied with the entry before it: a range that ends there begins with it.
+    let top = Math.max(at - 3, 0);
+    while (top > 0 && compareLogTime(logTime(newest[top - 1]!), logTime(newest[top]!)) === 0) {
+      top -= 1;
+    }
+    const until = logTime(newest[top]!);
 
-    const whole = await api.brains.modifications(brainId, { maxLogs: 2 * WINDOW, since });
+    // Read as one range and as pages of it, the first of which ends on the
+    // entry filed late. Neither read goes by how far back the pair lies.
+    const whole = await api.brains.modifications(brainId, { maxLogs: 10_000, since, until });
     const pages: ModificationLogDto[][] = [];
-    for await (const page of api.brains.modificationPages(brainId, { since, pageSize: at + 1 })) {
+    for await (const page of api.brains.modificationPages(brainId, {
+      since,
+      until,
+      pageSize: at - top + 1,
+    })) {
       pages.push(page);
     }
     // The first page ends where it was aimed, on the entry filed late...
     expect(logEntryKey(pages[0]!.at(-1)!)).toBe(logEntryKey(last));
     // ...and the next one still brings its neighbour.
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.flat().map(logEntryKey)).toContain(logEntryKey(newest[at + 1]!));
     sameEntries(pages.flat(), whole);
-  }, 30_000);
+  }, 120_000);
 
   it("set replaces the note entirely", async () => {
     const id = await make("overwrite");
@@ -2524,6 +2701,11 @@ suite("resource layer against the live API", () => {
     // Holds for a brain whose thoughts were all created in it, like a test
     // brain. Imported and old brains fall short, which is why a rebuild also
     // walks the graph (ARCHITECTURE.md §7).
+    //
+    // The whole log, which the claim is about: 3.5 s of reading at 170,000
+    // entries with the app to itself and several times that with another
+    // session at it, where the five seconds a test has by default were not
+    // enough two runs in three.
     const logs = await api.brains.allModifications(brainId);
     const alive = replayThoughtIds(logs);
 
@@ -2536,10 +2718,21 @@ suite("resource layer against the live API", () => {
       else if (t.kind === ThoughtKind.Type) types += 1;
     }
 
-    const stats = await api.brains.statistics(brainId);
-    expect(normal).toBe(Math.round(stats.thoughts));
-    expect(types).toBe(Math.round(stats.thoughtTypes));
-  });
+    // Statistics counts a thought at the first read after it is made or
+    // deleted, and types from a copy that is seconds behind after a burst
+    // of writes (*statistics counts…*, below): so it is asked until it
+    // agrees, and the test fails when it never does.
+    const counted = (s: { thoughts: number; thoughtTypes: number }): number[] => [
+      Math.round(s.thoughts),
+      Math.round(s.thoughtTypes),
+    ];
+    const stats = await eventually(
+      () => api.brains.statistics(brainId),
+      (s) => counted(s).join() === [normal, types].join(),
+      { timeoutMs: 20_000, stepMs: 250 },
+    );
+    expect(counted(stats)).toEqual([normal, types]);
+  }, 120_000);
 
   it("a link between thoughts is created and found", async () => {
     const a = await make("link-A");
@@ -2830,7 +3023,7 @@ suite("resource layer against the live API", () => {
       const linkDeleted = (l: ModificationLogDto): boolean =>
         l.modType === ModType.Deleted && l.sourceId === link!.id;
       const logs = await eventually(
-        () => api.brains.modifications(brainId, { maxLogs: 200 }),
+        () => newestLogs(200),
         (entries) => entries.some(lostType) && entries.some(linkDeleted),
       );
       expect(logs.find(lostType)?.oldValue).toBe(`${PREFIX}drop-type`);
@@ -3011,7 +3204,7 @@ suite("resource layer against the live API", () => {
       // The log has every thought created since, and the ghost is not one.
       const marker = await make("after-ghost");
       const logs = await eventually(
-        () => api.brains.modifications(brainId, { maxLogs: 50 }),
+        () => newestLogs(50),
         (entries) => entries.some((l) => l.modType === ModType.Created && l.sourceId === marker),
       );
       const born = logs.filter(
@@ -3106,7 +3299,7 @@ suite("resource layer against the live API", () => {
       let next = 0;
       await Promise.all(
         Array.from({ length: 6 }, async () => {
-          while (next < 150) await make(`burst-${next++}`);
+          while (next < 150) await makeInBurst(`burst-${next++}`);
         }),
       );
 
@@ -3186,10 +3379,16 @@ suite("resource layer against the live API", () => {
         (e: unknown) =>
           e instanceof TheBrainError ? `${e.status} ${e.kind}: ${e.message}` : String(e),
       );
-    /** What the brain holds, by the counts a stray write would move. */
+    /**
+     * What the brain holds, by the counts a stray write would move: each is
+     * right at the first read after a write. Not the counts of types and
+     * tags, which stood here too: they come from a copy that is seconds
+     * behind after a burst of writes, and nothing sent below makes either
+     * (*statistics counts…*, above).
+     */
     const counts = async (): Promise<number[]> => {
       const s = await api.brains.statistics(brainId);
-      return [s.thoughts, s.links, s.notes, s.webLinks, s.thoughtTypes, s.tags];
+      return [s.thoughts, s.links, s.notes, s.webLinks];
     };
 
     it("a thought nobody has: the read and a patch are a bare 404, the graph the catch-all 403, and the rest read as empty", async () => {
@@ -3929,6 +4128,7 @@ suite("resource layer against the live API", () => {
     }, 90_000);
 
     it("a vector search leaves out a thought deleted since the last sync, and the next sync takes its row", async () => {
+      const since = new Date().toISOString();
       const id = await make(`vector-gone-${Date.now()}`);
       const embedder: Embedder = {
         id: "contract@v1",
@@ -3936,10 +4136,10 @@ suite("resource layer against the live API", () => {
         embedDocuments: async (texts) => texts.map(() => new Float32Array([1])),
         embedQuery: async () => new Float32Array([1]),
       };
-      const store = new VectorStore(":memory:");
-      const indexer = new SemanticIndexer(api, store, embedder);
-      await indexer.rebuild(brainId);
+      const { store, indexer } = await indexedSince(since, embedder);
       expect(store.contentHashes().has(id)).toBe(true);
+      // Past the thought's own `101`: the sync below has the `102` to go by.
+      await caughtUp(store);
 
       await api.thoughts.delete(brainId, id);
       await eventually(() => reads(id), (r) => r === "not_found", { timeoutMs: 5_000, stepMs: 10 });
@@ -6323,7 +6523,7 @@ suite("resource layer against the live API", () => {
       await api.thoughts.update(brainId, lower, { kind: ThoughtKind.Normal });
       const changed = await eventually(
         async () =>
-          (await api.brains.modifications(brainId, { maxLogs: 50 })).find(
+          (await newestLogs(50)).find(
             (l) => l.modType === ModType.LinkMeaningChanged && l.sourceId === again!.id,
           ),
         (entry) => entry !== undefined,
@@ -6668,7 +6868,7 @@ suite("resource layer against the live API", () => {
       const ours = (entries: ModificationLogDto[]): ModificationLogDto[] =>
         entries.filter((l) => l.sourceId === linkId);
       const entries = await eventually(
-        () => api.brains.modifications(brainId, { maxLogs: 300 }),
+        () => newestLogs(300),
         (all) => ours(all).length >= atLeast,
         { timeoutMs: 3000, stepMs: 100 },
       );
@@ -6916,7 +7116,7 @@ suite("resource layer against the live API", () => {
       const about = [...tagLinks, jump.id, hierarchy.id];
       const entries = async (): Promise<number> => {
         await settle(700);
-        const all = await api.brains.modifications(brainId, { maxLogs: 300 });
+        const all = await newestLogs(300);
         return all.filter((l) => about.includes(l.sourceId)).length;
       };
       const before = await entries();
@@ -7137,21 +7337,40 @@ suite("resource layer against the live API", () => {
       ]);
     }, 30_000);
 
-    it("a read straight after a link is patched still returns the old value", async () => {
-      // Measured over 360 patches, thirty each of twelve kinds: a name, a
-      // colour, a thickness, a direction and a relation, set or cleared. Not one
-      // was there on the first read. They showed 6–205 ms later, about 100 ms
-      // at the median.
+    it("a read straight after a link is patched can still return the old value", async () => {
+      // The read of a link by its identifier is behind a patch of it, as a
+      // graph is behind a create: of 300 patches of a name, 60 each of five
+      // spacings, the first read after the answer had the old name 288
+      // times, and the new one showed 10 to 368 ms after the answer. The 12
+      // that had it at once were answered in 3 to 72 ms, where a read took
+      // 1.5 ms at the median: a read that is answered late can come after
+      // the copy is brought up to date.
+      //
+      // This asked for one old read in five patches, and went red in one run
+      // in five while another session was at work in the same app. With the
+      // app kept busy by reads of another brain's log, the first read had
+      // the new name 10 times in 120. So it patches until one read is old,
+      // which is the first patch 24 times in 25, and gives up at forty. Were
+      // seven first reads in ten to come at once, which nothing measured
+      // came near, all forty would be one run in a million; and they are
+      // what a build that answers a patched link at once would give.
+      const TRIES = 40;
       const { id } = await linked("link-lag");
-      let stale = 0;
-      for (let i = 0; i < 5; i++) {
+      let old = -1;
+      for (let i = 0; i < TRIES && old < 0; i++) {
         const name = `lag ${i}`;
         await api.links.update(brainId, id, { name });
-        if ((await api.links.get(brainId, id)).name !== name) stale += 1;
+        if ((await api.links.get(brainId, id)).name !== name) old = i;
+        // Whatever that read said, the name is there before long. It took
+        // 4.7 s behind bursts of writes to another brain, and once more than 5.
         expect((await read(id, (l) => l.name === name)).name).toBe(name);
       }
-      expect(stale).toBeGreaterThan(0);
-    });
+      expect(
+        old,
+        `${TRIES} patches of ${TRIES} read back at once: either the app was busy at every ` +
+          "one of them, or the read of a link is no longer behind a patch (docs/api-map.md, L22)",
+      ).toBeGreaterThanOrEqual(0);
+    }, 60_000);
 
     it("a refused patch keeps what it wrote before the operation it refused", async () => {
       // So an update that throws may have landed in part, as for a thought.
@@ -7876,7 +8095,7 @@ suite("resource layer against the live API", () => {
       const mentions = (l: ModificationLogDto): boolean =>
         l.modType === ModType.AliasesChanged && [l.sourceId, l.extraAId, l.extraBId].includes(id);
       const logs = await eventually(
-        () => api.brains.modifications(brainId, { maxLogs: 200 }),
+        () => newestLogs(200),
         (entries) => entries.some(mentions),
       );
       // Found by code and by the id in any position, so a failure below shows
@@ -7895,7 +8114,7 @@ suite("resource layer against the live API", () => {
       // A thought created with aliases logs its own 211 after the `created`.
       const born = await makeWith("alias-log-born", [`${PREFIX}born`]);
       const later = await eventually(
-        () => api.brains.modifications(brainId, { maxLogs: 200 }),
+        () => newestLogs(200),
         (entries) =>
           entries.some((l) => l.modType === ModType.AliasesChanged && l.sourceId === born),
       );
@@ -7961,7 +8180,8 @@ suite("resource layer against the live API", () => {
     it("TheBrain's own search finds a thought by an alias", async (ctx) => {
       await requireAliases(ctx);
       // The tool descriptions and the skills say so, on the spec's word. The
-      // search is prefix-based and its index lags by up to 15 seconds.
+      // search is prefix-based, and a new thought is in its index at the next
+      // refresh, 3.7 to 5.5 s after the create.
       const alias = `${PREFIX}aka${Date.now()}`;
       const id = await makeWith("alias-search", [alias]);
 

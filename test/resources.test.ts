@@ -2901,6 +2901,43 @@ describe("reading the whole log", () => {
     for (const c of calls) expect(c.url.searchParams.get("startTime")).toBe(since);
   });
 
+  it("starts from until when one is given, whatever the page size, and sends it as it came", async () => {
+    // A stretch in the middle of the log, both ends inclusive: every bound a
+    // tie, a late entry or an entry beside one, so each is a place a pager
+    // that started wrong would lose or repeat something.
+    for (const [since, until] of [
+      [at(100), at(5002)],
+      [at(2), at(100)],
+      [at(101), at(90001)],
+      [at(0), at(999999)],
+      [at(600000), at(600000)],
+    ] as const) {
+      const inRange = newestFirst.filter(
+        (l) => compareLogTime(logTime(l), since) >= 0 && compareLogTime(logTime(l), until) <= 0,
+      );
+      expect(inRange.length, `${since}..${until}`).toBeGreaterThan(0);
+      for (let pageSize = 1; pageSize <= inRange.length + 1; pageSize++) {
+        const { api, calls } = apiWith([["/modifications", logRoute]]);
+        const all = await api.brains.allModifications(BRAIN, { since, until, pageSize });
+        expect(all.map(logEntryKey), `${since}..${until} by ${pageSize}`).toEqual(
+          inRange.map(logEntryKey),
+        );
+        // The first request is bounded already: nothing newer is asked for.
+        expect(calls[0]!.url.searchParams.get("endTime")).toBe(until);
+        for (const c of calls) expect(c.url.searchParams.get("startTime")).toBe(since);
+      }
+    }
+  });
+
+  it("with until and no since reads back to the start of the log", async () => {
+    const until = at(1001);
+    const { api } = apiWith([["/modifications", logRoute]]);
+    const all = await api.brains.allModifications(BRAIN, { until, pageSize: 3 });
+    expect(all.map(logEntryKey)).toEqual(
+      newestFirst.filter((l) => compareLogTime(logTime(l), until) <= 0).map(logEntryKey),
+    );
+  });
+
   it("makes one request when the log fits in a page", async () => {
     const { api, calls } = apiWith([["/modifications", logRoute]]);
     await expect(api.brains.allModifications(BRAIN)).resolves.toHaveLength(entries.length);
