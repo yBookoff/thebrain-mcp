@@ -174,19 +174,7 @@ silent wrong behaviour rather than a loud failure:
   with no parent or no type; a note written to it is a 200 that never reads
   back. `assertUuid()` refuses it with `invalid_uuid` before any request; in
   an *answer* it is `zero_id` (`createdId()`).
-- **Two thoughts share one link only when the posts come one after another.**
-  Two `POST /api/links` at once for a pair with none were two links 51 times
-  in 60; from then on `between()` is a 404 where both go the same way, and
-  any further post is the bare 400 `Link could not be created.`, of any kind,
-  from either end, a tag attached twice included. `describeError()` explains
-  it, and only `brain_unlink` mends the pair. Two `brain_link` calls at once
-  were two links 12 times in 21, one of them answered with zeros 7 times
-  (L47). Within a process, `links.inTurn()` takes one pair at a time:
-  `create()` and `attachTag()` take it, and a caller that looks and then
-  writes takes it around both (`brain_link`, `brain_tag` add, `ingest()`); the
-  write inside takes no second turn (`AsyncLocalStorage`). Never hold two
-  pairs' turns at once. Another process, or the app, writing to the pair at
-  the same moment is not guarded.
+- **`ingest()` sends one post per pair**, and one attach per tag on a thought.
 - **Asking for what is there is not free, and `between()` is how to look.** A
   link posted over the pair's own, a tag attached again included, is a 200
   with the same identifier and a `402` in the log; `PATCH /name` with the name
@@ -216,11 +204,9 @@ silent wrong behaviour rather than a loud failure:
   `brain_unlink` is behind `THEBRAIN_ALLOW_DESTRUCTIVE=1` and
   `confirmDestructive()`, as `brain_delete_thought` is, and refuses a tag's
   attachment and a type's link; `brain_link` with `replace` asks no one, since
-  the same call with the old relation puts the link back. A pair's links are
-  `linksOfPair()`'s: both graphs and `between()` from both ends. The one link
-  both lookups give is the only one, whatever a graph behind a deletion lists;
-  two 404s beside one listed link tell nothing. A `DELETE` of a link that is
-  gone is a 400, not a thought's 200.
+  the same call with the old relation puts the link back. Both act on the
+  link `between()` gives. A `DELETE` of a link that is gone is a 400, not a
+  thought's 200.
 - **A note keeps a code block that is closed; a ` ``` ` line with no partner
   is deleted.** Of the lines that begin with three backticks, whatever
   follows them, the last goes when their number is odd, whole, and a pair
@@ -241,13 +227,12 @@ silent wrong behaviour rather than a loud failure:
   spelling sent straight after was attached twice 18 times in 20. So
   `client.written` keeps for ten seconds the URLs this process attached, as
   sent, `attachUrl()` asks `by-location`, which is live, for each spelling of
-  the address it attached to the thought, and calls for one address on one
-  thought go one at a time (0 of 20). The list is taken only as a source of
-  spellings: each is asked of `by-location` before "Already there", since a
-  list read right after a delete still showed the attachment 6 of 6. Compare
-  a `sourceId` with a caller's thought id regardless of case: the API takes
-  capitals and answers in lower case. Not guarded: another process or the app
-  attaching another spelling while the list is behind.
+  the address it attached to the thought (0 of 20). The list is taken only as a
+  source of spellings: each is asked of `by-location` before "Already there",
+  since a list read right after a delete still showed the attachment 6 of 6.
+  Compare a `sourceId` with a caller's thought id regardless of case: the API
+  takes capitals and answers in lower case. Not guarded: another process or the
+  app attaching another spelling while the list is behind.
 - **Tags attach via `POST /api/links` with `relation: 2` against a `kind=4`
   thought.** The server rewrites it to `relation=1, meaning=5`. Against a type
   the same request sets the thought's type and against an ordinary thought it
@@ -256,24 +241,16 @@ silent wrong behaviour rather than a loud failure:
   throws `not_a_tag`, and `detachTag()` deletes only the tag's own link. A
   caller that writes something before the tag calls `links.requireTag()` ahead
   of that write.
-- **A tag attached twice is a 404 to the lookup and two attachments in the
-  graph.** `brain_tag` remove, where the lookup gives no attachment, reads the
-  thought's graph and deletes every attachment of the tag through
-  `links.detachTagLink()`, which refuses any other link; one listed and none
-  looked up is refused, never "was not on the thought". Not gated, as a
-  single removal is not: add puts the tag back (L46).
 - **A tag is made once a name, and a create does not say which it did.**
   `POST /api/thoughts` with `kind: 4` under the name of a tag that is there
   makes nothing and answers with that tag's `{id}`; names are matched with
   letter case, characters that do not show and the form of a character set
   aside (L39). A type is made again under any name. A label, aliases or a
-  source sent with it are written onto the tag that is there, and two creates
-  of one new tag name at once are two tags as often as not. Make a type or a
-  tag through `thoughts.createTypeOrTag()`: a name and a kind alone, one call
-  at a time in a brain, and `created` from the log — the newest entry read
-  before the create, the thought's own `101` after it. `/types` and `/tags`
-  are a copy, up to 0.42 s behind a create: never decide by them what was just
-  made.
+  source sent with it are written onto the tag that is there. Make a type or
+  a tag through `thoughts.createTypeOrTag()`: a name and a kind alone, and
+  `created` from the log — the newest entry read before the create, the
+  thought's own `101` after it. `/types` and `/tags` are a copy, up to 0.42 s
+  behind a create: never decide by them what was just made.
 - **In the log a tag is only a link.** Attaching one logs nothing against the
   thought: the link's `101` has the tag in `extraAId` and the thought in
   `extraBId`, the same as an ordinary parent link's. Renaming a tag or a type
