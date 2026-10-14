@@ -3198,6 +3198,23 @@ everything logged before the write that makes it (`caughtUp()`). The two
 tests about the ten seconds themselves do not, and fail when a sync leaves
 its watermark at its own start (2 runs of 2).
 
+**What a run made is swept by identifier, before the next run and after its
+own.** A run notes its start in a file outside the repository, one for each
+brain, and takes it off once it has swept up. Its sweep reads the log from
+that start and deletes every thought created since and still there, whatever
+it is called: a prefix did not find a thought a test renamed to `ZZ-IT-…`, a
+type named with characters that do not show, or the thought of a create
+answered with the 403 of a busy app. A run that finds a start left in the
+file sweeps from it before its first test, because a tag an earlier run left
+is what a create of a tag of that name answers with (row L39), in the state
+it was left in. Before its first test it also deletes the tags and types
+whose names are the tests', in the way the API compares a tag's name; and
+after its last it still reads the whole log for thoughts made or named so,
+for debris from before the file or from another machine. Tag names are not
+made unique to a run: a tag or a type is made under a fixed name in some
+sixty places, tests compare those names and the documents that hold them,
+and a brain swept before the run has nothing for a name to meet.
+
 **A burst is not a promise of 100 answers.** With another session at work in
 the app, one create of a burst is now and then answered with the catch-all
 403, and its thought is made all the same (4 of 4: the log had a `101` for

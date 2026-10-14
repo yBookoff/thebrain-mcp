@@ -17,6 +17,10 @@
  *
  * Missing either variable skips the suite.
  */
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { afterAll, beforeAll, describe, expect, it, vi, type TestContext } from "vitest";
 
 import {
@@ -173,6 +177,66 @@ suite("resource layer against the live API", () => {
   const runStart = new Date(Date.now() - 60_000).toISOString();
 
   /**
+   * The starts of the runs against this brain that have not swept up after
+   * themselves, this one among them until it has. A file outside the
+   * repository, one for each brain, so that the run after one that died
+   * sweeps for it.
+   */
+  const ledger = (): string => join(tmpdir(), `thebrain-mcp-contract-${brainId}.json`);
+  const unswept = (): string[] => {
+    try {
+      const starts: unknown = JSON.parse(readFileSync(ledger(), "utf8"));
+      return Array.isArray(starts) ? starts.filter((s): s is string => typeof s === "string") : [];
+    } catch {
+      return [];
+    }
+  };
+  const record = (starts: readonly string[]): void => {
+    if (starts.length === 0) rmSync(ledger(), { force: true });
+    else writeFileSync(ledger(), JSON.stringify(starts));
+  };
+  const earliest = (starts: readonly string[]): string =>
+    starts.reduce((a, b) => (Date.parse(a) <= Date.parse(b) ? a : b));
+
+  /**
+   * Deletes every thought the log has as created since `since` and not
+   * deleted, whatever it is called, and answers how many it deleted and how
+   * many deletes failed.
+   *
+   * By identifier, from the log, and not by name. A test renames a thought
+   * to `ZZ-IT-…`, and makes names and types of characters that do not show,
+   * none of which a prefix finds; and a create answered with the catch-all
+   * 403 in a burst makes its thought with no identifier given back (4 of 4).
+   * All of it is in the log, and in a throwaway brain everything made while
+   * a run is on is the run's.
+   */
+  const sweepSince = async (since: string): Promise<{ deleted: number; failed: number }> => {
+    let deleted = 0;
+    let failed = 0;
+    for (const id of replayThoughtIds(await api.brains.allModifications(brainId, { since }))) {
+      if ((await api.thoughts.get(brainId, id).catch(() => null)) === null) continue;
+      await api.thoughts.delete(brainId, id).then(
+        () => (deleted += 1),
+        () => (failed += 1),
+      );
+    }
+    return { deleted, failed };
+  };
+
+  /**
+   * Whether a name is one these tests give, the way the API compares the
+   * name of a tag: letter case, what does not show and the form of a
+   * character set aside (L39). A create of a tag under such a name answers
+   * with the tag that is there, in whatever state an earlier run left it.
+   */
+  const ours = (name: string | null): boolean =>
+    (name ?? "")
+      .normalize("NFKC")
+      .replace(/[\p{White_Space}\p{Default_Ignorable_Code_Point}\p{Cc}]/gu, "")
+      .toLowerCase()
+      .startsWith(PREFIX);
+
+  /**
    * The newest `maxLogs` entries of this run.
    *
    * With a `startTime`, because a log request without one is answered in
@@ -271,7 +335,34 @@ suite("resource layer against the live API", () => {
           `Create a separate brain and point THEBRAIN_TEST_BRAIN_ID at it.`,
       );
     }
-  }, 30_000);
+
+    // What an earlier run left, before this one makes anything. A run that
+    // died has its start in the ledger still, and everything made since is
+    // deleted. Left, a tag an earlier run made would be what this run's
+    // create of one of that name answers with (L39), in the state it was
+    // left in.
+    const earlier = unswept();
+    record([...earlier, runStart]);
+    if (earlier.length > 0) {
+      const { deleted, failed } = await sweepSince(earliest(earlier));
+      console.warn(
+        `[cleanup] ${earlier.length} earlier run(s) had not swept up: ${deleted} thoughts ` +
+          `deleted${failed > 0 ? `, ${failed} deletes failed` : ""}`,
+      );
+      if (failed === 0) record([runStart]);
+    }
+    // And the tags and types of runs from before there was a ledger, by name.
+    // The two lists are copies (L39): one just deleted above can be listed
+    // still, and its second delete is a 200 that does nothing.
+    const vocabulary = [
+      ...(await api.thoughts.listTags(brainId)),
+      ...(await api.thoughts.listTypes(brainId)),
+    ].filter((t) => ours(t.name));
+    for (const t of vocabulary) await api.thoughts.delete(brainId, t.id);
+    if (vocabulary.length > 0) {
+      console.warn(`[cleanup] tags and types an earlier run left: ${vocabulary.length}`);
+    }
+  }, 120_000);
 
   // The sweep is as long as the run made thoughts: some 850 deletes, 7 s
   // when the app has nothing else to do and 47 s when another session is at
@@ -281,14 +372,41 @@ suite("resource layer against the live API", () => {
       await api.thoughts.delete(brainId, id).catch(() => undefined);
     }
 
-    // Sweep up debris from earlier failed runs. The API has no "list all"
-    // endpoint, but everything these tests create is in the log. All of the
-    // log, since a run that failed may be any run: one read of it, 3.5 s at
-    // 170,000 entries, outside every test's own time.
+    // Then everything this run made that is still there, by the log: a
+    // thought made by a create that got no answer, or by a tool a test ran.
+    // From the earliest start in the ledger, which is this run's unless an
+    // earlier one could not sweep. Taken off it only when every delete went.
+    // Not when another run against this brain began after this one: it may
+    // be on still, and what it made would go with this run's.
+    const starts = unswept();
+    if (starts.some((s) => Date.parse(s) > Date.parse(runStart))) {
+      console.warn("[cleanup] a later run against this brain is in the ledger: no sweep by the log");
+    } else {
+      const { deleted, failed } = await sweepSince(earliest([...starts, runStart]));
+      if (deleted + failed > 0) {
+        console.warn(
+          `[cleanup] thoughts this run made that no test deleted: ${deleted}` +
+            (failed > 0 ? `, ${failed} deletes failed and stay in the ledger` : ""),
+        );
+      }
+      if (failed === 0) record([]);
+    }
+
+    // And debris from runs before the ledger, or from another machine, by
+    // name: the name a thought was made with, which its `101` keeps (L37),
+    // or the one it has, in the API's way of comparing them. All of the log,
+    // since such a run may be any run: one read of it, 3.5 s at 170,000
+    // entries, outside every test's own time.
+    const logs = await api.brains.allModifications(brainId);
+    const madeAs = new Map(
+      logs
+        .filter((l) => l.modType === ModType.Created && l.sourceType === EntityType.Thought)
+        .map((l) => [l.sourceId, l.newValue]),
+    );
     const leftovers: string[] = [];
-    for (const id of replayThoughtIds(await api.brains.allModifications(brainId))) {
+    for (const id of replayThoughtIds(logs)) {
       const t = await api.thoughts.get(brainId, id).catch(() => null);
-      if (t?.name?.startsWith(PREFIX)) leftovers.push(id);
+      if (t !== null && (ours(t.name) || ours(madeAs.get(id) ?? null))) leftovers.push(id);
     }
     for (const id of leftovers) {
       await api.thoughts.delete(brainId, id).catch(() => undefined);
