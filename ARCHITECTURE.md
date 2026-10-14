@@ -3419,6 +3419,20 @@ made unique to a run: a tag or a type is made under a fixed name in some
 sixty places, tests compare those names and the documents that hold them,
 and a brain swept before the run has nothing for a name to meet.
 
+**The start is past the brain's newest entry, and the sweep keeps a second
+between neighbours.** The start used to be a minute before the run's first
+request, and a brain made in that minute lost its home thought to the
+sweep: two did, on 2026-10-14, and with no thought left a brain's
+`statistics` is the catch-all 403. A run now reads the newest entry the
+brain logged before it writes anything and starts at the next millisecond,
+and no sweep deletes the home thought. The sweep went one thought after
+another, a parent a few milliseconds before its children, which is what
+leaves a thought in TheBrain's search for good (§8, *A hit for a thought
+that is gone*). It deletes in rounds now, no two thoughts that share a link
+by the log in one round, a second after the round before: four or five
+rounds, four or five seconds a run. `test/sweep.ts` holds the rules and
+`test/sweep.test.ts` holds them to it.
+
 **A burst is not a promise of 100 answers.** With another session at work in
 the app, one create of a burst is now and then answered with the catch-all
 403, and its thought is made all the same (4 of 4: the log had a `101` for

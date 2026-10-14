@@ -77,6 +77,7 @@ import {
 } from "../src/semantic/indexer.js";
 import { SemanticSearch } from "../src/semantic/search.js";
 import { VectorStore } from "../src/semantic/store.js";
+import { linkedIn, roundsApart, sweepFrom, sweepTargets } from "./sweep.js";
 
 const apiKey = process.env["THEBRAIN_API_KEY"];
 const testBrainId = process.env["THEBRAIN_TEST_BRAIN_ID"];
@@ -200,9 +201,75 @@ suite("resource layer against the live API", () => {
     starts.reduce((a, b) => (Date.parse(a) <= Date.parse(b) ? a : b));
 
   /**
+   * Where this run's sweep starts: past the newest entry the brain logged
+   * before the run's first write (`sweepFrom()`). The run's own start in the
+   * ledger. Not `runStart`, a minute earlier, which took in the home thought
+   * of a brain made in that minute.
+   */
+  let madeFrom = runStart;
+  /** The newest entry the brain logged before this run wrote anything. */
+  let before: ModificationLogDto | undefined;
+  /** The brain's home thought, which no sweep deletes. */
+  let home = "";
+
+  /**
+   * How long a thought is left after a thought it shares a link with is
+   * deleted, and after the run's last write, before it is deleted itself.
+   *
+   * A thought deleted soon after a neighbour of its own now and then stays in
+   * TheBrain's search for good: its read is a 404, and the search returns it
+   * hours on (L34). The sweep deleted the thoughts of a run one after another,
+   * a parent a few milliseconds before its children and a type before its
+   * instances. On the test brain of a release check it left nine, each from
+   * a sweep that ran slow beside other work in the app, each deleted 13 to
+   * 215 ms after a neighbour; sweeps the app had to itself left none in
+   * eight. BRMCP-47 had none of 720 deleted 120 to 330 ms after one; a
+   * second is that with room for a busy app. It costs a run four to five
+   * seconds: a round of every thought no two of which share a link, a
+   * second round of some 200, and two or three of a few. Measured on two
+   * runs of 2026-10-14: the sweep took 16 and 17 s for 770 and 1,040
+   * deletes, where it had taken 11 s for 1,040 one after another, and the
+   * search for `zz-it` after each had nothing that was gone.
+   */
+  const APART_MS = 1000;
+
+  /**
+   * Deletes those of `ids` that are still there, so that none goes within
+   * `APART_MS` of a thought it shares a link with by `near`, nor of the
+   * write before the call. Answers what it deleted, and how many deletes
+   * failed.
+   *
+   * In rounds (`roundsApart()`), each one after another, `APART_MS` after
+   * the round before. A parent and its children, a type and its instances, a
+   * tag and what it is on go in two rounds, whichever is first, and the
+   * first is never at risk: no neighbour of its own has been deleted.
+   */
+  const deleteApart = async (
+    ids: Iterable<string>,
+    near: ReadonlyMap<string, ReadonlySet<string>>,
+  ): Promise<{ deleted: string[]; failed: number }> => {
+    const there: string[] = [];
+    for (const id of new Set(ids)) {
+      if ((await api.thoughts.get(brainId, id).catch(() => null)) !== null) there.push(id);
+    }
+    const deleted: string[] = [];
+    let failed = 0;
+    for (const round of roundsApart(there, near)) {
+      await settle(APART_MS);
+      for (const id of round) {
+        await api.thoughts.delete(brainId, id).then(
+          () => deleted.push(id),
+          () => (failed += 1),
+        );
+      }
+    }
+    return { deleted, failed };
+  };
+
+  /**
    * Deletes every thought the log has as created since `since` and not
-   * deleted, whatever it is called, and answers how many it deleted and how
-   * many deletes failed.
+   * deleted, whatever it is called, with `also` beside them, and answers
+   * what it deleted and how many deletes failed. Never the home thought.
    *
    * By identifier, from the log, and not by name. A test renames a thought
    * to `ZZ-IT-…`, and makes names and types of characters that do not show,
@@ -211,17 +278,12 @@ suite("resource layer against the live API", () => {
    * All of it is in the log, and in a throwaway brain everything made while
    * a run is on is the run's.
    */
-  const sweepSince = async (since: string): Promise<{ deleted: number; failed: number }> => {
-    let deleted = 0;
-    let failed = 0;
-    for (const id of replayThoughtIds(await api.brains.allModifications(brainId, { since }))) {
-      if ((await api.thoughts.get(brainId, id).catch(() => null)) === null) continue;
-      await api.thoughts.delete(brainId, id).then(
-        () => (deleted += 1),
-        () => (failed += 1),
-      );
-    }
-    return { deleted, failed };
+  const sweepSince = async (
+    since: string,
+    also: readonly string[] = [],
+  ): Promise<{ deleted: string[]; failed: number }> => {
+    const logs = await api.brains.allModifications(brainId, { since });
+    return deleteApart(sweepTargets(logs, also, home), linkedIn(logs));
   };
 
   /**
@@ -337,29 +399,38 @@ suite("resource layer against the live API", () => {
       );
     }
 
+    // Where this run's sweep will start, before it writes anything.
+    home = (await api.brains.get(brainId)).homeThoughtId;
+    [before] = await newestLogs(1);
+    madeFrom = sweepFrom(before, runStart);
+
     // What an earlier run left, before this one makes anything. A run that
     // died has its start in the ledger still, and everything made since is
     // deleted. Left, a tag an earlier run made would be what this run's
     // create of one of that name answers with (L39), in the state it was
     // left in.
     const earlier = unswept();
-    record([...earlier, runStart]);
+    record([...earlier, madeFrom]);
     if (earlier.length > 0) {
       const { deleted, failed } = await sweepSince(earliest(earlier));
       console.warn(
-        `[cleanup] ${earlier.length} earlier run(s) had not swept up: ${deleted} thoughts ` +
+        `[cleanup] ${earlier.length} earlier run(s) had not swept up: ${deleted.length} thoughts ` +
           `deleted${failed > 0 ? `, ${failed} deletes failed` : ""}`,
       );
-      if (failed === 0) record([runStart]);
+      if (failed === 0) record([madeFrom]);
     }
     // And the tags and types of runs from before there was a ledger, by name.
     // The two lists are copies (L39): one just deleted above can be listed
-    // still, and its second delete is a 200 that does nothing.
+    // still, and its second delete is a 200 that does nothing. What links
+    // them is not known here, so each goes apart from the one before.
     const vocabulary = [
       ...(await api.thoughts.listTags(brainId)),
       ...(await api.thoughts.listTypes(brainId)),
     ].filter((t) => ours(t.name));
-    for (const t of vocabulary) await api.thoughts.delete(brainId, t.id);
+    for (const t of vocabulary) {
+      await settle(APART_MS);
+      await api.thoughts.delete(brainId, t.id);
+    }
     if (vocabulary.length > 0) {
       console.warn(`[cleanup] tags and types an earlier run left: ${vocabulary.length}`);
     }
@@ -369,24 +440,25 @@ suite("resource layer against the live API", () => {
   // when the app has nothing else to do and 47 s when another session is at
   // it, which with the read of the log was more than the minute it had.
   afterAll(async () => {
-    for (const id of created) {
-      await api.thoughts.delete(brainId, id).catch(() => undefined);
-    }
-
-    // Then everything this run made that is still there, by the log: a
-    // thought made by a create that got no answer, or by a tool a test ran.
-    // From the earliest start in the ledger, which is this run's unless an
-    // earlier one could not sweep. Taken off it only when every delete went.
-    // Not when another run against this brain began after this one: it may
-    // be on still, and what it made would go with this run's.
+    // Everything this run made that is still there: what it holds the
+    // identifier of, and by the log a thought made by a create that got no
+    // answer, or by a tool a test ran. From the earliest start in the ledger,
+    // which is this run's unless an earlier one could not sweep. Taken off it
+    // only when every delete went. Not by the log when another run against
+    // this brain began after this one: it may be on still, and what it made
+    // would go with this run's.
     const starts = unswept();
-    if (starts.some((s) => Date.parse(s) > Date.parse(runStart))) {
+    if (starts.some((s) => Date.parse(s) > Date.parse(madeFrom))) {
       console.warn("[cleanup] a later run against this brain is in the ledger: no sweep by the log");
+      const logs = await api.brains.allModifications(brainId, { since: madeFrom });
+      await deleteApart(sweepTargets([], created, home), linkedIn(logs));
     } else {
-      const { deleted, failed } = await sweepSince(earliest([...starts, runStart]));
-      if (deleted + failed > 0) {
+      const { deleted, failed } = await sweepSince(earliest([...starts, madeFrom]), created);
+      const ownIds = new Set(created);
+      const strays = deleted.filter((id) => !ownIds.has(id)).length;
+      if (strays + failed > 0) {
         console.warn(
-          `[cleanup] thoughts this run made that no test deleted: ${deleted}` +
+          `[cleanup] thoughts this run made that no test deleted: ${strays}` +
             (failed > 0 ? `, ${failed} deletes failed and stay in the ledger` : ""),
         );
       }
@@ -409,10 +481,8 @@ suite("resource layer against the live API", () => {
       const t = await api.thoughts.get(brainId, id).catch(() => null);
       if (t !== null && (ours(t.name) || ours(madeAs.get(id) ?? null))) leftovers.push(id);
     }
-    for (const id of leftovers) {
-      await api.thoughts.delete(brainId, id).catch(() => undefined);
-    }
     if (leftovers.length > 0) {
+      await deleteApart(sweepTargets([], leftovers, home), linkedIn(logs));
       console.warn(`[cleanup] removed leftovers from earlier runs: ${leftovers.length}`);
     }
   }, 300_000);
@@ -489,6 +559,20 @@ suite("resource layer against the live API", () => {
       await expect(list()).rejects.toMatchObject({ kind: "unknown_brain", status: 401 });
     }
   }, 30_000);
+
+  it("the sweep after this run starts past everything the brain logged before it, and passes over the home thought", async () => {
+    // It used to start a minute before the run's first request. A brain made
+    // in that minute had its home thought's `101` in the window, and two
+    // sweeps deleted two home thoughts on 2026-10-14; anything else written
+    // in that minute went the same way. Read-only: what the window holds now.
+    const window = await api.brains.allModifications(brainId, { since: madeFrom });
+    if (before !== undefined) {
+      expect(window.map(logEntryKey)).not.toContain(logEntryKey(before));
+      for (const l of window) expect(compareLogTime(logTime(l), logTime(before))).toBeGreaterThan(0);
+    }
+    expect([...replayThoughtIds(window)]).not.toContain(home);
+    expect(sweepTargets(window, [home, ...created], home)).not.toContain(home);
+  });
 
   it("a freshly created thought reads back immediately by identifier", async () => {
     const id = await make("basic");
@@ -3274,6 +3358,11 @@ suite("resource layer against the live API", () => {
     // Deleted, each is gone from its count at the first read as well.
     await api.links.delete(brainId, link);
     expect(await now()).toEqual({ ...full, links: base.links });
+    // Not straight after its link: a thought deleted a few milliseconds
+    // after a neighbour's delete took a link of its own now and then stays
+    // in the search for good (L34). A link deleted alone was not measured
+    // apart; the second costs the test nothing it measures.
+    await settle(APART_MS);
     await api.thoughts.delete(brainId, b);
     expect(await now()).toEqual({ ...full, links: base.links, thoughts: base.thoughts + 1 });
     await settle(350);
