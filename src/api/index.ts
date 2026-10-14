@@ -37,8 +37,10 @@ export class TheBrainApi {
 }
 
 export {
+  COPY_LAG_MS,
   TheBrainClient,
   ZERO_UUID,
+  afterCopyLag,
   assertUuid,
   isUuid,
   lowerUuid,
@@ -46,13 +48,6 @@ export {
   mayHaveLanded,
 } from "./client.js";
 export { TheBrainError, type ApiErrorKind } from "./errors.js";
-export {
-  RecentWrites,
-  WRITTEN_KEPT_MS,
-  type GraphList,
-  type ShownGraph,
-  type WrittenFact,
-} from "./written.js";
 export { compareLogTime, logEntryKey, logTime } from "./log.js";
 export {
   MAX_NAME_LENGTH,

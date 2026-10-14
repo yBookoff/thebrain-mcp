@@ -7,7 +7,7 @@ import {
 } from "../client.js";
 import { TheBrainError } from "../errors.js";
 import { compareLogTime, logTime } from "../log.js";
-import { nameRefusal, shownName, thoughtNameAsStored } from "../names.js";
+import { nameRefusal, shownName } from "../names.js";
 import {
   EntityType,
   ModType,
@@ -422,21 +422,6 @@ export class ThoughtsResource {
         "there is nothing to address it by. For a link that answer means none was made; for a " +
         "thought it has not been seen, so look for the thought before creating it again",
     );
-    // The source's graph lists it from now on, and a copy of that graph from
-    // before this answer does not: kept for a reader that looks there next.
-    // An ordinary thought alone: where a new type or tag is listed next to
-    // its source was not measured.
-    if (
-      input.sourceThoughtId !== undefined &&
-      (input.kind ?? ThoughtKind.Normal) === ThoughtKind.Normal
-    ) {
-      this.client.written.linked(
-        brainId,
-        input.sourceThoughtId,
-        id,
-        input.relation ?? Relation.Child,
-      );
-    }
     return id;
   }
 
@@ -579,19 +564,9 @@ export class ThoughtsResource {
     }
 
     if (ops.length > 0) {
-      // Whatever comes of it: a patch that was refused may have changed the
-      // kind before the operation it was refused for, and one that got no
-      // answer may have landed. What a graph lists of a thought of another
-      // kind was not measured, so nothing is asked of a graph about this one.
-      if (fields.kind !== undefined) this.client.written.forget(brainId, thoughtId);
       await this.client.patch(`/api/thoughts/${brainId}/${thoughtId}`, {
         jsonPatch: ops,
       });
-      // A graph lists the thought under its old name for a moment yet, and a
-      // reader that looks for it by the new one has to know that copy is behind.
-      if (typeof fields.name === "string") {
-        this.client.written.named(brainId, thoughtId, thoughtNameAsStored(fields.name));
-      }
     }
     // Not for certainty alone: a removal made before this reads back would
     // find no type to remove. Past the wait `removeType` waits for it again.
@@ -975,9 +950,6 @@ export class ThoughtsResource {
   async delete(brainId: string, thoughtId: string): Promise<void> {
     assertUuid(brainId, "brainId");
     assertUuid(thoughtId, "thoughtId");
-    // Ahead of the request, and whatever comes of it: one that got no answer
-    // may have deleted the thought, and no graph is to be held to listing it.
-    this.client.written.forget(brainId, thoughtId);
     await this.client.delete(`/api/thoughts/${brainId}/${thoughtId}`);
   }
 

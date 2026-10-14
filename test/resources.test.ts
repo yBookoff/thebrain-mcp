@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TheBrainApi } from "../src/api/index.js";
 import {
+  COPY_LAG_MS,
   LOG_PAGE_SIZE,
   MAX_NAME_LENGTH,
   READ_BACK,
@@ -2637,205 +2638,6 @@ describe("the identifier of zeros, sent by a caller", () => {
   });
 });
 
-describe("what a write leaves for a reader of a graph", () => {
-  // A graph is answered from a copy that is behind a write, and nothing in
-  // it says so. The client keeps what an answered write put into the graphs,
-  // so that a reader can tell: `ingest()` looks in a copy 0.3 s after
-  // another call's create, and one further behind than that lacks the
-  // thought, which is then made again.
-  const NEW = "eeeeeeee-0000-4000-8000-000000000005";
-  const OTHER = "ffffffff-0000-4000-8000-000000000006";
-  const LINK = "99999999-0000-4000-8000-000000000009";
-  const ZEROS = "00000000-0000-0000-0000-000000000000";
-
-  /** A brain of ordinary thoughts that answers every write, a create with `created`. */
-  const brain = (created: unknown = { id: NEW }) =>
-    apiWith([
-      ["POST /api/thoughts", () => created],
-      ["POST /api/links", () => created],
-      ["PATCH /api/", () => 200],
-      ["DELETE /api/", () => 200],
-      [
-        "/api/links/",
-        () => ({ id: LINK, thoughtIdA: TAG, thoughtIdB: THOUGHT, relation: 1, meaning: 5 }),
-      ],
-      [
-        "/api/thoughts/",
-        (url) => {
-          const id = url.pathname.split("/").pop()!;
-          return thought(id, "any", { kind: id === TAG ? 4 : id === TYPE ? 2 : 1 });
-        },
-      ],
-    ]);
-  /** A copy of a graph from before anything was written: it lists nobody. */
-  const EMPTY = { children: [], parents: [], jumps: [] };
-  /** What the client would have the graph of `id` show that an empty one does not. */
-  const asked = (api: TheBrainApi, id: string): string[] =>
-    api.client.written
-      .notShownBy(BRAIN, id, EMPTY)
-      .map((f) => (f.of === "listed" ? `${f.thoughtId} in ${f.list}` : `${f.thoughtId} named`));
-
-  it("a thought created next to another is to be in that thought's graph, where the relation puts it", async () => {
-    for (const [relation, there, back] of [
-      [undefined, "children", "parents"],
-      [Relation.Child, "children", "parents"],
-      [Relation.Parent, "parents", "children"],
-      [Relation.Jump, "jumps", "jumps"],
-    ] as const) {
-      const { api } = brain();
-      const id = await api.thoughts.create(BRAIN, {
-        name: "New",
-        sourceThoughtId: THOUGHT,
-        ...(relation !== undefined ? { relation } : {}),
-      });
-
-      expect(asked(api, THOUGHT), there).toEqual([`${id} in ${there}`]);
-      expect(asked(api, id), back).toEqual([`${THOUGHT} in ${back}`]);
-      expect(asked(api, OTHER)).toEqual([]);
-    }
-  });
-
-  it("nothing is kept of a create with no source, of a type or a tag, or of one that was not answered with a thought", async () => {
-    const plain = brain();
-    await plain.api.thoughts.create(BRAIN, { name: "New" });
-    expect([asked(plain.api, THOUGHT), asked(plain.api, NEW)]).toEqual([[], []]);
-
-    // Where a new type or tag is listed next to its source was not measured.
-    for (const kind of [2, 4]) {
-      const { api } = brain();
-      await api.thoughts.create(BRAIN, {
-        name: "New",
-        kind,
-        sourceThoughtId: THOUGHT,
-        relation: Relation.Jump,
-      });
-      expect(asked(api, THOUGHT), String(kind)).toEqual([]);
-    }
-
-    const refused = brain(400);
-    await expect(
-      refused.api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: THOUGHT }),
-    ).rejects.toMatchObject({ kind: "bad_request" });
-    expect(asked(refused.api, THOUGHT)).toEqual([]);
-
-    const zeros = brain({ id: ZEROS });
-    await expect(
-      zeros.api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: THOUGHT }),
-    ).rejects.toMatchObject({ kind: "zero_id" });
-    expect(asked(zeros.api, THOUGHT)).toEqual([]);
-  });
-
-  it("a link puts each end into the other's graph, where the relation puts it", async () => {
-    for (const [relation, there, back] of [
-      [undefined, "children", "parents"],
-      [Relation.Child, "children", "parents"],
-      [Relation.Parent, "parents", "children"],
-      [Relation.Jump, "jumps", "jumps"],
-    ] as const) {
-      const { api } = brain({ id: LINK });
-      await api.links.create(BRAIN, {
-        thoughtIdA: THOUGHT,
-        thoughtIdB: OTHER,
-        ...(relation !== undefined ? { relation } : {}),
-      });
-
-      expect(asked(api, THOUGHT), there).toEqual([`${OTHER} in ${there}`]);
-      expect(asked(api, OTHER), back).toEqual([`${THOUGHT} in ${back}`]);
-    }
-  });
-
-  it("nothing is kept of a tag attached, nor of a link that was refused or answered with zeros", async () => {
-    // A tag is in neither of the three lists, and its attachment is looked
-    // up by the pair, which is not behind a write.
-    const tagged = brain({ id: LINK });
-    await tagged.api.links.attachTag(BRAIN, THOUGHT, TAG);
-    expect([asked(tagged.api, THOUGHT), asked(tagged.api, TAG)]).toEqual([[], []]);
-
-    for (const [answer, kind] of [
-      [400, "bad_request"],
-      [{ id: ZEROS }, "zero_id"],
-    ] as const) {
-      const { api } = brain(answer);
-      await expect(
-        api.links.create(BRAIN, { thoughtIdA: THOUGHT, thoughtIdB: OTHER, relation: Relation.Jump }),
-      ).rejects.toMatchObject({ kind });
-      expect([asked(api, THOUGHT), asked(api, OTHER)], kind).toEqual([[], []]);
-    }
-  });
-
-  it("a rename is kept under the name as TheBrain stores it, and nothing of a patch that names nothing", async () => {
-    const { api } = brain();
-    await api.thoughts.update(BRAIN, NEW, { label: "caption" });
-    const lists = (name: string) => ({ children: [{ id: NEW, name }], parents: [], jumps: [] });
-    const behind = (name: string) => api.client.written.notShownBy(BRAIN, THOUGHT, lists(name));
-    expect(behind("Before")).toEqual([]);
-
-    await api.thoughts.update(BRAIN, NEW, { name: " After\tthat\n" });
-    expect(behind("Before")).toMatchObject([{ of: "named", thoughtId: NEW, name: "After that" }]);
-    expect(behind("After that")).toEqual([]);
-
-    const refused = apiWith([["PATCH /api/", () => 400]]);
-    await expect(refused.api.thoughts.update(BRAIN, NEW, { name: "After" })).rejects.toMatchObject({
-      kind: "bad_request",
-    });
-    expect(refused.api.client.written.notShownBy(BRAIN, THOUGHT, lists("Before"))).toEqual([]);
-  });
-
-  it("a thought deleted, or given another kind, is asked of no graph, whatever came of the request", async () => {
-    for (const [what, answer, change] of [
-      ["deleted", 200, (api: TheBrainApi) => api.thoughts.delete(BRAIN, NEW)],
-      // Unanswered or refused, it may be gone all the same.
-      ["a delete refused", 500, (api: TheBrainApi) => api.thoughts.delete(BRAIN, NEW)],
-      ["another kind", 200, (api: TheBrainApi) => api.thoughts.update(BRAIN, NEW, { kind: 4 })],
-      ["a kind refused", 400, (api: TheBrainApi) => api.thoughts.update(BRAIN, NEW, { kind: 4 })],
-    ] as const) {
-      const { api } = apiWith([
-        ["POST /api/thoughts", () => ({ id: NEW })],
-        ["DELETE /api/", () => answer],
-        ["PATCH /api/", () => answer],
-        ["/api/thoughts/", (url) => thought(url.pathname.split("/").pop()!, "any")],
-      ]);
-      await api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: THOUGHT });
-      await api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: OTHER });
-      expect(asked(api, THOUGHT), what).toEqual([`${NEW} in children`]);
-
-      await change(api).catch(() => undefined);
-      expect([asked(api, THOUGHT), asked(api, OTHER), asked(api, NEW)], what).toEqual([[], [], []]);
-    }
-  });
-
-  it("a link deleted by its identifier takes every link kept for that brain; a tag or a type taken off takes none", async () => {
-    const linked = async () => {
-      const made = brain();
-      await made.api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: THOUGHT });
-      return made;
-    };
-
-    const unlinked = await linked();
-    await unlinked.api.links.delete(BRAIN, LINK);
-    expect(asked(unlinked.api, THOUGHT)).toEqual([]);
-
-    // Neither is a link in one of the three lists.
-    const untagged = await linked();
-    expect(await untagged.api.links.detachTag(BRAIN, THOUGHT, TAG)).toBe(true);
-    expect(untagged.calls.at(-1)).toMatchObject({ method: "DELETE" });
-    expect(asked(untagged.api, THOUGHT)).toEqual([`${NEW} in children`]);
-
-    const untyped = apiWith([
-      ["POST /api/thoughts", () => ({ id: NEW })],
-      ["DELETE /api/", () => 200],
-      [
-        "/api/links/",
-        () => ({ id: LINK, thoughtIdA: TYPE, thoughtIdB: THOUGHT, relation: 1, meaning: 2 }),
-      ],
-      ["/api/thoughts/", (url) => thought(url.pathname.split("/").pop()!, "any")],
-    ]);
-    await untyped.api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: THOUGHT });
-    expect(await untyped.api.links.detachType(BRAIN, THOUGHT, TYPE)).toBe(true);
-    expect(asked(untyped.api, THOUGHT)).toEqual([`${NEW} in children`]);
-  });
-});
-
 describe("a link's name as TheBrain stores it", () => {
   it("has a tab and a line feed for a space each, and no blanks at either end", () => {
     // Measured on 15.0.640, by a POST and by a PATCH alike (contract test).
@@ -3571,11 +3373,18 @@ describe("attachments", () => {
   /**
    * TheBrain as measured (L17): an attach is stored as it was sent, and
    * `by-location` finds it at once in that spelling, scheme and trailing
-   * slashes aside, and in no other. The thought's own list is a copy that has
-   * none of it yet. `post` may answer otherwise.
+   * slashes aside, and in no other. The thought's own list is a copy that
+   * lists an attachment 300 ms after it was made, which is past the 214 ms
+   * measured, and goes on listing one deleted from `stored`. `post` may
+   * answer otherwise. Run under fake timers: `attachUrl` waits by the clock.
    */
-  const listBehind = (post: (url: URL) => unknown = () => 200) => {
+  const listLate = (post: (url: URL) => unknown = () => 200) => {
+    const LAG_MS = 300;
     const stored: AttachmentDto[] = [];
+    const listed: Array<{ attachment: AttachmentDto; at: number }> = [];
+    /** When each write came back, and when the list was read. */
+    const posted: number[] = [];
+    const listReads: number[] = [];
     const bare = (location: string): string =>
       location.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
     const routes: Array<[string, Route]> = [
@@ -3584,16 +3393,28 @@ describe("attachments", () => {
         (url) =>
           stored.filter((a) => bare(a.location!) === bare(url.searchParams.get("location")!)),
       ],
-      ["/api/thoughts/", () => []],
+      [
+        "/api/thoughts/",
+        (url) => {
+          listReads.push(Date.now());
+          const thoughtId = url.pathname.split("/").at(-2)!.toLowerCase();
+          return listed
+            .filter((l) => l.attachment.sourceId === thoughtId && Date.now() - l.at >= LAG_MS)
+            .map((l) => l.attachment);
+        },
+      ],
       [
         "POST /api/attachments",
         (url) => {
           const answer = post(url);
+          posted.push(Date.now());
           if (answer === 200 || answer === "lost") {
             const location = url.searchParams.get("url")!;
             // Named in capitals or not, a thought is answered in lower case.
             const sourceId = url.pathname.split("/").at(-2)!.toLowerCase();
-            stored.push(attached(location, { id: `att-${stored.length + 1}`, sourceId }));
+            const attachment = attached(location, { id: `att-${stored.length + 1}`, sourceId });
+            stored.push(attachment);
+            listed.push({ attachment, at: Date.now() });
           }
           if (answer === "lost") throw new TypeError("fetch failed");
           return answer;
@@ -3605,85 +3426,115 @@ describe("attachments", () => {
       calls
         .filter((c) => c.method === "GET")
         .map((c) => c.url.searchParams.get("location") ?? "the list");
-    return { api, calls, fetchImpl, stored, asked };
+    /** `attachUrl` run to its end, the clock moved on as it waits. */
+    const attach = async (
+      thoughtId: string,
+      url: string,
+      on: TheBrainApi = api,
+    ): Promise<{ created: boolean; existing?: AttachmentDto }> => {
+      const call = on.attachments.attachUrl(BRAIN, thoughtId, url);
+      let done = false;
+      call.then(
+        () => (done = true),
+        () => (done = true),
+      );
+      while (!done) await vi.advanceTimersByTimeAsync(10);
+      return call;
+    };
+    return { api, fetchImpl, stored, asked, attach, posted, listReads };
   };
   const UPPER = "https://Example.com/p";
   const LOWER = "https://example.com/p";
 
-  it("the address attached a moment ago in another host case is found though the list is behind", async () => {
-    const { api, stored, asked, fetchImpl } = listBehind();
-    expect((await api.attachments.attachUrl(BRAIN, THOUGHT, UPPER)).created).toBe(true);
-
-    const again = await api.attachments.attachUrl(BRAIN, THOUGHT, LOWER);
-    expect(again.created).toBe(false);
-    expect(again.existing?.location).toBe(UPPER);
-    expect(stored).toHaveLength(1);
-    // Asked for in the spelling it was sent in, and the list was not needed.
-    expect(asked()).toEqual([UPPER, "the list", LOWER, UPPER]);
-
-    // Not guarded: another process does not know what this one attached.
-    const elsewhere = new TheBrainApi({ apiKey: "k", fetchImpl: fetchImpl as typeof fetch });
-    expect((await elsewhere.attachments.attachUrl(BRAIN, THOUGHT, LOWER)).created).toBe(true);
-    expect(stored).toHaveLength(2);
-  });
-
-  it("the address attached a moment ago to a thought named in capitals is found as well", async () => {
-    const { api, stored, asked } = listBehind();
-    const NAMED = THOUGHT.toUpperCase();
-    expect((await api.attachments.attachUrl(BRAIN, NAMED, UPPER)).created).toBe(true);
-    const again = await api.attachments.attachUrl(BRAIN, NAMED, LOWER);
-    expect(again.created).toBe(false);
-    expect(again.existing?.location).toBe(UPPER);
-    expect(stored).toHaveLength(1);
-    expect(asked()).toEqual([UPPER, "the list", LOWER, UPPER]);
-    // And in the same spelling, by the thought in lower case.
-    expect((await api.attachments.attachUrl(BRAIN, THOUGHT, UPPER)).created).toBe(false);
-  });
-
-  it("only the spellings of the same address, attached to the same thought, are asked for", async () => {
-    const { api, asked } = listBehind();
-    await api.attachments.attachUrl(BRAIN, THOUGHT, UPPER);
-    await api.attachments.attachUrl(BRAIN, THOUGHT, "https://Example.com/P");
-    await api.attachments.attachUrl(BRAIN, TYPE, LOWER);
-    expect(asked()).toEqual([
-      UPPER,
-      "the list",
-      "https://Example.com/P",
-      "the list",
-      LOWER,
-      "the list",
-    ]);
-  });
-
-  it("an address attached a moment ago and since deleted is attached again", async () => {
-    const { api, stored, asked } = listBehind();
-    await api.attachments.attachUrl(BRAIN, THOUGHT, UPPER);
-    stored.length = 0;
-    expect((await api.attachments.attachUrl(BRAIN, THOUGHT, LOWER)).created).toBe(true);
-    expect(asked()).toEqual([UPPER, "the list", LOWER, UPPER, "the list"]);
-  });
-
-  it("an attach that got no answer is kept, and one that was refused is not", async () => {
-    let answer: unknown = "lost";
-    const { api, stored, asked } = listBehind(() => answer);
-    await expect(api.attachments.attachUrl(BRAIN, THOUGHT, UPPER)).rejects.toMatchObject({
-      kind: "network",
+  describe("straight after an attach", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
     });
-    // It had landed, and is found by the spelling it was sent in.
-    expect((await api.attachments.attachUrl(BRAIN, THOUGHT, LOWER)).existing?.location).toBe(
-      UPPER,
-    );
-    expect(stored).toHaveLength(1);
-
-    answer = 400;
-    const refused = "https://Example.com/refused";
-    await expect(api.attachments.attachUrl(BRAIN, THOUGHT, refused)).rejects.toMatchObject({
-      kind: "bad_request",
+    afterEach(() => {
+      vi.useRealTimers();
     });
-    const before = asked().length;
-    answer = 200;
-    await api.attachments.attachUrl(BRAIN, THOUGHT, refused.toLowerCase());
-    expect(asked().slice(before)).toEqual([refused.toLowerCase(), "the list"]);
+
+    it("the list is read half a second after this process's last write, and has the address in another host case by then", async () => {
+      const { stored, asked, attach, fetchImpl, posted, listReads } = listLate();
+      expect((await attach(THOUGHT, UPPER)).created).toBe(true);
+
+      const again = await attach(THOUGHT, LOWER);
+      expect(again.created).toBe(false);
+      expect(again.existing?.location).toBe(UPPER);
+      expect(stored).toHaveLength(1);
+      // The given spelling first, then the list, then the spelling it names.
+      expect(asked()).toEqual([UPPER, "the list", LOWER, "the list", UPPER]);
+      expect(listReads[1]! - posted[0]!).toBeGreaterThanOrEqual(COPY_LAG_MS);
+
+      // Not guarded: another process does not know of this one's write, and
+      // reads the list while it is behind.
+      const elsewhere = new TheBrainApi({ apiKey: "k", fetchImpl: fetchImpl as typeof fetch });
+      await attach(THOUGHT, "https://Example.com/q");
+      expect((await attach(THOUGHT, "https://example.com/q", elsewhere)).created).toBe(true);
+      expect(stored).toHaveLength(3);
+    });
+
+    it("a repeat in the given spelling is found with no wait", async () => {
+      const { asked, attach, listReads } = listLate();
+      await attach(THOUGHT, UPPER);
+      const before = Date.now();
+      expect((await attach(THOUGHT, "http://Example.com/p/")).created).toBe(false);
+      expect(asked()).toEqual([UPPER, "the list", "http://Example.com/p/"]);
+      expect(listReads).toHaveLength(1);
+      expect(Date.now() - before).toBeLessThan(COPY_LAG_MS);
+    });
+
+    it("the address attached to a thought named in capitals is found as well", async () => {
+      const { stored, asked, attach } = listLate();
+      const NAMED = THOUGHT.toUpperCase();
+      expect((await attach(NAMED, UPPER)).created).toBe(true);
+      const again = await attach(NAMED, LOWER);
+      expect(again.created).toBe(false);
+      expect(again.existing?.location).toBe(UPPER);
+      expect(stored).toHaveLength(1);
+      expect(asked()).toEqual([UPPER, "the list", LOWER, "the list", UPPER]);
+      // And in the same spelling, by the thought in lower case.
+      expect((await attach(THOUGHT, UPPER)).created).toBe(false);
+    });
+
+    it("only the spellings of the same address, attached to the same thought, are asked for", async () => {
+      const { asked, attach } = listLate();
+      await attach(THOUGHT, UPPER);
+      await attach(THOUGHT, "https://Example.com/P");
+      await attach(TYPE, LOWER);
+      expect(asked()).toEqual([
+        UPPER,
+        "the list",
+        "https://Example.com/P",
+        "the list",
+        LOWER,
+        "the list",
+      ]);
+    });
+
+    it("an address the list still names after its delete is attached again", async () => {
+      const { stored, asked, attach } = listLate();
+      await attach(THOUGHT, UPPER);
+      stored.length = 0;
+      expect((await attach(THOUGHT, LOWER)).created).toBe(true);
+      expect(asked()).toEqual([UPPER, "the list", LOWER, "the list", UPPER]);
+    });
+
+    it("an attach that got no answer is waited for as a write, and is found if it landed", async () => {
+      let answer: unknown = "lost";
+      const { stored, asked, attach } = listLate(() => answer);
+      await expect(attach(THOUGHT, UPPER)).rejects.toMatchObject({ kind: "network" });
+      expect((await attach(THOUGHT, LOWER)).existing?.location).toBe(UPPER);
+      expect(stored).toHaveLength(1);
+
+      answer = 400;
+      const refused = "https://Example.com/refused";
+      await expect(attach(THOUGHT, refused)).rejects.toMatchObject({ kind: "bad_request" });
+      const before = asked().length;
+      answer = 200;
+      expect((await attach(THOUGHT, refused.toLowerCase())).created).toBe(true);
+      expect(asked().slice(before)).toEqual([refused.toLowerCase(), "the list"]);
+    });
   });
 });
 

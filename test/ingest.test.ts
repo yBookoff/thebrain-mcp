@@ -1,15 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  COPY_LAG_MS,
   READ_BACK,
-  RecentWrites,
   TheBrainError,
-  WRITTEN_KEPT_MS,
   noteAsStored,
   type TheBrainApi,
 } from "../src/api/index.js";
 import {
-  IngestBehindError,
   IngestMissingError,
   IngestReadError,
   IngestValidationError,
@@ -213,12 +211,6 @@ function fakeBrain(
    * unless a test says otherwise.
    */
   const idle = { ms: Number.POSITIVE_INFINITY };
-  /**
-   * What the client keeps of its writes for a reader of a graph. The real
-   * resources fill it as a create or a link is answered, and so do the two
-   * here: without it a graph that is behind reads as one that is not.
-   */
-  const written = new RecentWrites();
   /** How many times the brain itself was read, and whether it is there to read. */
   const brain = { reads: 0, there: true };
   // As the API: every request to a brain that is not there is this 401.
@@ -228,7 +220,7 @@ function fakeBrain(
     });
 
   const api = {
-    client: { sinceLastWrite: () => idle.ms, written },
+    client: { sinceLastWrite: () => idle.ms },
     brains: {
       async get(_b: string) {
         brain.reads += 1;
@@ -292,9 +284,6 @@ function fakeBrain(
         if (lostOn.has(input.name)) {
           throw new TheBrainError("network", "request exceeded 30000 ms");
         }
-        // As the real method: an answered create is kept, with where the
-        // source's graph lists it. One that got no answer has no identifier.
-        if (source !== undefined) written.linked(BRAIN, source, id, relation as 1 | 2 | 3);
         return id;
       },
       // As the API: 404 for an identifier nobody has.
@@ -461,8 +450,6 @@ function fakeBrain(
         };
         links.push(made);
         relate(input.thoughtIdA, input.thoughtIdB, input.relation);
-        // As the real method, for a reader of either end's graph.
-        written.linked(BRAIN, input.thoughtIdA, input.thoughtIdB, input.relation as 1 | 2 | 3);
         return linkId(made);
       },
       async update(_b: string, id: string, changes: { name?: string }) {
@@ -519,8 +506,7 @@ function fakeBrain(
   const settle = (): void => unsettled.clear();
   /**
    * A rename as another tool makes it. The copies that list the thought keep
-   * its old name for as long as they lack a new thought, and the client keeps
-   * the name it wrote, as `thoughts.update()` has it do.
+   * its old name for as long as they lack a new thought.
    */
   const rename = (id: string, name: string): void => {
     thoughts.get(id)!.name = name;
@@ -528,7 +514,6 @@ function fakeBrain(
       copy.stale = lag.reads;
       copy.until = Date.now() + lag.ms;
     }
-    written.named(BRAIN, id, name);
   };
   return {
     api: api as unknown as TheBrainApi,
@@ -563,7 +548,6 @@ function fakeBrain(
     noteWrites,
     failNote,
     idle,
-    written,
     brain,
   };
 }
@@ -1547,8 +1531,9 @@ describe("a plan sent straight after another write of this process", () => {
       const { fake, made } = await brain();
       fake.idle.ms = 0;
       const pending = ingest(fake.api, BRAIN, plan);
-      // Not before the 300 ms are over,
-      await vi.advanceTimersByTimeAsync(299);
+      // Not before the 500 ms are over,
+      expect(COPY_LAG_MS).toBe(500);
+      await vi.advanceTimersByTimeAsync(499);
       expect(fake.graphReads).toEqual([]);
       // and then at once.
       await vi.advanceTimersByTimeAsync(1);
@@ -1568,7 +1553,7 @@ describe("a plan sent straight after another write of this process", () => {
       const { fake } = await brain();
       fake.idle.ms = 220;
       const pending = ingest(fake.api, BRAIN, plan);
-      await vi.advanceTimersByTimeAsync(79);
+      await vi.advanceTimersByTimeAsync(279);
       expect(fake.graphReads).toEqual([]);
       await vi.advanceTimersByTimeAsync(1);
       expect(fake.graphReads.length).toBeGreaterThan(0);
@@ -1582,7 +1567,7 @@ describe("a plan sent straight after another write of this process", () => {
   it("a write that came back long enough ago costs no wait", async () => {
     vi.useFakeTimers();
     try {
-      for (const ms of [300, 5000, Number.POSITIVE_INFINITY]) {
+      for (const ms of [500, 5000, Number.POSITIVE_INFINITY]) {
         const { fake } = await brain();
         fake.idle.ms = ms;
         // The copy has had its time by then too.
@@ -1618,7 +1603,7 @@ describe("a plan sent straight after another write of this process", () => {
         const outcome = await run(fake, of);
 
         expect(outcome.failures).toEqual([]);
-        // No 300 ms ahead of the first write: it went out at once.
+        // No 500 ms ahead of the first write: it went out at once.
         expect(sentAt[0]).toBe(0);
       }
     } finally {
@@ -1654,15 +1639,12 @@ describe("a plan sent straight after another write of this process", () => {
   });
 });
 
-describe("a graph that is behind a write of this process for longer than the wait by the clock", () => {
-  // The wait was the whole of the guard: 300 ms from the last write, and the
-  // copy a graph is answered from can be further behind: on a live TheBrain
-  // it was first seen to list a new thought 364 ms after the create's
-  // answer. Then the plan does not see the thought another call made a
-  // moment before, and makes it again. What this process wrote next to a
-  // thought is known to it, so the graph is read until it shows that.
-  const OTHER = "cccccccc-0000-4000-8000-000000000003";
+describe("a graph as far behind another call's write as one was at the worst measured", () => {
+  // On a live TheBrain, with the app slow to answer, a reader first saw a new
+  // thought in a graph's copy 364 ms after the create's answer. The wait was
+  // 300 ms then, and the plan made the thought again now and then.
   const THERE = "dddddddd-0000-4000-8000-000000000004";
+  const WORST_MS = 364;
   const plan: IngestPlan = { thoughts: [{ tempId: "n", name: "New", parent: ROOT }] };
   /** A brain whose graphs, once read, lack a write for `ms`; ROOT's has been read. */
   const brain = async (ms: number, existing: Parameters<typeof fakeBrain>[0] = []) => {
@@ -1671,255 +1653,60 @@ describe("a graph that is behind a write of this process for longer than the wai
     await fake.api.thoughts.getGraph(BRAIN, ROOT);
     return fake;
   };
-  /** The plan run to its end, with how long it took by the clock. */
-  const timed = async (fake: ReturnType<typeof fakeBrain>, of: IngestPlan = plan) => {
-    fake.graphReads.length = 0;
-    const started = Date.now();
-    let took = -1;
-    const pending = ingest(fake.api, BRAIN, of).then((outcome) => {
-      took = Date.now() - started;
-      return outcome;
-    });
-    await vi.advanceTimersByTimeAsync(20_000);
-    return { outcome: await pending, took };
+  const run = async (fake: ReturnType<typeof fakeBrain>, of: IngestPlan = plan) => {
+    fake.idle.ms = 0;
+    const pending = ingest(fake.api, BRAIN, of);
+    await vi.advanceTimersByTimeAsync(PAST_THE_WAIT);
+    return pending;
   };
-  const readsOf = (fake: ReturnType<typeof fakeBrain>, id: string): number =>
-    fake.graphReads.filter((read) => read === id).length;
 
-  it("is read again until it lists the thought another call made, and the thought is found", async () => {
-    vi.useFakeTimers();
-    try {
-      const fake = await brain(900);
-      const made = await fake.api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: ROOT });
-      fake.idle.ms = 0;
-      const { outcome, took } = await timed(fake);
-
-      expect(outcome.reused.map((r) => r.thoughtId)).toEqual([made]);
-      expect([outcome.created, outcome.failures]).toEqual([[], []]);
-      expect(fake.thoughts.size).toBe(2);
-      // First at 300 ms, by the clock, and then a step apart until 900.
-      expect(took).toBe(900);
-      expect(readsOf(fake, ROOT)).toBe(1 + 600 / 25);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("is known for one by what it lacks, not by the clock: with the last write long past it is read again all the same", async () => {
-    // What the clock stands for is this process's last write, and a copy
-    // can be behind an older one.
-    vi.useFakeTimers();
-    try {
-      const fake = await brain(150);
-      const made = await fake.api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: ROOT });
-      fake.idle.ms = Number.POSITIVE_INFINITY;
-      const { outcome, took } = await timed(fake);
-
-      expect(outcome.reused.map((r) => r.thoughtId)).toEqual([made]);
-      expect(outcome.created).toEqual([]);
-      expect(took).toBe(150);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("is read again for a thought another call made a parent or a jump of it, in the list that relation puts it in", async () => {
+  it("has caught up by the time the plan looks, after a create under each relation, a link and a rename", async () => {
     vi.useFakeTimers();
     try {
       for (const [relation, number] of [
+        ["child", 1],
         ["parent", 2],
         ["jump", 3],
       ] as const) {
-        const fake = await brain(900);
+        const fake = await brain(WORST_MS);
         const made = await fake.api.thoughts.create(BRAIN, {
           name: "New",
           sourceThoughtId: ROOT,
           relation: number,
         });
-        fake.idle.ms = 0;
-        const { outcome, took } = await timed(fake, {
+        const outcome = await run(fake, {
           thoughts: [{ tempId: "n", name: "New", parent: ROOT, relation }],
         });
-
         expect(outcome.reused.map((r) => r.thoughtId), relation).toEqual([made]);
         expect(outcome.created, relation).toEqual([]);
-        expect(took, relation).toBe(900);
       }
-    } finally {
-      vi.useRealTimers();
-    }
-  });
 
-  it("is read again for a thought another call linked there, from either end", async () => {
-    // After brain_link the thought was made again 14 times in 100.
-    vi.useFakeTimers();
-    try {
-      for (const ends of ["root first", "root second"] as const) {
-        const fake = await brain(900, [{ id: THERE, name: "New" }]);
-        await fake.api.links.create(
-          BRAIN,
-          ends === "root first"
-            ? { thoughtIdA: ROOT, thoughtIdB: THERE, relation: 1 }
-            : { thoughtIdA: THERE, thoughtIdB: ROOT, relation: 2 },
-        );
-        fake.idle.ms = 0;
-        const { outcome, took } = await timed(fake);
+      const linked = await brain(WORST_MS, [{ id: THERE, name: "New" }]);
+      await linked.api.links.create(BRAIN, { thoughtIdA: ROOT, thoughtIdB: THERE, relation: 1 });
+      expect((await run(linked)).reused.map((r) => r.thoughtId), "link").toEqual([THERE]);
 
-        expect(outcome.reused.map((r) => r.thoughtId), ends).toEqual([THERE]);
-        expect(outcome.created, ends).toEqual([]);
-        expect(took, ends).toBe(900);
-      }
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("is read again while it lists a thought under the name it had before another call renamed it", async () => {
-    // After a rename the thought was made again under its new name 3 times in 100.
-    vi.useFakeTimers();
-    try {
-      const fake = await brain(900, [{ id: THERE, name: "Old", parent: ROOT }]);
+      const renamed = await brain(WORST_MS, [{ id: THERE, name: "Old", parent: ROOT }]);
       // The copy lists it, under the name it has.
       await vi.advanceTimersByTimeAsync(1000);
-      await fake.api.thoughts.getGraph(BRAIN, ROOT);
-      fake.rename(THERE, "New");
-      fake.idle.ms = 0;
-      const { outcome, took } = await timed(fake);
-
-      expect(outcome.reused.map((r) => r.thoughtId)).toEqual([THERE]);
-      expect(outcome.created).toEqual([]);
-      expect(took).toBe(900);
-      expect(fake.thoughts.size).toBe(2);
+      await renamed.api.thoughts.getGraph(BRAIN, ROOT);
+      renamed.rename(THERE, "New");
+      const outcome = await run(renamed);
+      expect(outcome.reused.map((r) => r.thoughtId), "rename").toEqual([THERE]);
+      expect(renamed.thoughts.size, "rename").toBe(2);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("still behind when the wait for it runs out, it is not taken at its word: the thought fails, and nothing is made next to it", async () => {
+  it("is taken at its word past the wait: a copy further behind than that is not guarded", async () => {
     vi.useFakeTimers();
     try {
-      // Behind past the wait, and not past the minute a write is kept.
-      const fake = await brain(9000, [
-        { id: OTHER, name: "other" },
-        { id: THERE, name: "Side", parent: OTHER },
-      ]);
+      const fake = await brain(COPY_LAG_MS + 100);
       const made = await fake.api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: ROOT });
-      fake.idle.ms = 0;
-      const { outcome, took } = await timed(fake, {
-        thoughts: [
-          ...plan.thoughts,
-          { tempId: "leaf", name: "Leaf", parent: "n" },
-          { tempId: "side", name: "Side", parent: OTHER },
-        ],
-      });
-
-      expect(outcome.failures).toHaveLength(1);
-      expect(outcome.failures[0]!.error).toBeInstanceOf(IngestBehindError);
-      expect(said(outcome)).toEqual([
-        {
-          what: 'thought "New" (n)',
-          reason:
-            `${ROOT} was read for ${WAIT} ms to look for a thought of this name next to it, ` +
-            "and its graph still does not show what this server wrote a moment ago: " +
-            `${made} among its children. TheBrain answers a graph from a copy, and this ` +
-            "one is behind, so a thought of this name may be there unseen: nothing was " +
-            "created. Send this thought again in a few seconds",
-        },
-      ]);
-      expect(outcome.skipped).toEqual([
-        { what: 'thought "Leaf" (leaf)', reason: 'depends on "n", which was not created' },
-      ]);
-      // What hangs on another thought goes on, and nothing is made under ROOT.
-      expect(outcome.reused.map((r) => [r.tempId, r.thoughtId])).toEqual([["side", THERE]]);
-      expect(outcome.created).toEqual([]);
-      expect(fake.lists.get(ROOT)!.children).toEqual([made]);
-      // The 300 ms by the clock and the 6 s the graph is asked for, the pause
-      // doubling each second from 25 ms to 400: 40, 20, 10, 5, 3 and 2 reads,
-      // and one at the end, as many as two seconds at 25 ms were.
-      expect(took).toBe(300 + WAIT);
-      expect(readsOf(fake, ROOT)).toBe(40 + 20 + 10 + 5 + 3 + 2 + 1);
-
-      // Sent again once the copy has caught up, it finds the thought.
-      await vi.advanceTimersByTimeAsync(4000);
-      fake.idle.ms = Number.POSITIVE_INFINITY;
-      const again = await timed(fake);
-      expect(again.outcome.reused.map((r) => r.thoughtId)).toEqual([made]);
-      expect(again.outcome.created).toEqual([]);
-    } finally {
-      vi.useRealTimers();
-    }
-  }, 20_000);
-
-  it("a graph behind for longer than ten seconds still fails the thought, and does not make it twice", async () => {
-    // Reads have lagged writes 1 to 30 s while another brain took bursts of
-    // them. The client kept a write for ten seconds, and a plan sent past
-    // them took the graph at its word and made the thought a second time.
-    vi.useFakeTimers();
-    try {
-      const fake = await brain(30_000);
-      const made = await fake.api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: ROOT });
-      await vi.advanceTimersByTimeAsync(20_000);
-      fake.idle.ms = Number.POSITIVE_INFINITY;
-      const { outcome } = await timed(fake);
-
-      expect(outcome.failures.map((f) => f.error)).toEqual([expect.any(IngestBehindError)]);
-      expect(outcome.created).toEqual([]);
-      expect(fake.lists.get(ROOT)!.children).toEqual([made]);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("costs no read when the first one shows the write, and none for a write next to another thought", async () => {
-    vi.useFakeTimers();
-    try {
-      // The copy has caught up by the time the clock lets the plan look.
-      const fake = await brain(200, [{ id: OTHER, name: "other" }]);
-      const made = await fake.api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: ROOT });
-      fake.idle.ms = 0;
-      const first = await timed(fake);
-      expect(first.outcome.reused.map((r) => r.thoughtId)).toEqual([made]);
-      expect([first.took, readsOf(fake, ROOT)]).toEqual([300, 1]);
-
-      // A write next to OTHER, whose graph stays behind: ROOT's is not held to it.
-      Object.assign(fake.lag, { reads: 0, ms: 6000 });
-      await fake.api.thoughts.getGraph(BRAIN, OTHER);
-      await fake.api.thoughts.create(BRAIN, { name: "Else", sourceThoughtId: OTHER });
-      fake.idle.ms = Number.POSITIVE_INFINITY;
-      const second = await timed(fake);
-      expect(second.outcome.reused.map((r) => r.thoughtId)).toEqual([made]);
-      expect([second.took, readsOf(fake, ROOT)]).toEqual([0, 1]);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("is not held to a thought this process deleted since, nor to a write it has stopped keeping", async () => {
-    // A plan that lands on a thought the copy has, so that nothing is made
-    // and the batch has no graph of its own to wait for.
-    const lands: IngestPlan = { thoughts: [{ tempId: "t", name: "There", parent: ROOT }] };
-    const there = [{ id: THERE, name: "There", parent: ROOT }];
-    vi.useFakeTimers();
-    try {
-      // Deleted by another call: `thoughts.delete()` has the client forget it.
-      const fake = await brain(6000, there);
-      const gone = await fake.api.thoughts.create(BRAIN, { name: "Gone", sourceThoughtId: ROOT });
-      fake.written.forget(BRAIN, gone);
-      fake.idle.ms = Number.POSITIVE_INFINITY;
-      const first = await timed(fake, lands);
-      expect(first.outcome.reused.map((r) => r.thoughtId)).toEqual([THERE]);
-      expect(first.outcome.failures).toEqual([]);
-      expect([first.took, readsOf(fake, ROOT)]).toEqual([0, 1]);
-
-      // Kept for a minute, and no longer: past that a graph is believed.
-      const late = await brain(2 * WRITTEN_KEPT_MS, there);
-      await late.api.thoughts.create(BRAIN, { name: "New", sourceThoughtId: ROOT });
-      await vi.advanceTimersByTimeAsync(WRITTEN_KEPT_MS + 1);
-      late.idle.ms = Number.POSITIVE_INFINITY;
-      const second = await timed(late, lands);
-      expect(second.outcome.reused.map((r) => r.thoughtId)).toEqual([THERE]);
-      expect(second.outcome.failures).toEqual([]);
-      expect([second.took, readsOf(late, ROOT)]).toEqual([0, 1]);
+      const outcome = await run(fake);
+      expect(outcome.failures).toEqual([]);
+      expect(outcome.created).toHaveLength(1);
+      expect(fake.lists.get(ROOT)!.children).toEqual([made, outcome.created[0]!.thoughtId]);
     } finally {
       vi.useRealTimers();
     }

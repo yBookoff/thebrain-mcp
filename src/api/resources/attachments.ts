@@ -1,4 +1,4 @@
-import { assertUuid, mayHaveLanded, type TheBrainClient } from "../client.js";
+import { afterCopyLag, assertUuid, type TheBrainClient } from "../client.js";
 import { AttachmentType, type AttachmentDto } from "../types.js";
 
 export class AttachmentsResource {
@@ -67,14 +67,11 @@ export class AttachmentsResource {
    *
    * So the address that was attached straight before, in another host case,
    * was found by neither, and attached a second time: through
-   * `brain_attach_url`, 18 times in 20 back to back. Nothing waits for the
-   * copy. What this process attached in the last ten seconds is kept
-   * (`client.written`), as it was sent and so as it is stored, and
-   * `byLocation` is asked for each such spelling of the address as well,
-   * before the list. That read is live: an attachment deleted since is not
-   * found (6 of 6 at the first read). It costs no request unless this process
-   * attached the address to this thought in another spelling in those ten
-   * seconds, and then one, which finds it.
+   * `brain_attach_url`, 18 times in 20 back to back. The list is now read
+   * only once `COPY_LAG_MS` has passed since this process's last write
+   * (`afterCopyLag()`), and has that attachment by then. The wait comes
+   * after `byLocation` has been asked for the given spelling, so a repeat in
+   * that spelling costs none.
    *
    * Nor is the list taken at its word. Read within 4 ms of the answer to an
    * attachment's delete, it still had it 6 times in 6, and the address was
@@ -83,7 +80,7 @@ export class AttachmentsResource {
    * location in the spelling it is stored in, a `mailto:` or an
    * `x-devonthink-item:` as well, so one it did not find is gone. That costs
    * a request only where the list has the address in a spelling not asked
-   * for yet: attached by another process, or more than ten seconds ago.
+   * for yet.
    *
    * `byLocation` names the thought in lower case, and the API takes an
    * identifier in capitals as well. Compared by case, the thought's own
@@ -91,9 +88,7 @@ export class AttachmentsResource {
    * another host case was attached again 2 times in 3.
    *
    * Not guarded: the same address in another host case attached by another
-   * process, or in the app, within the moment the list is behind; and two
-   * calls for one address on one thought sent at once, which each look
-   * before either attaches.
+   * process, or in the app, within the moment the list is behind.
    */
   async attachUrl(
     brainId: string,
@@ -137,30 +132,22 @@ export class AttachmentsResource {
       }
       return undefined;
     };
-    const kept = this.client.written.attachedTo(brainId, thoughtId);
-    return (
-      (await live([url, ...kept.filter((s) => urlKey(s) === key)])) ??
-      (await live(
-        (await this.ofThought(brainId, thoughtId)).flatMap((a) =>
-          a.type === AttachmentType.ExternalUrl && a.location !== null && urlKey(a.location) === key
-            ? [a.location]
-            : [],
-        ),
-      ))
+    const given = await live([url]);
+    if (given) return given;
+    await afterCopyLag(this.client);
+    return live(
+      (await this.ofThought(brainId, thoughtId)).flatMap((a) =>
+        a.type === AttachmentType.ExternalUrl && a.location !== null && urlKey(a.location) === key
+          ? [a.location]
+          : [],
+      ),
     );
   }
 
-  /** Sends the attach, and keeps the URL for `#alreadyThere` when it may have landed. */
   async #post(brainId: string, thoughtId: string, url: string, name?: string): Promise<void> {
-    try {
-      await this.client.post(`/api/attachments/${brainId}/${thoughtId}/url`, {
-        query: { url, name },
-      });
-    } catch (error) {
-      if (mayHaveLanded(error)) this.client.written.attached(brainId, thoughtId, url);
-      throw error;
-    }
-    this.client.written.attached(brainId, thoughtId, url);
+    await this.client.post(`/api/attachments/${brainId}/${thoughtId}/url`, {
+      query: { url, name },
+    });
   }
 
   async delete(brainId: string, attachmentId: string): Promise<void> {

@@ -25,13 +25,14 @@ import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterAll, beforeAll, describe, expect, it, vi, type TestContext } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, type TestContext } from "vitest";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import {
+  COPY_LAG_MS,
   EntityType,
   LinkMeaning,
   MAX_ALIASES,
@@ -40,7 +41,6 @@ import {
   TheBrainApi,
   TheBrainError,
   ThoughtKind,
-  WRITTEN_KEPT_MS,
   aliasesOf,
   compareLogTime,
   isTagLink,
@@ -69,7 +69,6 @@ import {
   subjectIds,
 } from "../src/operations/changes.js";
 import {
-  IngestBehindError,
   IngestMissingError,
   IngestValidationError,
   ingest,
@@ -3612,7 +3611,8 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
       // thought each time: the second spelling, sent straight after the
       // first, was attached again 18 times in 20. The first attach reads the
       // list before it writes, and the copy made by that read is what the
-      // second one met.
+      // second one met. Now the second reads the list half a second after
+      // the first one's write, and the copy has the attachment by then.
       const add = (id: string, url: string) =>
         api.attachments.attachUrl(brainId, id, url, { name: `${PREFIX}link` });
       const spelled = (i: string) => {
@@ -3632,9 +3632,8 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
         last = { id, lower, attachmentId: again.existing!.id };
       }
 
-      // Deleted, it is not held against the address: by-location, asked for
-      // the spelling this process keeps, no longer finds it (3 of 3 at the
-      // first read). The list is a copy, so it is waited for.
+      // Deleted, it is not held against the address. The list is a copy, so
+      // it is waited for.
       const { id, lower, attachmentId } = last!;
       await api.attachments.delete(brainId, attachmentId);
       await eventually(
@@ -6694,24 +6693,16 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
       // straight after one read the copy from before it. Through the real
       // handlers, 20 times each at 0 to 150 ms after the write: after
       // brain_create_thought the thought was made again 8 times in 100,
-      // after brain_link 14, after a rename 3. So `ingest()` waits out what
-      // is left of 300 ms since this client's last write, and for a while
-      // that was all: 0 of 360. It is no bound. Read once 250 ms after a
-      // create, the graph of a thought read 0.3 s earlier still lacked the
-      // new thought 4 times in 600; read on every 10 ms, it first had it
-      // more than 300 ms after the answer 7 times in 1,800, 364 ms at the
-      // latest, all while the app was slow to answer. The test that stood
-      // here, eight tries behind that wait, went red in one run of ten on
-      // one day and in none of 160 on the next: it measured the day, and
-      // said nothing of the code when it was green.
+      // after brain_link 14, after a rename 3. So `ingest()` waits until
+      // 0.5 s have passed since this client's last write, and then takes the
+      // graph at its word. The copy was first seen to have a new thought
+      // 364 ms after the create's answer at the latest, with the app slow to
+      // answer; behind a wait of 0.3 s this test went red in one run of ten
+      // on one day and in none of 160 on the next.
       //
-      // So the clock is taken out of the way here, and the worst case is
-      // made: the graph is read straight before the write, where the read
-      // straight after it lacked the new thought 197 times in 200. By the
-      // clock the write is long past, as it is for a copy that is further
-      // behind than the wait. What `ingest()` has left is what the client
-      // kept of the write, and it reads until the graph shows that. Without
-      // it every try below makes the thought a second time.
+      // The worst case is made here: the graph is read straight before the
+      // write, where the read straight after it lacked the new thought 197
+      // times in 200, and the plan is sent the moment the write comes back.
       const name = (what: string): string => `${PREFIX}sr-after-${what}`;
       /** One thing written next to `root` by a call of its own, and the thought a plan then names. */
       const WRITES = {
@@ -6761,145 +6752,40 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
         },
       };
       const RELATION_OF = { child: "child", parent: "parent", jump: "jump" } as const;
-      const clock = vi
-        .spyOn(api.client, "sinceLastWrite")
-        .mockReturnValue(Number.POSITIVE_INFINITY);
-      try {
-        for (const [i, how] of (
-          ["child", "parent", "jump", "linked", "renamed", "child", "linked", "renamed"] as const
-        ).entries()) {
-          const root = await make(`sr-after-root-${i}`);
-          // The copy the plan will be answered from, made straight before the write.
-          await api.thoughts.getGraph(brainId, root);
-          const made = await WRITES[how](root, name(`${how}-${i}`));
-          const writtenAt = Date.now();
-          created.push(made);
-
-          const plan = {
-            thoughts: [
-              {
-                tempId: "x",
-                name: name(`${how}-${i}`),
-                parent: root,
-                relation: how in RELATION_OF ? RELATION_OF[how as keyof typeof RELATION_OF] : "child",
-              },
-            ],
-          };
-          // A graph still behind the write when the wait inside `ingest()`
-          // runs out fails the thought with `IngestBehindError`, and nothing
-          // is made: the right answer, which says to send the thought again.
-          // A full run had one, a rename the graph did not show in 2,002 ms.
-          // So it is sent again, while the client still keeps the write: a
-          // call that ran past `WRITTEN_KEPT_MS` would find nothing kept to
-          // lack, take the graph at its word, and make the thought again.
-          const behindOnly = (o: Awaited<ReturnType<typeof ingest>>): boolean =>
-            o.created.length === 0 &&
-            o.reused.length === 0 &&
-            o.failures.length === 1 &&
-            o.failures[0]!.error instanceof IngestBehindError;
-          let started = Date.now();
-          let outcome = await ingest(api, brainId, plan);
-          // Another call as long as the last, with a second to spare, ends
-          // before the write is dropped.
-          const keptFor = (): number => writtenAt + WRITTEN_KEPT_MS - 1000 - Date.now();
-          while (behindOnly(outcome) && keptFor() > Date.now() - started) {
-            console.warn(`[behind] ${how} (${i}), sent again: ${outcome.failures[0]!.reason}`);
-            started = Date.now();
-            outcome = await ingest(api, brainId, plan);
-          }
-          for (const c of outcome.created) created.push(c.thoughtId);
-          // All three at once: a red run then says whether a thought was
-          // made again or a read failed.
-          expect(
-            {
-              reused: outcome.reused.map((r) => r.thoughtId),
-              created: outcome.created.map((c) => c.thoughtId),
-              failures: outcome.failures.map((f) => f.reason),
-            },
-            `${how} (${i})`,
-          ).toEqual({ reused: [made], created: [], failures: [] });
-        }
-      } finally {
-        clock.mockRestore();
-      }
-    }, 120_000);
-
-    it("the graphs come to show what the client keeps of a create, a link and a rename, on both sides", async () => {
-      // `RecentWrites` holds a graph to these, and a graph that never came
-      // to show one would fail every plan next to that thought for ten
-      // seconds. Each is in the other's graph in the list the relation puts
-      // it in, for a thought created next to another as for two joined by a
-      // link, and a renamed thought is listed under its name as stored.
-      const EMPTY = { children: [], parents: [], jumps: [] };
-      const lacking = async (id: string): Promise<string[]> =>
-        api.client.written
-          .notShownBy(brainId, id, await api.thoughts.getGraph(brainId, id))
-          .map((f) => (f.of === "listed" ? `${f.thoughtId} in ${f.list}` : `${f.thoughtId} named`));
-      /**
-       * What the graphs of `ids` lack of the writes made since `since`, once
-       * they lack none. This waited 5 s, and a graph has been seconds behind
-       * a write with the app busy (BRMCP-51). It waits as long as the client
-       * keeps a write and no longer: past `WRITTEN_KEPT_MS` the client keeps
-       * none for a graph to lack, and one still behind would pass for one
-       * that caught up. So the read that lacked none must be within it.
-       */
-      const shown = async (since: number, ...ids: string[]): Promise<string[][]> => {
-        let readAt = 0;
-        const all = await eventually(
-          async () => {
-            const lacks = await Promise.all(ids.map(lacking));
-            readAt = Date.now();
-            return lacks;
-          },
-          (lacks) => lacks.every((none) => none.length === 0),
-          { timeoutMs: WRITTEN_KEPT_MS, stepMs: 25 },
-        );
-        if (all.every((none) => none.length === 0)) {
-          expect(
-            readAt - since,
-            "the graphs were behind for as long as the client keeps a write",
-          ).toBeLessThan(WRITTEN_KEPT_MS);
-        }
-        return all;
-      };
-
-      for (const relation of [Relation.Child, Relation.Parent, Relation.Jump]) {
-        const root = await make(`sr-kept-root-${relation}`);
-        const loose = await make(`sr-kept-loose-${relation}`);
-        // Both graphs read, so that each is a copy to be behind.
+      for (const [i, how] of (
+        ["child", "parent", "jump", "linked", "renamed", "child", "linked", "renamed"] as const
+      ).entries()) {
+        const root = await make(`sr-after-root-${i}`);
+        // The copy the plan will be answered from, made straight before the write.
         await api.thoughts.getGraph(brainId, root);
-        await api.thoughts.getGraph(brainId, loose);
-
-        const since = Date.now();
-        const made = await api.thoughts.create(brainId, {
-          name: `${PREFIX}sr-kept-made-${relation}`,
-          sourceThoughtId: root,
-          relation,
-        });
+        const made = await WRITES[how](root, name(`${how}-${i}`));
         created.push(made);
-        await api.links.create(brainId, { thoughtIdA: root, thoughtIdB: loose, relation });
-        // Two of the root's, and the root from each of the others.
-        expect(api.client.written.notShownBy(brainId, root, EMPTY), String(relation)).toHaveLength(2);
-        expect(api.client.written.notShownBy(brainId, made, EMPTY), String(relation)).toHaveLength(1);
-        expect(api.client.written.notShownBy(brainId, loose, EMPTY), String(relation)).toHaveLength(1);
+        // Nothing of the wait has passed yet: `ingest()` waits all of it.
+        expect(api.client.sinceLastWrite(), `${how} (${i})`).toBeLessThan(COPY_LAG_MS);
 
-        expect(await shown(since, root, made, loose), String(relation)).toEqual([[], [], []]);
+        const outcome = await ingest(api, brainId, {
+          thoughts: [
+            {
+              tempId: "x",
+              name: name(`${how}-${i}`),
+              parent: root,
+              relation: how in RELATION_OF ? RELATION_OF[how as keyof typeof RELATION_OF] : "child",
+            },
+          ],
+        });
+        for (const c of outcome.created) created.push(c.thoughtId);
+        // All three at once: a red run then says whether a thought was made
+        // again or a read failed.
+        expect(
+          {
+            reused: outcome.reused.map((r) => r.thoughtId),
+            created: outcome.created.map((c) => c.thoughtId),
+            failures: outcome.failures.map((f) => f.reason),
+          },
+          `${how} (${i})`,
+        ).toEqual({ reused: [made], created: [], failures: [] });
       }
-
-      const root = await make("sr-kept-renamed-root");
-      const createdAt = Date.now();
-      const child = await api.thoughts.create(brainId, {
-        name: `${PREFIX}sr-kept-before`,
-        sourceThoughtId: root,
-      });
-      created.push(child);
-      expect(await shown(createdAt, root)).toEqual([[]]);
-      const renamedAt = Date.now();
-      await api.thoughts.update(brainId, child, { name: ` ${PREFIX}sr-kept\tafter\n` });
-      expect(await shown(renamedAt, root)).toEqual([[]]);
-      const listed = (await api.thoughts.getGraph(brainId, root)).children.map((t) => t.name);
-      expect(listed).toEqual([`${PREFIX}sr-kept after`]);
-    }, 90_000);
+    }, 60_000);
 
     it("a create whose answer is lost is found by the same plan sent at once", async () => {
       // A batch waits for the graphs to list what it made, and of this

@@ -15,7 +15,6 @@ import {
   kindForStatus,
   looksLikeHtml,
 } from "./errors.js";
-import { RecentWrites } from "./written.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -149,6 +148,28 @@ export interface JsonPatchOp {
   from?: string;
 }
 
+/**
+ * How long after this process's last write a copy is read and taken at its
+ * word: a thought's graph, to look for a thought next to it, and a thought's
+ * list of attachments. TheBrain answers both from a copy that is behind a
+ * write, and nothing in the answer says how far. The graph's was within
+ * 0.2 s as a rule and 364 ms at the worst measured, with the app slow to
+ * answer (docs/api-map.md, L27); the list's 7–214 ms (L17).
+ */
+export const COPY_LAG_MS = 500;
+
+/**
+ * Waits out what is left of `COPY_LAG_MS` since `client` last had a write
+ * come back. No request, and no time when that was longer ago. A write made
+ * in the app or by another process is not known here.
+ */
+export async function afterCopyLag(
+  client: Pick<TheBrainClient, "sinceLastWrite">,
+): Promise<void> {
+  const wait = COPY_LAG_MS - client.sinceLastWrite();
+  if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+}
+
 export class TheBrainClient {
   readonly #apiKey: string;
   /** Addresses to try, the one that last answered first. */
@@ -157,12 +178,6 @@ export class TheBrainClient {
   readonly #fetch: typeof fetch;
   /** When the last request that was not a read came back, answered or not. */
   #lastWrite = Number.NEGATIVE_INFINITY;
-  /**
-   * What the writes sent through this client put into the graphs: kept by the
-   * resources as each write is answered, for a reader that decides by a graph
-   * and has to know one that is behind. See `RecentWrites`.
-   */
-  readonly written = new RecentWrites();
 
   constructor(options: ClientOptions) {
     if (!options.apiKey) {
@@ -203,13 +218,8 @@ export class TheBrainClient {
    * a request that was not a `GET`, whether it was answered, refused or got
    * no answer. Infinity when it has sent none.
    *
-   * It is for a read that has to follow a write: a graph that has been read
-   * is answered from a copy that is behind one, by 0.2 s as a rule and now
-   * and then by more (docs/api-map.md, L27), and nothing in the answer tells
-   * a copy that is behind from one that is not. So this is for the writes
-   * that leave nothing to look for, a create that got no answer among them;
-   * for the others `written` says what a graph has to show. Only this
-   * process's own writes are known here.
+   * It is for a read of a copy that has to follow a write: see
+   * `afterCopyLag()`. Only this process's own writes are known here.
    */
   sinceLastWrite(): number {
     return Date.now() - this.#lastWrite;

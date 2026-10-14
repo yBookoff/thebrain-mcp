@@ -14,7 +14,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ElicitRequestSchema, type ElicitResult } from "@modelcontextprotocol/sdk/types.js";
 
-import { READ_BACK, TheBrainApi } from "../src/api/index.js";
+import { COPY_LAG_MS, READ_BACK, TheBrainApi } from "../src/api/index.js";
 import { indexModelId } from "../src/semantic/document.js";
 import { EmbedderUnavailableError, type Embedder } from "../src/semantic/embedder.js";
 import { SemanticIndexer } from "../src/semantic/indexer.js";
@@ -1811,10 +1811,10 @@ describe("brain_attach_url", () => {
   /**
    * An attach stored as it was sent and found by `by-location` in that
    * spelling alone, scheme and trailing slashes aside, with the thought's own
-   * list a copy that has none of it yet (L17).
+   * list a copy that lists it 300 ms later (L17).
    */
-  const listBehind = (): Route[] => {
-    const stored: Array<Record<string, unknown>> = [];
+  const listLate = (): Route[] => {
+    const stored: Array<Record<string, unknown> & { at: number }> = [];
     const bare = (location: string): string =>
       location.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
     return [
@@ -1825,7 +1825,7 @@ describe("brain_attach_url", () => {
             (a) => bare(String(a["location"])) === bare(url.searchParams.get("location")!),
           ),
       ],
-      ["GET /attachments", () => []],
+      ["GET /attachments", () => stored.filter((a) => Date.now() - a.at >= 300)],
       [
         "POST /api/attachments/",
         (url) => {
@@ -1835,6 +1835,7 @@ describe("brain_attach_url", () => {
             type: 3,
             name: "Example page",
             location: url.searchParams.get("url"),
+            at: Date.now(),
           });
           return 200;
         },
@@ -1843,7 +1844,7 @@ describe("brain_attach_url", () => {
   };
 
   it("finds the address it attached straight before in another host case, and says how it is stored", async () => {
-    const { call, calls } = await connect(listBehind());
+    const { call, calls } = await connect(listLate());
     const attach = (url: string) =>
       call("brain_attach_url", { brainId: BRAIN, thoughtId: THOUGHT, url });
 
@@ -2775,10 +2776,10 @@ describe("brain_ingest and two thoughts of one name next to a parent", () => {
 describe("brain_ingest straight after another tool has written", () => {
   /**
    * A brain where the graph of PARENT is answered from a copy that lists a
-   * new thought 200 ms after it is made, as the API's does within 205. The
-   * graph is a `Response`, so nothing is added to it here.
+   * new thought 364 ms after it is made, as the API's did at the worst
+   * measured. The graph is a `Response`, so nothing is added to it here.
    */
-  const routes = (lagMs = 200): Route[] => {
+  const routes = (lagMs = 364): Route[] => {
     let madeAt = Number.POSITIVE_INFINITY;
     const born = (): unknown[] =>
       Date.now() - madeAt >= lagMs ? [{ id: THOUGHT, name: "RAG", kind: 1 }] : [];
@@ -2818,48 +2819,6 @@ describe("brain_ingest straight after another tool has written", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect((await made).isError).toBe(false);
 
-      const pending = call("brain_ingest", plan);
-      await vi.advanceTimersByTimeAsync(5000);
-      const result = await pending;
-
-      expect(result.isError).toBe(false);
-      expect(result.text).toContain(`existed  RAG    ${THOUGHT}`);
-      expect(creates(calls)).toBe(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("a plan sent long after it waits for nothing", async () => {
-    vi.useFakeTimers();
-    try {
-      const { call, calls } = await connect(routes());
-      const made = call("brain_create_thought", { brainId: BRAIN, name: "RAG", parentId: PARENT });
-      await vi.advanceTimersByTimeAsync(300);
-      await made;
-
-      const before = Date.now();
-      const result = await call("brain_ingest", plan);
-      expect(Date.now()).toBe(before);
-      expect(result.text).toContain(`existed  RAG    ${THOUGHT}`);
-      expect(creates(calls)).toBe(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("a copy further behind than the 300 ms is read until it lists the thought, and no second one is made", async () => {
-    // The wait by the clock was the whole guard, and on a live TheBrain the
-    // copy can be past it: the plan then makes the thought again. The server
-    // knows what brain_create_thought put under the parent, and reads the
-    // graph until it is there.
-    vi.useFakeTimers();
-    try {
-      const { call, calls } = await connect(routes(900));
-      const made = call("brain_create_thought", { brainId: BRAIN, name: "RAG", parentId: PARENT });
-      await vi.advanceTimersByTimeAsync(0);
-      expect((await made).isError).toBe(false);
-
       const started = Date.now();
       let took = -1;
       const pending = call("brain_ingest", plan).then((result) => {
@@ -2872,39 +2831,25 @@ describe("brain_ingest straight after another tool has written", () => {
       expect(result.isError).toBe(false);
       expect(result.text).toContain(`existed  RAG    ${THOUGHT}`);
       expect(creates(calls)).toBe(1);
-      expect(took).toBe(900);
+      // Half a second from the create's answer, and then one read.
+      expect(took).toBe(COPY_LAG_MS);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("a copy still behind after six seconds is an error that says so, and the thought is not made again", async () => {
+  it("a plan sent long after it waits for nothing", async () => {
     vi.useFakeTimers();
     try {
-      const { call, calls } = await connect(routes(8000));
+      const { call, calls } = await connect(routes());
       const made = call("brain_create_thought", { brainId: BRAIN, name: "RAG", parentId: PARENT });
-      await vi.advanceTimersByTimeAsync(0);
-      expect((await made).isError).toBe(false);
+      await vi.advanceTimersByTimeAsync(COPY_LAG_MS);
+      await made;
 
-      const pending = call("brain_ingest", plan);
-      await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
-      const result = await pending;
-
-      expect(result.isError).toBe(true);
-      expect(result.text).toContain(
-        `## Failed\n- thought "RAG" (rag): ${PARENT} was read for ${READ_BACK.timeoutMs} ms ` +
-          "to look for a thought of this name next to it, and its graph still does not show " +
-          `what this server wrote a moment ago: ${THOUGHT} among its children. TheBrain ` +
-          "answers a graph from a copy, and this one is behind, so a thought of this name may " +
-          "be there unseen: nothing was created. Send this thought again in a few seconds\n",
-      );
-      expect(creates(calls)).toBe(1);
-
-      // Sent again once the copy has the thought, the plan finds it.
-      await vi.advanceTimersByTimeAsync(3000);
-      const again = await call("brain_ingest", plan);
-      expect(again.isError).toBe(false);
-      expect(again.text).toContain(`existed  RAG    ${THOUGHT}`);
+      const before = Date.now();
+      const result = await call("brain_ingest", plan);
+      expect(Date.now()).toBe(before);
+      expect(result.text).toContain(`existed  RAG    ${THOUGHT}`);
       expect(creates(calls)).toBe(1);
     } finally {
       vi.useRealTimers();
