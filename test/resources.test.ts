@@ -3598,14 +3598,20 @@ describe("attachments", () => {
   });
 
   it("a URL already on the thought under another host case is not attached again", async () => {
-    // by-location compares the host by case, so it misses this one.
+    // by-location compares the host by case, so it misses this one, and
+    // finds it in the spelling the list gives.
+    const STORED = "http://Example.COM/Path/";
     const { api, calls } = apiWith([
-      ["/by-location", () => []],
+      [
+        "/by-location",
+        (url) =>
+          url.searchParams.get("location") === STORED ? [attached(STORED, { id: "att-2" })] : [],
+      ],
       [
         ON_THOUGHT,
         () => [
           attached("Notes.md", { id: "note", type: 1, isNotes: true, name: null }),
-          attached("http://Example.COM/Path/", { id: "att-2" }),
+          attached(STORED, { id: "att-2" }),
         ],
       ],
     ]);
@@ -3613,6 +3619,51 @@ describe("attachments", () => {
     expect(res.created).toBe(false);
     expect(res.existing?.id).toBe("att-2");
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(0);
+    expect(calls.map((c) => c.url.searchParams.get("location") ?? "the list")).toEqual([
+      "https://example.com/Path",
+      "the list",
+      STORED,
+    ]);
+  });
+
+  it("what the list still shows after its delete is not already there", async () => {
+    // The list is a copy, read here a moment after the delete; by-location
+    // is not, and has nothing in either spelling.
+    for (const listed of ["https://Example.com/p", "https://example.com/p"]) {
+      const { api, calls } = apiWith([
+        ["/by-location", () => []],
+        [ON_THOUGHT, () => [attached(listed)]],
+        ["POST /api/attachments", () => 200],
+      ]);
+      const res = await api.attachments.attachUrl(BRAIN, THOUGHT, "https://example.com/p");
+      expect(res.created, listed).toBe(true);
+      expect(calls.filter((c) => c.method === "POST"), listed).toHaveLength(1);
+      // A spelling by-location was asked for already is not asked for again.
+      expect(
+        calls.filter((c) => c.method === "GET").map((c) => c.url.searchParams.get("location")),
+        listed,
+      ).toEqual(
+        listed === "https://example.com/p"
+          ? ["https://example.com/p", null]
+          : ["https://example.com/p", null, listed],
+      );
+    }
+  });
+
+  it("a thought named in capitals is found by by-location, which names it in lower case", async () => {
+    const { api, calls } = apiWith([
+      [
+        "/by-location",
+        () => [attached("https://example.com/", { sourceId: THOUGHT.toLowerCase() })],
+      ],
+    ]);
+    const res = await api.attachments.attachUrl(
+      BRAIN,
+      THOUGHT.toUpperCase(),
+      "https://example.com/",
+    );
+    expect(res.created).toBe(false);
+    expect(calls.map((c) => c.method)).toEqual(["GET"]);
   });
 
   it("a path in another case is another URL, and is sent as it was given", async () => {
@@ -3669,7 +3720,8 @@ describe("attachments", () => {
           const answer = post(url);
           if (answer === 200 || answer === "lost") {
             const location = url.searchParams.get("url")!;
-            const sourceId = url.pathname.split("/").at(-2)!;
+            // Named in capitals or not, a thought is answered in lower case.
+            const sourceId = url.pathname.split("/").at(-2)!.toLowerCase();
             stored.push(attached(location, { id: `att-${stored.length + 1}`, sourceId }));
           }
           if (answer === "lost") throw new TypeError("fetch failed");
@@ -3702,6 +3754,19 @@ describe("attachments", () => {
     const elsewhere = new TheBrainApi({ apiKey: "k", fetchImpl: fetchImpl as typeof fetch });
     expect((await elsewhere.attachments.attachUrl(BRAIN, THOUGHT, LOWER)).created).toBe(true);
     expect(stored).toHaveLength(2);
+  });
+
+  it("the address attached a moment ago to a thought named in capitals is found as well", async () => {
+    const { api, stored, asked } = listBehind();
+    const NAMED = THOUGHT.toUpperCase();
+    expect((await api.attachments.attachUrl(BRAIN, NAMED, UPPER)).created).toBe(true);
+    const again = await api.attachments.attachUrl(BRAIN, NAMED, LOWER);
+    expect(again.created).toBe(false);
+    expect(again.existing?.location).toBe(UPPER);
+    expect(stored).toHaveLength(1);
+    expect(asked()).toEqual([UPPER, "the list", LOWER, UPPER]);
+    // And in the same spelling, by the thought in lower case.
+    expect((await api.attachments.attachUrl(BRAIN, THOUGHT, UPPER)).created).toBe(false);
   });
 
   it("only the spellings of the same address, attached to the same thought, are asked for", async () => {

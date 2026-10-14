@@ -82,14 +82,27 @@ export class AttachmentsResource {
    * attached the address to this thought in another spelling in those ten
    * seconds, and then one, which finds it.
    *
+   * Nor is the list taken at its word. Read within 4 ms of the answer to an
+   * attachment's delete, it still had it 6 times in 6, and the address was
+   * answered "already there" while nothing was. So it only names spellings, and
+   * `byLocation` is asked for each it has not been asked for: it finds every
+   * location in the spelling it is stored in, a `mailto:` or an
+   * `x-devonthink-item:` as well, so one it did not find is gone. That costs
+   * a request only where the list has the address in a spelling not asked
+   * for yet: attached by another process, or more than ten seconds ago.
+   *
+   * `byLocation` names the thought in lower case, and the API takes an
+   * identifier in capitals as well. Compared by case, the thought's own
+   * attachment was not its own, and the address attached straight before in
+   * another host case was attached again 2 times in 3.
+   *
    * Two calls for one address on one thought go one after the other. Sent at
    * once, each looked before either attached, and both attached, in one
    * spelling as in two (3 of 3 each).
    *
    * Not guarded: the same address in another host case attached by another
-   * process, or in the app, within the moment the list is behind; two
-   * processes attaching one address at once; and an attachment deleted in
-   * the last 0.1 s, which the list may still show (2 of 3, up to 75 ms).
+   * process, or in the app, within the moment the list is behind; and two
+   * processes attaching one address at once.
    */
   async attachUrl(
     brainId: string,
@@ -122,26 +135,38 @@ export class AttachmentsResource {
     }
   }
 
-  /** The attachment of `thoughtId` that is `url` in any spelling, if one is found. */
+  /**
+   * The attachment of `thoughtId` that is `url` in any spelling, if one is
+   * found, as `byLocation` has it: the thought's list only names spellings.
+   */
   async #alreadyThere(
     brainId: string,
     thoughtId: string,
     url: string,
   ): Promise<AttachmentDto | undefined> {
     const key = urlKey(url);
-    const spellings = new Set([
-      url,
-      ...this.client.written.attachedTo(brainId, thoughtId).filter((s) => urlKey(s) === key),
-    ]);
-    for (const spelling of spellings) {
-      const found = (await this.byLocation(brainId, spelling)).find(
-        (a) => a.sourceId === thoughtId,
-      );
-      if (found) return found;
-    }
-    return (await this.ofThought(brainId, thoughtId)).find(
-      (a) =>
-        a.type === AttachmentType.ExternalUrl && a.location !== null && urlKey(a.location) === key,
+    const asked = new Set<string>();
+    const live = async (spellings: readonly string[]): Promise<AttachmentDto | undefined> => {
+      for (const spelling of spellings) {
+        if (asked.has(spelling)) continue;
+        asked.add(spelling);
+        const found = (await this.byLocation(brainId, spelling)).find((a) =>
+          sameId(a.sourceId, thoughtId),
+        );
+        if (found) return found;
+      }
+      return undefined;
+    };
+    const kept = this.client.written.attachedTo(brainId, thoughtId);
+    return (
+      (await live([url, ...kept.filter((s) => urlKey(s) === key)])) ??
+      (await live(
+        (await this.ofThought(brainId, thoughtId)).flatMap((a) =>
+          a.type === AttachmentType.ExternalUrl && a.location !== null && urlKey(a.location) === key
+            ? [a.location]
+            : [],
+        ),
+      ))
     );
   }
 
@@ -163,6 +188,11 @@ export class AttachmentsResource {
     assertUuid(attachmentId, "attachmentId");
     await this.client.delete(`/api/attachments/${brainId}/${attachmentId}`);
   }
+}
+
+/** Case aside: the API takes a UUID in capitals as well, and answers in lower case. */
+function sameId(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
 }
 
 /**

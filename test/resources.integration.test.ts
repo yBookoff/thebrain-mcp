@@ -3631,6 +3631,54 @@ suite("resource layer against the live API", () => {
       );
       expect((await add(id, lower)).created).toBe(true);
     });
+
+    it("attachUrl takes a thought named in capitals for itself, and the list's word for nothing", async () => {
+      const add = (id: string, url: string, through = api) =>
+        through.attachments.attachUrl(brainId, id, url, { name: `${PREFIX}link` });
+      const spelled = (what: string) => {
+        const stored = `https://Example.com/${PREFIX}${what}-${Date.now()}/p`;
+        return { stored, lower: stored.replace("Example.com", "example.com") };
+      };
+
+      // The API takes the identifier in capitals and names the thought in
+      // lower case. Compared by case, by-location's answer was not this
+      // thought's, and the address went again 2 times in 3 (BRMCP-62).
+      for (const i of ["0", "1", "2"]) {
+        const id = await make(`attach-capitals-${i}`);
+        const named = id.toUpperCase();
+        const { stored, lower } = spelled(`capitals-${i}`);
+        expect((await add(named, stored)).created, i).toBe(true);
+        const again = await add(named, lower);
+        expect(again.created, i).toBe(false);
+        expect(again.existing?.location, i).toBe(stored);
+        expect(await api.attachments.byLocation(brainId, lower), i).toEqual([]);
+      }
+
+      // The list, read a moment after the delete, still had the attachment 6
+      // times in 6, and the address was answered as already there.
+      for (const [i, elsewhere] of [
+        ["same process, same spelling", false],
+        ["another process, another host case", true],
+      ] as const) {
+        const id = await make(`attach-deleted-${elsewhere ? "o" : "s"}`);
+        const { stored, lower } = spelled(`deleted-${elsewhere ? "o" : "s"}`);
+        expect((await add(id, stored)).created, i).toBe(true);
+        await eventually(
+          () => locations(id),
+          (all) => all.includes(stored),
+        );
+        const [attachment] = await api.attachments.byLocation(brainId, stored);
+        await api.attachments.delete(brainId, attachment!.id);
+        const again = elsewhere
+          ? await add(id, lower, new TheBrainApi({ apiKey: apiKey! }))
+          : await add(id, stored);
+        expect(again.created, i).toBe(true);
+        expect(
+          await api.attachments.byLocation(brainId, elsewhere ? lower : stored),
+          i,
+        ).toHaveLength(1);
+      }
+    });
   });
 
   /**

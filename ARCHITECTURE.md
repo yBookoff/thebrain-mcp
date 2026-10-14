@@ -1993,6 +1993,8 @@ instance. Full detail in [`docs/api-map.md`](docs/api-map.md).
     which is live, for each spelling of the address this process attached
     to the thought in the last ten seconds (`client.written`), and takes
     the calls for one address on one thought one at a time: then 0 of 20.
+    What the list has is asked for by `by-location` too before it counts:
+    the list still had an attachment deleted 4 ms before, 6 times in 6.
     Another process, or the app, is still not seen while the list is behind.
 14. **`null` clears nothing through `replace`.** A label and a colour are
     cleared with `remove`. A type is not cleared by any patch: `replace /typeId`
@@ -2259,7 +2261,7 @@ Measured against a live API by polling until the result appeared:
 | `create` next to a thought → that thought's `graph` lists it | 10–205 ms, about 80 ms at the median: a copy refreshed about every 0.1 s. First seen past 300 ms 7 times in 1,800 while the app was slow to answer, 364 ms at the latest: there is no bound. Live on its first read |
 | `attach URL` → `by-location` | instant |
 | `attach URL` → the thought's attachment list | up to 0.2 s: a copy refreshed about every 0.1 s. Live on its first read |
-| delete a URL attachment → `by-location` | instant, 6 of 6; a list read before still had it at the first read 2 of 3, up to 75 ms |
+| delete a URL attachment → `by-location` | instant, 6 of 6; a list read before still had it at the first read 2 of 3, up to 75 ms, and within 4 ms of the delete's answer 6 of 6 |
 | **`create` → `findByName`** | **~5.6 s** |
 | `create` → full-text search | 3.7–5.5 s, at the next refresh of the search's index (13 runs). The vendor's documentation says up to 15 s, which was not once seen |
 | a thought, a link, a note or a URL made or deleted → `statistics` | at the first read, every time measured |
