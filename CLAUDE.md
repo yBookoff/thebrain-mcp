@@ -136,6 +136,12 @@ silent wrong behaviour rather than a loud failure:
   thought becomes a parent, and the type stays as it was. `thoughts.update()`
   and `create()` read the kind first and throw `not_a_type`; keep new writes
   behind `requireType()`. A parent link towards a type sets the type as well.
+  A type the patch would not set is a 200 too: on a tag, on a type that is
+  the named type's own type, and on a thought of two types, where a third
+  leaves one of the two beside it. `update()` reads the thought's graph ahead
+  of the patch and throws `type_on_tag`, `type_cycle` or `two_types`; the
+  graph lists type links deleted a moment ago, so two types are counted by
+  `links.between()`.
 - **A type on a type is a link of meaning 3, and a thought can have two
   types.** `isTypeLink()` takes 2 and 3 (`LinkMeaning.SubType`), and
   `detachType()` deletes only a type's link with the type at `thoughtIdA`. A
@@ -338,6 +344,14 @@ silent wrong behaviour rather than a loud failure:
   erases (`brain_set_note`, `brain_delete_thought`), and name what was not
   read when the tool only shows it ("Note not read", "Not read", "Listing not
   read").
+- **A write reads back late, by no fixed time, and past the wait it is
+  accepted, not failed.** A type set or removed and an alias list are waited
+  for up to `READ_BACK` (6 s); past it they are `not_read_back`, "accepted…
+  do not send it again", never under "Done". Until a read shows such a write,
+  this process's next alias edit or type removal of that thought waits for it
+  (`#pastUnread()`) and is refused, nothing sent, if no read does: built on
+  the old value it would undo the write. Another process's writes are not
+  known.
 - **The catch-all 403 to a write is not a refusal to trust.** Under
   concurrent writes TheBrain now and then answers a create with "To use the
   TheBrain API…" and makes the thought all the same (4 of 4, L45).

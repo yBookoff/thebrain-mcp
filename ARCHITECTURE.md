@@ -434,7 +434,8 @@ that does not do what was asked (L44): on a tag it sets nothing; on a type
 that is the named type's own type, nothing either; on a thought of two types
 the other of the two, or `typeId` again, changes nothing, and a third comes
 in beside one of the two. The tool answered the first two and the other of
-the two after two seconds, that the type had not read back yet, and the rest
+the two once the read-back wait ran out, that the type had not read back
+yet, and the rest
 "Done". `update()` now reads the thought's graph after the type and ahead of
 any write, and refuses each: `type_on_tag`, `type_cycle`, and `two_types`,
 which names both types and says to send `typeId: null` first and the type
