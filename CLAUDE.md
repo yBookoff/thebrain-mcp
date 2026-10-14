@@ -222,17 +222,16 @@ silent wrong behaviour rather than a loud failure:
 - **`by-location` compares the host by case, and a URL is stored as given.**
   `Example.com/p` does not find `example.com/p`. Attach through
   `attachments.attachUrl()`, which also checks the thought's own list with the
-  host case set aside. That list is a copy refreshed about every 0.1 s, up to
-  0.2 s behind a write, and the first attach's own read makes it: the other
-  spelling sent straight after was attached twice 18 times in 20. So
+  host case set aside. That list is a copy, up to 0.2 s behind a write, so
   `attachUrl()` asks `by-location` for the spelling given, then waits out what
   is left of 0.5 s since this process's last write (`afterCopyLag()`) before it
-  reads the list. The list is taken only as a source of spellings: each is
+  reads the list. The other spelling sent within the moment the list is
+  behind may be attached twice; not guarded, nor another process or the app
+  attaching one. The list is taken only as a source of spellings: each is
   asked of `by-location` before "Already there", since a list read right after
-  a delete still showed the attachment 6 of 6.
-  Compare a `sourceId` with a caller's thought id regardless of case: the API
-  takes capitals and answers in lower case. Not guarded: another process or the
-  app attaching another spelling while the list is behind.
+  a delete still showed the attachment 6 of 6. Compare a `sourceId` with a
+  caller's thought id regardless of case: the API takes capitals and answers
+  in lower case.
 - **Tags attach via `POST /api/links` with `relation: 2` against a `kind=4`
   thought.** The server rewrites it to `relation=1, meaning=5`. Against a type
   the same request sets the thought's type and against an ordinary thought it
@@ -264,10 +263,10 @@ silent wrong behaviour rather than a loud failure:
   no label is given its name for one when it becomes a type, and loses it
   with the kind only while it is still the name; a rename leaves it, so a
   renamed type reads, is found by TheBrain's search and is embedded under its
-  old name too. No `202` says any of it; `label: null` clears it. The kind is beside the document, so the hash cannot
-  see it: `#indexThoughts` compares it apart and `VectorStore.setKinds()`
-  corrects the row with its vector kept. Never fold the kind into the hash or
-  the document.
+  old name too. No `202` says any of it; `label: null` clears it. The kind is
+  beside the document, so the hash cannot see it: the indexer's `#write`
+  compares it apart and `VectorStore.setKinds()` corrects the row with its
+  vector kept. Never fold the kind into the hash or the document.
 - **A write is in the log before it is in `graph`**, a tag by 0.1–0.5 s. Sync
   leaves its watermark `SYNC_OVERLAP_MS` behind so the next run reads that tail
   again; a watermark at the run's own start lost one tag in four.
@@ -305,14 +304,11 @@ silent wrong behaviour rather than a loud failure:
   `children` alone and made the other two again on every run. The same
   thought is the same name under the same relation to the same thought; one
   of that name under another relation fails with its identifier, neither
-  reused nor made again. A graph that has been read is answered from a copy,
-  0.2 s behind a create as a rule and 364 ms at the worst measured, so
-  `ingest()` first looks 0.5 s after this process's last write, and returns
-  once the graphs list what it made, or after 3 s (`LISTED`), counting what
-  they still lack then in `unlisted`. A
-  read of that graph that fails fails the thought, never "nothing there". A
-  thought with no parent is still made by every run, and a `relation` with no
-  parent is refused before any write.
+  reused nor made again. The graph is a copy (below): `ingest()` returns once
+  the graphs list what it made, or after 3 s (`LISTED`), counting what they
+  still lack then in `unlisted`. A read of that graph that fails fails the
+  thought, never "nothing there". A thought with no parent is still made by
+  every run, and a `relation` with no parent is refused before any write.
 - **A read result marks every thought that is not an ordinary one, and only
   those.** `kindMark()` and `kindLabel()` in `src/server/respond.ts`: `[type]`
   or `[tag]` after the identifier, a `Kind` column in `brain_search`, nothing
@@ -384,7 +380,7 @@ silent wrong behaviour rather than a loud failure:
   on.** They change places from read to read. `ingest()` fails a plan thought
   with two candidates and names both.
 - **`statistics` counts thoughts, links, notes and web links at the first
-  read; `thoughtTypes` and `tags` lag**, by seconds after a burst. Never
+  read; `thoughtTypes` and `tags` lag**, by up to about two seconds. Never
   compare those two at one read.
 - **A log request with no `startTime` costs time by the length of the whole
   log**, however few entries it asks for: 135 ms for the newest 50 of
@@ -397,13 +393,10 @@ silent wrong behaviour rather than a loud failure:
 - **A search hit is the search index's copy, not the thought, and that index
   is about five seconds behind.** Until its next refresh `search/{brainId}`
   and `?nameExact=` return a thought that was deleted, the hit the same to the
-  last field, and a changed one by its old text under its old name. A thought
-  deleted within some tens of milliseconds of a neighbour (up to 215 ms with
-  the app busy) stayed there for good about once in a hundred.
+  last field, and a changed one by its old text under its old name.
   `SemanticSearch.find()` reads every hit's thought before it returns: a 404
-  goes to `gone`, any other failure to `unverified`.
-  Anything new that takes an identifier from a search or from `findByName`
-  needs that read.
+  goes to `gone`, any other failure to `unverified`. Anything new that takes
+  an identifier from a search or from `findByName` needs that read.
 
 ## Semantic layer
 
