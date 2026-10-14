@@ -383,16 +383,41 @@ function routeMissMessage(): string {
 }
 
 /**
- * Wrapper for endpoints that answer 400 instead of returning an empty list.
+ * What `/types`, `/tags` and `/pins` answer, with a 400, for a brain that has
+ * none: a bare JSON string, the same every time (5 of 5 each, contract test;
+ * docs/api-map.md, L1), with the brain's identifier at its end.
+ */
+const EMPTY_LIST =
+  /^(Could not retrieve list of (Types|Tags)|Failed to get pins) for brain [0-9a-f-]{36}$/i;
+
+/**
+ * Wrapper for the three endpoints that answer 400 instead of returning an
+ * empty list. That 400 is an empty result, not an error.
  *
- * On a brain with no types or tags, /types and /tags return HTTP 400 with a
- * bare JSON string. That is an empty result, not an error.
+ * Only the 400 in the words measured for an empty list is taken for one. Any
+ * 400 used to be, and a request refused for a reason of its own then read as
+ * a brain with no types: "A request that fails is not an empty answer".
+ *
+ * A known limit stays. The words are those of a failure, "Could not
+ * retrieve…", and name no cause, so a list the API could not read for some
+ * other reason would be told in the same sentence and taken for empty. No
+ * such failure could be produced: a `brainId` that is no brain is a 401, a
+ * rejected key the other 401, a malformed identifier the app's HTML page.
+ * And should a later build word the empty list differently, a brain with no
+ * types is an error here, in the API's words, until the pattern follows:
+ * the contract test is what says so first.
  */
 export async function emptyOn400<T>(promise: Promise<T[]>): Promise<T[]> {
   try {
     return await promise;
   } catch (error) {
-    if (error instanceof TheBrainError && error.kind === "bad_request") return [];
+    if (
+      error instanceof TheBrainError &&
+      error.kind === "bad_request" &&
+      EMPTY_LIST.test(error.message)
+    ) {
+      return [];
+    }
     throw error;
   }
 }

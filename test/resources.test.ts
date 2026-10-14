@@ -301,16 +301,18 @@ describe("updating a thought: flat fields become JSON Patch", () => {
   });
 });
 
+/**
+ * Unicode's `White_Space`, all 25 code points of it: what the API takes for a
+ * blank in a thought's name and in a link's (contract tests). Spelled out, so
+ * that the rule is the list that was measured and not whatever the runtime's
+ * tables hold.
+ */
+const WHITE_SPACE = [
+  0x9, 0xa, 0xb, 0xc, 0xd, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004,
+  0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
+].map((cp) => String.fromCodePoint(cp));
+
 describe("a thought's name", () => {
-  /**
-   * Unicode's `White_Space`, all 25 code points of it: what the API takes
-   * for a blank in a name (contract test). Spelled out, so that the rule is
-   * the list that was measured and not whatever the runtime's tables hold.
-   */
-  const WHITE_SPACE = [
-    0x9, 0xa, 0xb, 0xc, 0xd, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004,
-    0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
-  ].map((cp) => String.fromCodePoint(cp));
   /** Characters that do not show and are no white space: the API stores a name of one. */
   const UNSEEN = ["\u200b", "\ufeff", "\u2800", "\u2060", "\u0301", "\ufe0f", "\u180e", "\u001c"];
   const BLANK = ["", " ", "   ", "\t\n", "\r\n", "\u00a0", "\u0085", "\u3000", " \u00a0\t\u3000\u0085\n"];
@@ -1130,10 +1132,47 @@ describe("aliases", () => {
   });
 });
 
-describe("type and tag lists", () => {
-  it("a 400 on an empty brain becomes an empty list", async () => {
-    const { api } = apiWith([["/types", () => 400]]);
-    await expect(api.thoughts.listTypes(BRAIN)).resolves.toEqual([]);
+describe("type, tag and pin lists", () => {
+  /** A list answered with a status and the API's own words, as a bare JSON string. */
+  const listAnswering = (status: number, said: string) => {
+    const fetchImpl = async (): Promise<Response> =>
+      new Response(JSON.stringify(said), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+    return new TheBrainApi({ apiKey: "k", fetchImpl: fetchImpl as unknown as typeof fetch });
+  };
+
+  it("the 400 each answers for a brain that has none becomes an empty list", async () => {
+    // The three sentences as measured, 5 of 5 each (contract test).
+    await expect(
+      listAnswering(400, `Could not retrieve list of Types for brain ${BRAIN}`).thoughts.listTypes(BRAIN),
+    ).resolves.toEqual([]);
+    await expect(
+      listAnswering(400, `Could not retrieve list of Tags for brain ${BRAIN}`).thoughts.listTags(BRAIN),
+    ).resolves.toEqual([]);
+    await expect(
+      listAnswering(400, `Failed to get pins for brain ${BRAIN}`).thoughts.listPinned(BRAIN),
+    ).resolves.toEqual([]);
+  });
+
+  it("a 400 in other words is the error it is, for each of the three", async () => {
+    const api = listAnswering(400, "Could not create thought.");
+    for (const list of [
+      () => api.thoughts.listTypes(BRAIN),
+      () => api.thoughts.listTags(BRAIN),
+      () => api.thoughts.listPinned(BRAIN),
+    ]) {
+      await expect(list()).rejects.toMatchObject({
+        kind: "bad_request",
+        message: "Could not create thought.",
+      });
+    }
+  });
+
+  it("a brainId that is no brain is not a brain with no types", async () => {
+    const api = listAnswering(401, `Access to brain ${BRAIN} is unauthorized.`);
+    await expect(api.thoughts.listTypes(BRAIN)).rejects.toMatchObject({ kind: "unknown_brain" });
   });
 
   it("a non-empty list passes through unchanged", async () => {
@@ -2432,10 +2471,52 @@ describe("a link's name as TheBrain stores it", () => {
       ["two  spaces", "two  spaces"],
       ["crlf\r\nbreak", "crlf\r break"],
       ["nbsp\u00a0inside", "nbsp\u00a0inside"],
+      ["next\u0085line", "next\u0085line"],
       ["", ""],
+      // White space alone comes to no name: a PATCH with it clears the label.
+      [" \u00a0\t\u0085", ""],
     ] as const) {
       expect(linkNameAsStored(sent), JSON.stringify(sent)).toBe(stored);
     }
+  });
+
+  it("drops Unicode's white space at the ends, which is not what trim() drops", () => {
+    expect(WHITE_SPACE).toHaveLength(25);
+    for (const c of WHITE_SPACE) {
+      expect(linkNameAsStored(`${c}ab${c}`), codePoints(c)).toBe("ab");
+    }
+    // The two that `trim()` got wrong, each 4 of 4 on the live API. A next
+    // line is dropped: left on, a plan patched the label again on every run.
+    expect("\u0085ab\u0085".trim()).toBe("\u0085ab\u0085");
+    expect(linkNameAsStored("\u0085ab\u0085")).toBe("ab");
+    // A byte order mark is kept: dropped, the plan said `label already "ab"`
+    // of a link whose label is another.
+    expect("\ufeffab\ufeff".trim()).toBe("ab");
+    expect(linkNameAsStored("\ufeffab\ufeff")).toBe("\ufeffab\ufeff");
+    expect(linkNameAsStored(" \ufeff ab \ufeff ")).toBe("\ufeff ab \ufeff");
+    // What does not show and is no white space stays, at an end as inside.
+    for (const c of ["\u200b", "\u2060", "\u180e", "\u001c", "\u00ad", "\u0084", "\u0086"]) {
+      expect(linkNameAsStored(`${c}ab${c}`), codePoints(c)).toBe(`${c}ab${c}`);
+    }
+  });
+
+  it("is cut at 1,024 UTF-16 units, after the ends are dropped and with nothing dropped after", () => {
+    const x = (n: number): string => "x".repeat(n);
+    expect(linkNameAsStored(x(1024))).toBe(x(1024));
+    expect(linkNameAsStored(x(1025))).toBe(x(1024));
+    expect(linkNameAsStored(x(70_000))).toBe(x(1024));
+    // The ends go first, so they do not count towards the length...
+    expect(linkNameAsStored(`   ${x(1024)}`)).toBe(x(1024));
+    expect(linkNameAsStored(` ${x(1024)}y`)).toBe(x(1024));
+    expect(linkNameAsStored(`${x(1024)}   `)).toBe(x(1024));
+    // ...and the cut last, so what it leaves at the end stays there.
+    expect(linkNameAsStored(`${x(1023)} y`)).toBe(`${x(1023)} `);
+    expect(linkNameAsStored(`${x(1023)}\ty`)).toBe(`${x(1023)} `);
+    expect(linkNameAsStored(`${x(1023)}\u0085y`)).toBe(`${x(1023)}\u0085`);
+    // Units, not characters: 600 emoji are 1,200, and 512 of them are kept.
+    expect(linkNameAsStored("😀".repeat(600))).toBe("😀".repeat(512));
+    // A cut inside an emoji leaves U+FFFD for the half that was kept.
+    expect(linkNameAsStored(`${x(1023)}😀`)).toBe(`${x(1023)}\ufffd`);
   });
 });
 

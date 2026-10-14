@@ -10,7 +10,8 @@
 
 /**
  * The API keeps the first 1,024 UTF-16 units of a longer name and drops the
- * rest, with a 200, on a create and on a rename alike.
+ * rest, with a 200, on a create and on a rename alike. A link's name is cut
+ * at the same length, by a `POST` and by a `PATCH`.
  */
 export const MAX_NAME_LENGTH = 1024;
 
@@ -36,17 +37,36 @@ export function thoughtNameAsStored(name: string): string {
 }
 
 /**
- * A link's name as TheBrain keeps it, by a `POST` and by a `PATCH` alike: a
- * tab and a line feed are each a space, and the blanks at either end are
- * dropped, a no-break space among them. A run of spaces inside is kept, and
- * so is a carriage return (contract test; docs/api-map.md, L35).
+ * A link's name as TheBrain keeps it, by a `POST` and by a `PATCH` alike. It
+ * is the rule of a thought's name, measured over the same code points
+ * (contract test; docs/api-map.md, L35): a tab and a line feed are each a
+ * space, then the white space at either end is dropped, Unicode's
+ * `White_Space` and not what `trim()` drops, and then the name is cut at
+ * `MAX_NAME_LENGTH`. A run of spaces inside is kept, and so are a carriage
+ * return and a next line there.
+ *
+ * `trim()` stood here and was wrong at both ends of the difference: it keeps
+ * a next line (U+0085), which the API drops, so a label that ended in one
+ * was patched again by every run of a plan; and it drops a byte order mark
+ * (U+FEFF), which the API keeps, so a label that ended in one was reported
+ * as the one the link had.
+ *
+ * The cut comes last, so a cut name can end in white space, and one that
+ * falls inside a surrogate pair leaves U+FFFD for the half it kept. Nothing
+ * here refuses a long label, where a thought's long name is refused: what
+ * compares or quotes a label gets it as it will be stored.
  *
  * It is what a name asked for is set against the name a link has: sent as it
  * was given, `" motivates\n"` would pass for another label than the
  * `"motivates"` it was stored as, on every run of a plan.
  */
 export function linkNameAsStored(name: string): string {
-  return name.replace(/[\t\n]/g, " ").trim();
+  const whole = name.replace(/[\t\n]/g, " ").replace(NAME_EDGES, "");
+  if (whole.length <= MAX_NAME_LENGTH) return whole;
+  const cut = whole.slice(0, MAX_NAME_LENGTH);
+  const last = cut.charCodeAt(MAX_NAME_LENGTH - 1);
+  // The first half of a pair with its second half cut off.
+  return last >= 0xd800 && last <= 0xdbff ? `${cut.slice(0, -1)}\ufffd` : cut;
 }
 
 /**

@@ -116,6 +116,15 @@ function shiftMicros(t: string, delta: number): string {
   return `${new Date(seconds * 1000).toISOString().slice(0, 19)}.${String(rest).padStart(6, "0")}`;
 }
 
+/**
+ * Unicode's `White_Space`, all 25 code points of it: what the API drops at the
+ * ends of a thought's name and of a link's.
+ */
+const WHITE_SPACE = [
+  0x9, 0xa, 0xb, 0xc, 0xd, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004,
+  0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
+].map((cp) => String.fromCodePoint(cp));
+
 suite("resource layer against the live API", () => {
   let api: TheBrainApi;
   let brainId: string;
@@ -285,6 +294,79 @@ suite("resource layer against the live API", () => {
       console.warn(`[cleanup] removed leftovers from earlier runs: ${leftovers.length}`);
     }
   }, 300_000);
+
+  it("a brain with no types, tags or pins answers each list with a 400 in words of its own, which the resources read as an empty list", async (ctx) => {
+    // First in the file, while this run has made no type and no tag: a
+    // throwaway brain at rest has none. Measured on TheBrain 15.0.640, 5 of 5
+    // for each answer (docs/api-map.md, L1). `emptyOn400()` takes these three
+    // sentences for an empty list and no other 400.
+    type Refused = { status: number | undefined; said: string };
+    const raw = (list: string): Promise<ThoughtDto[] | Refused> =>
+      api.client.get<ThoughtDto[]>(`/api/thoughts/${brainId}/${list}`).catch((e: unknown) => {
+        if (e instanceof TheBrainError) return { status: e.status, said: e.message };
+        throw e;
+      });
+    const NONE = {
+      types: { status: 400, said: `Could not retrieve list of Types for brain ${brainId}` },
+      tags: { status: 400, said: `Could not retrieve list of Tags for brain ${brainId}` },
+      pins: { status: 400, said: `Failed to get pins for brain ${brainId}` },
+    };
+    const [types, tags] = [await raw("types"), await raw("tags")];
+    if (Array.isArray(types) || Array.isArray(tags)) {
+      // A list that is there is never an empty one.
+      for (const list of [types, tags]) if (Array.isArray(list)) expect(list.length).toBeGreaterThan(0);
+      ctx.skip("the brain holds a type or a tag an earlier run left: the sweep after this run takes it");
+    }
+    expect(types).toEqual(NONE.types);
+    expect(tags).toEqual(NONE.tags);
+    expect(await api.thoughts.listTypes(brainId)).toEqual([]);
+    expect(await api.thoughts.listTags(brainId)).toEqual([]);
+
+    // With one of each, the same requests are a 200 and a list...
+    const typeId = await api.thoughts.create(brainId, { name: `${PREFIX}only-type`, kind: ThoughtKind.Type });
+    const tagId = await api.thoughts.create(brainId, { name: `${PREFIX}only-tag`, kind: ThoughtKind.Tag });
+    created.push(typeId, tagId);
+    const listed = async (): Promise<string[][]> => [
+      (await api.thoughts.listTypes(brainId)).map((t) => t.id),
+      (await api.thoughts.listTags(brainId)).map((t) => t.id),
+    ];
+    expect(await eventually(listed, ([a, b]) => a!.length > 0 && b!.length > 0)).toEqual([
+      [typeId],
+      [tagId],
+    ]);
+    // ...and the 400 again once the last one is deleted: 2 to 3 ms after.
+    await api.thoughts.delete(brainId, typeId);
+    await settle(350);
+    await api.thoughts.delete(brainId, tagId);
+    expect(await eventually(() => raw("types"), (r) => !Array.isArray(r))).toEqual(NONE.types);
+    expect(await eventually(() => raw("tags"), (r) => !Array.isArray(r))).toEqual(NONE.tags);
+
+    // Pins: a brain's home thought is pinned, so they are taken off and put back.
+    const pinned = await api.thoughts.listPinned(brainId);
+    try {
+      for (const t of pinned) await api.thoughts.unpin(brainId, t.id);
+      expect(await eventually(() => raw("pins"), (r) => !Array.isArray(r))).toEqual(NONE.pins);
+      expect(await api.thoughts.listPinned(brainId)).toEqual([]);
+    } finally {
+      for (const t of pinned) await api.thoughts.pin(brainId, t.id);
+    }
+    const back = await eventually(
+      () => api.thoughts.listPinned(brainId),
+      (list) => list.length === pinned.length,
+    );
+    expect(back.map((t) => t.id).sort()).toEqual(pinned.map((t) => t.id).sort());
+
+    // What does fail is told apart by its status, and is no empty list: a
+    // brainId that is no brain. No failure that answers 400 could be produced.
+    const noBrain = crypto.randomUUID();
+    for (const list of [
+      () => api.thoughts.listTypes(noBrain),
+      () => api.thoughts.listTags(noBrain),
+      () => api.thoughts.listPinned(noBrain),
+    ]) {
+      await expect(list()).rejects.toMatchObject({ kind: "unknown_brain", status: 401 });
+    }
+  }, 30_000);
 
   it("a freshly created thought reads back immediately by identifier", async () => {
     const id = await make("basic");
@@ -2298,13 +2380,6 @@ suite("resource layer against the live API", () => {
       (t) => t === "after",
     );
     expect(text).toBe("after");
-  });
-
-  it("type and tag lists never throw on any brain", async () => {
-    for (const brain of await api.brains.list()) {
-      await expect(api.thoughts.listTypes(brain.id)).resolves.toBeInstanceOf(Array);
-      await expect(api.thoughts.listTags(brain.id)).resolves.toBeInstanceOf(Array);
-    }
   });
 
   describe("a type and a tag made through the API", () => {
@@ -6907,8 +6982,15 @@ suite("resource layer against the live API", () => {
       expect(await logged(id, 3)).toEqual(["101", '103 null→"old"', '103 "old"→"new"']);
     }, 30_000);
 
-    it("a link's name is stored with a tab and a line feed as spaces and no blanks at its ends, by a post as by a patch", async () => {
-      for (const sent of [
+    it("a link's name is stored as a thought's is: a tab and a line feed as spaces, no white space at its ends, cut at 1,024 units, by a post as by a patch", async () => {
+      // Measured on 15.0.640, 2026-10-13: 164 names, each twice by a POST and
+      // twice by a PATCH, every one stored the same by both. It is the rule
+      // of a thought's name (L36) to the code point: each of the 25 of
+      // Unicode's White_Space is dropped at an end, and of 27 code points
+      // next to them none is. `linkNameAsStored()` went by `trim()`, which
+      // keeps a next line (U+0085) and drops a byte order mark (U+FEFF).
+      const x = (n: number): string => "x".repeat(n);
+      const samples = [
         "plain",
         "  padded  ",
         "two  spaces",
@@ -6917,23 +6999,71 @@ suite("resource layer against the live API", () => {
         "crlf\r\nbreak",
         "\nleading and trailing\n",
         "\u00a0nbsp ends\u00a0",
-      ]) {
-        const { a, b } = await pair("there-stored");
-        const posted = await post({ thoughtIdA: a, thoughtIdB: b, relation: 3, name: sent });
-        const other = await pair("there-stored-p");
-        const patched = await post({ thoughtIdA: other.a, thoughtIdB: other.b, relation: 3 });
-        await api.links.update(brainId, patched.id, { name: sent });
+        // Each white space code point at both ends.
+        ...WHITE_SPACE.map((c, i) => `${c}ws ${i}${c}`),
+        // No white space, so kept at an end: a byte order mark, a zero width
+        // space, controls, the two code points either side of a next line.
+        "\ufeffbom\ufeff",
+        " \ufeff both \ufeff ",
+        "\u200bzero width\u200b",
+        "\u001ccontrol\u001f",
+        "\u0084beside\u0086",
+        // Inside a name only a tab and a line feed change.
+        "next\u0085line",
+        "separator\u2028inside",
+        "nbsp\u00a0inside",
+        "cr\rinside",
+        "a \n b",
+        // 1,024 UTF-16 units are kept. The ends go before the cut and nothing
+        // after it, and a cut inside an emoji leaves U+FFFD for its half.
+        x(1024),
+        x(1025),
+        ` ${x(1024)}y`,
+        `${x(1023)} y`,
+        `${x(1023)}\u0085y`,
+        `${x(1023)}😀`,
+        "😀".repeat(600),
+      ];
+      /** A name short enough to read in a failure, or its length and its end. */
+      const told = (name: string): string => {
+        const units = (text: string): string =>
+          Array.from(text, (_, i) => text.charCodeAt(i).toString(16)).join(" ");
+        return name.length > 40 ? `${name.length} units ending ${units(name.slice(-3))}` : units(name);
+      };
+      // One pair for the posts, its link deleted after each, and one link
+      // for the patches. Each is read through its pair, which is not behind
+      // a write.
+      const { a, b } = await pair("there-stored");
+      const other = await pair("there-stored-p");
+      const patched = await post({ thoughtIdA: other.a, thoughtIdB: other.b, relation: 3 });
+      for (const [i, sent] of samples.entries()) {
         const stored = linkNameAsStored(sent);
-        for (const id of [posted.id, patched.id]) {
-          const link = await eventually(
-            () => api.links.get(brainId, id),
-            (l) => l.name === stored,
-            { timeoutMs: 3000, stepMs: 50 },
-          );
-          expect(link.name, JSON.stringify(sent)).toBe(stored);
-        }
+        const posted = await post({ thoughtIdA: a, thoughtIdB: b, relation: 3, name: sent });
+        expect((await api.links.between(brainId, a, b))?.name, `POST ${told(sent)}`).toBe(stored);
+        await api.links.delete(brainId, posted.id);
+        // From another name each time: the name a link has is not written.
+        await api.links.update(brainId, patched.id, { name: `seed ${i}` });
+        await api.links.update(brainId, patched.id, { name: sent });
+        expect(
+          (await api.links.between(brainId, other.a, other.b))?.name,
+          `PATCH ${told(sent)}`,
+        ).toBe(stored);
       }
-    }, 60_000);
+      expect(linkNameAsStored(x(1025))).toHaveLength(1024);
+      expect(linkNameAsStored(`${x(1023)}😀`).endsWith("\ufffd")).toBe(true);
+
+      // White space alone is no name: posted, the link has none, and patched
+      // onto a link it clears the name that was there.
+      for (const blank of [" ", "\t\n", " \u00a0\u0085\u3000"]) {
+        expect(linkNameAsStored(blank)).toBe("");
+        const posted = await post({ thoughtIdA: a, thoughtIdB: b, relation: 3, name: blank });
+        expect((await api.links.between(brainId, a, b))?.name, told(blank)).toBeNull();
+        await api.links.delete(brainId, posted.id);
+        await api.links.update(brainId, patched.id, { name: "there" });
+        await api.links.update(brainId, patched.id, { name: blank });
+        expect((await api.links.between(brainId, other.a, other.b))?.name, told(blank)).toBe("");
+      }
+    }, 120_000);
 
     it("a link posted over the pair's own answers its identifier and logs a 402, changed or not; a name it does not send stays", async () => {
       const { a, b } = await pair("there-post");
@@ -7666,11 +7796,6 @@ suite("resource layer against the live API", () => {
    * spec says of a name that it is a string, and nothing of any of this.
    */
   describe("a thought's name: what is refused, what is ignored, and what is stored", () => {
-    /** Unicode's `White_Space`, all 25 code points of it. */
-    const WHITE_SPACE = [
-      0x9, 0xa, 0xb, 0xc, 0xd, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004,
-      0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
-    ].map((cp) => String.fromCodePoint(cp));
     const BLANK = ["", "   ", "\t\n", "\r\n", " \u00a0\t\u3000\u0085\n", ...WHITE_SPACE];
     /**
      * Characters that do not show and are no white space: zero width, a byte

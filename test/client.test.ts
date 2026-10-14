@@ -455,13 +455,33 @@ describe("finding TheBrain", () => {
 });
 
 describe("emptyOn400", () => {
-  it("turns a 400 from /types into an empty list", async () => {
-    const { client } = clientReturning(JSON.stringify("Could not retrieve list of Types"), {
-      status: 400,
-    });
-    await expect(emptyOn400(client.get<unknown[]>("/api/thoughts/x/types"))).resolves.toEqual(
-      [],
-    );
+  /** What each of the three lists answers for a brain that has none (contract test). */
+  const EMPTY = [
+    ["types", `Could not retrieve list of Types for brain ${BRAIN}`],
+    ["tags", `Could not retrieve list of Tags for brain ${BRAIN}`],
+    ["pins", `Failed to get pins for brain ${BRAIN}`],
+  ] as const;
+
+  it.each(EMPTY)("turns the 400 /%s answers for an empty list into one", async (list, said) => {
+    const { client } = clientReturning(JSON.stringify(said), { status: 400 });
+    await expect(
+      emptyOn400(client.get<unknown[]>(`/api/thoughts/${BRAIN}/${list}`)),
+    ).resolves.toEqual([]);
+  });
+
+  it.each([
+    // Every 400 used to be an empty list: a request refused for a reason of
+    // its own read as a brain with no types.
+    ["in other words", JSON.stringify("Could not create thought.")],
+    ["with no body", ""],
+    ["of the validator", JSON.stringify({ title: "One or more validation errors occurred." })],
+    // The sentence of an empty list, with more after it.
+    ["with a cause", JSON.stringify(`Could not retrieve list of Types for brain ${BRAIN}: timeout`)],
+  ])("a 400 %s is passed on, not taken for an empty list", async (_what, body) => {
+    const { client } = clientReturning(body, { status: 400 });
+    await expect(
+      emptyOn400(client.get<unknown[]>(`/api/thoughts/${BRAIN}/types`)),
+    ).rejects.toMatchObject({ kind: "bad_request", status: 400 });
   });
 
   it("does not swallow other kinds of error", async () => {

@@ -8418,6 +8418,44 @@ describe("a read that fails inside a tool is not an answer that nothing is there
       expect(closed.text).not.toMatch(/open|Active thought|not read/);
     });
   });
+
+  describe("brain_list_types_and_tags", () => {
+    // What each list answers for a brain that has none, 5 of 5 on the live
+    // API: a 400, in the words of a failure (docs/api-map.md, L1).
+    const noTypes = said(400, `Could not retrieve list of Types for brain ${BRAIN}`);
+    const noTags = said(400, `Could not retrieve list of Tags for brain ${BRAIN}`);
+    const list = async (types: () => unknown, tags: () => unknown) => {
+      const { call } = await connect([
+        [`GET /api/thoughts/${BRAIN}/types`, types],
+        [`GET /api/thoughts/${BRAIN}/tags`, tags],
+      ]);
+      return call("brain_list_types_and_tags", { brainId: BRAIN });
+    };
+
+    it("the 400 of an empty list is a brain with none", async () => {
+      expect(await list(noTypes, noTags)).toEqual({
+        isError: false,
+        text: "## Note\nThis brain has no types or tags yet.",
+      });
+    });
+
+    it.each([
+      ["types", (failure: () => unknown) => list(failure, noTags)],
+      ["tags", (failure: () => unknown) => list(noTypes, failure)],
+    ])("a 400 in other words from /%s is an error, where it read as a brain with none", async (which, call) => {
+      // Any 400 was taken for an empty list, and the answer was the note above.
+      expect(await call(said(400, "The list could not be read."))).toEqual({
+        isError: true,
+        text: `The list could not be read. (GET /api/thoughts/${BRAIN}/${which})`,
+      });
+    });
+
+    it.each(FAILURES)("%s from the list of types is an error too", async (_name, failure) => {
+      const result = await list(failure, noTags);
+      expect(result.isError).toBe(true);
+      expect(result.text).not.toContain("no types or tags");
+    });
+  });
 });
 
 describe("a thought's name: none, white space alone, too long, and one that does not show", () => {
