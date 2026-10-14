@@ -451,8 +451,11 @@ THEBRAIN_API_KEY=… THEBRAIN_TEST_BRAIN_ID=<uuid> npm test    # + write contrac
 ```
 
 Write tests demand an explicit throwaway brain and refuse any brain over 500
-thoughts. Suites skip cleanly when the variables are absent. They search no
-other brain. A run sweeps what it made by identifier from the log, and the
+thoughts. Suites skip cleanly when the variables are absent. They read no
+other brain, only the list of brains: a run of note changes cut short is told
+by the test brain's own log, which must show nothing in between, and the
+read-only tests that need a brain read the one `THEBRAIN_TEST_BRAIN_ID` names
+and skip without it. A run sweeps what it made by identifier from the log, and the
 next run sweeps for one that died (a per-brain file in the OS temp directory).
 The sweep starts past the newest entry the brain logged before the run's first
 write, never deletes the home thought, and deletes in rounds a second apart
