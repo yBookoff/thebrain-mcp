@@ -7183,15 +7183,30 @@ suite("resource layer against the live API", () => {
       expect(bytes.subarray(3).toString("utf8")).toBe("привет\n\ncode();");
     }, 60_000);
 
-    it("a note of white space alone is stored, and reads as no note", async () => {
-      const id = await make("note-as-stored-blank");
-      await api.notes.set(brainId, id, "  \n ");
-      await settle(400);
-      const note = await api.notes.getRaw(brainId, id);
-      expect(note.markdown).toBe("");
-      expect(note.modificationDateTime).not.toBe("0001-01-01T00:00:00");
-      expect(await api.notes.exists(brainId, id)).toBe(false);
-      expect((await api.attachments.ofThought(brainId, id)).map((a) => a.isNotes)).toEqual([true]);
+    it("a note of white space alone is stored, and reads as no note; one of what does not show reads back", async () => {
+      // White space by .NET's rule, not by trim(): a next line (U+0085) is of
+      // it, and a byte order mark is not. brain_get_thought prints what the
+      // read returns, and nothing for "" (BRMCP-57; 3 of 3 each).
+      for (const [i, sent] of ["  \n \t", "\u00a0", "\u0085"].entries()) {
+        const id = await make(`note-as-stored-blank-${i}`);
+        await api.notes.set(brainId, id, sent);
+        await settle(400);
+        const note = await api.notes.getRaw(brainId, id);
+        expect(note.markdown, JSON.stringify(sent)).toBe("");
+        expect(note.modificationDateTime).not.toBe("0001-01-01T00:00:00");
+        expect(await api.notes.exists(brainId, id)).toBe(false);
+        const files = await api.attachments.ofThought(brainId, id);
+        expect(files.map((a) => a.isNotes)).toEqual([true]);
+        // The file holds the text as it was sent, after its byte order mark.
+        const bytes = Buffer.from(await api.attachments.content(brainId, files[0]!.id));
+        expect(bytes.toString("utf8"), JSON.stringify(sent)).toBe(`\ufeff${sent}`);
+      }
+      for (const [i, sent] of ["\ufeff", "\u200b"].entries()) {
+        const id = await make(`note-as-stored-unseen-${i}`);
+        await api.notes.set(brainId, id, sent);
+        expect(await read(id, sent), JSON.stringify(sent)).toBe(sent);
+        expect(await api.notes.exists(brainId, id)).toBe(true);
+      }
     }, 30_000);
 
     it("the bare append joins its text to the note's last line, and a block appended so loses its closing fence; notes.append() keeps it", async () => {

@@ -492,24 +492,34 @@ describe("a failure that is TheBrain's own, and a query it will not take", () =>
 describe("formatting", () => {
   it("the table aligns columns", () => {
     const out = table(["Name", "Id"], [["short", "1"], ["considerably longer", "2"]]);
-    const lines = out.split("\n");
+    const lines = out!.split("\n");
     expect(lines[0]).toMatch(/^Name/);
     expect(lines[1]).toMatch(/^─+/);
     expect(lines).toHaveLength(4);
   });
 
-  it("an empty table draws no header", () => {
-    expect(table(["a", "b"], [])).toBe("(empty)");
+  it("an empty table draws no header, and is null", () => {
+    expect(table(["a", "b"], [])).toBeNull();
   });
 
-  it("a list with no items is marked empty", () => {
-    expect(bullet([])).toBe("(empty)");
+  it("a list with no items is null", () => {
+    expect(bullet([])).toBeNull();
   });
 
   it("empty sections drop out instead of leaving a heading", () => {
+    expect(section("Heading", null)).toBeNull();
     expect(section("Heading", "")).toBeNull();
-    expect(section("Heading", "(empty)")).toBeNull();
+    expect(section("Heading", bullet([]))).toBeNull();
+    expect(section("Heading", table(["a"], []))).toBeNull();
     expect(section("Heading", "body")).toBe("## Heading\nbody");
+  });
+
+  it("a body is kept whatever it says: it may be the brain's own text", () => {
+    // "(empty)" was what no rows rendered as, and was dropped as a body
+    // wherever it came from: a note or the one tag of that name went missing.
+    expect(section("Heading", "(empty)")).toBe("## Heading\n(empty)");
+    expect(section("Heading", bullet(["(empty)"]))).toBe("## Heading\n- (empty)");
+    expect(section("Heading", " \n")).toBe("## Heading\n \n");
   });
 
   it("join drops empty parts", () => {
@@ -572,7 +582,7 @@ describe("a name that does not show", () => {
           ["created", "RAG", "1"],
           ["renamed", "", "\u200b"],
         ],
-      ).split("\n"),
+      )!.split("\n"),
     ).toEqual([
       "What     Thought                         Id",
       "───────  ──────────────────────────────  ──────────────────────────────",

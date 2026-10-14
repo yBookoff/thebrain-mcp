@@ -253,6 +253,69 @@ describe("brain_get_thought", () => {
   });
 });
 
+describe("a text from the brain that is what no rows read as, or that shows nothing", () => {
+  // No rows used to render as the text "(empty)", and section() dropped that
+  // text wherever it came from. A note and a thought's one tag of that name
+  // went missing from brain_get_thought, which read as no note and no tag.
+  const TAG = "ffffffff-0000-4000-8000-000000000006";
+  const CHILD = "abababab-0000-4000-8000-000000000007";
+  const at = (id: string, name: string, kind = 1) => thought(name, { id, kind });
+  const noted = (markdown: string) => ({ modificationDateTime: "2026-10-10T12:00:00", markdown });
+  const view = async (shown: unknown, note: unknown): Promise<string> => {
+    const { call } = await connect([
+      ["GET /graph", () => shown],
+      ["GET /api/notes", () => note],
+    ]);
+    const result = await call("brain_get_thought", { brainId: BRAIN, thoughtId: THOUGHT });
+    expect(result.isError).toBe(false);
+    return result.text;
+  };
+
+  it("brain_get_thought prints a note, a tag, an alias and a neighbour named \"(empty)\"", async () => {
+    const shown = {
+      ...graph(thought("Mercury", { aliases: ["(empty)"] })),
+      tags: [at(TAG, "(empty)", 4)],
+      children: [at(CHILD, "(empty)")],
+    };
+    expect(await view(shown, noted("(empty)"))).toBe(
+      [
+        "# Mercury",
+        THOUGHT,
+        "",
+        "## Aliases",
+        "- (empty)",
+        "",
+        "## Tags",
+        "(empty)",
+        "",
+        "## Children",
+        `- (empty) — ${CHILD}`,
+        "",
+        "## Note",
+        "(empty)",
+      ].join("\n"),
+    );
+  });
+
+  it("a note of white space alone reads as none, as TheBrain reads it; one of what does not show is spelled out", async () => {
+    // TheBrain keeps white space alone in the note's file and reads it as ""
+    // with the time it was written (contract test): there is nothing to print.
+    expect(await view(graph(thought("RAG")), noted(""))).toBe(`# RAG\n${THOUGHT}`);
+    // A byte order mark alone is read back as one, and trim() took it for no
+    // note; a zero width space alone stood under its heading as nothing.
+    expect(await view(graph(thought("RAG")), noted("\ufeff"))).toBe(
+      `# RAG\n${THOUGHT}\n\n## Note\n(no visible character: U+FEFF)`,
+    );
+    expect(await view(graph(thought("RAG")), noted("\u200b\n"))).toBe(
+      `# RAG\n${THOUGHT}\n\n## Note\n(no visible character: U+200B U+000A)`,
+    );
+    // A note with something that shows is printed as it is, blanks and all.
+    expect(await view(graph(thought("RAG")), noted("  a\u200b \n"))).toBe(
+      `# RAG\n${THOUGHT}\n\n## Note\n  a\u200b \n`,
+    );
+  });
+});
+
 describe("a thought's kind in what the read tools print", () => {
   const TYPE = "eeeeeeee-0000-4000-8000-000000000005";
   const TAG = "ffffffff-0000-4000-8000-000000000006";
@@ -797,7 +860,7 @@ describe("a thought's label in what the read tools print", () => {
       expect(await view(graph(at(THOUGHT, "Mercury", 1, "planet")))).toBe(
         `# Mercury\n${THOUGHT}\n\n## Label\nplanet`,
       );
-      // Whatever it reads: a section of "(empty)" alone is one that is dropped.
+      // Whatever it reads: "(empty)" was the text section() dropped as no rows.
       expect(await view(graph(at(THOUGHT, "Mercury", 1, "(empty)")))).toBe(
         `# Mercury\n${THOUGHT}\n\n## Label\n(empty)`,
       );
@@ -9309,6 +9372,23 @@ describe("a read that fails inside a tool is not an answer that nothing is there
       expect(fresh.result).toEqual({ isError: false, text: "## Done\nnote created" });
     });
 
+    it("a note TheBrain reads back is one, though nothing in it shows; white space alone it reads as none", async () => {
+      // A byte order mark alone is read back as one (contract test), and
+      // trim() took it for no note: the result said the note was created.
+      const bom = [["GET /api/notes/", () => ({ ...held, markdown: "\ufeff" })]] as Route[];
+      expect((await set(bom)).result).toEqual({
+        isError: false,
+        text: "## Done\nnote replaced; the previous text (1 characters) is gone",
+      });
+      const unanswered = await set([...bom, ["POST /api/notes/", noAnswer]]);
+      expect(unanswered.result.text).toContain(
+        "Before the call the note held 1 characters, and they are gone if it did.",
+      );
+      // White space alone TheBrain reads as "", the same as no note.
+      const blank = [["GET /api/notes/", () => ({ ...held, markdown: "" })]] as Route[];
+      expect((await set(blank)).result).toEqual({ isError: false, text: "## Done\nnote created" });
+    });
+
     it("says which lines TheBrain did not keep, and only of a note that lost one", async () => {
       const REPLACED = "## Done\nnote replaced; the previous text (18 characters) is gone";
       const warned = (lines: string, more = ""): string =>
@@ -9535,6 +9615,16 @@ describe("a read that fails inside a tool is not an answer that nothing is there
       expect(
         (await bare.call("brain_delete_thought", { brainId: BRAIN, thoughtId: THOUGHT })).text,
       ).toBe(question(["- links: 0", "- children: 0"]));
+
+      // A note of a byte order mark alone is read back as one, and was left
+      // out of the question as none: consent to that is not consent to it.
+      const bom = await connect(
+        routes([["GET /api/notes/", () => ({ ...held, markdown: "\ufeff" })]]),
+        deleting,
+      );
+      expect(
+        (await bom.call("brain_delete_thought", { brainId: BRAIN, thoughtId: THOUGHT })).text,
+      ).toBe(question(["- links: 0", "- children: 0", "- note: 1 characters"]));
     });
   });
 

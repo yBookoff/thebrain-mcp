@@ -137,7 +137,7 @@ function reason(failure: PhrasingFailure): string {
 
 /** One line for each phrasing that got no answer: the phrasing, and why. */
 function failureLines(failures: readonly PhrasingFailure[]): string {
-  return bullet(failures.map((f) => `${quoted(f.phrasing)}: ${reason(f)}`));
+  return bullet(failures.map((f) => `${quoted(f.phrasing)}: ${reason(f)}`)) ?? "";
 }
 
 /**
@@ -188,11 +188,11 @@ function notSearchedSection(outcome: SearchOutcome): string | null {
  * Ranking by vectors has a best row for any query, so there it lists nothing
  * only when the index has no row a search ranks: by default the ordinary
  * thoughts, and an index can hold types and tags alone. That used to be a
- * result with no text in it at all. `auxiliary` is whether types and tags
- * were asked for.
+ * result with no text in it at all. `hits` is the table of the matches, null
+ * for none; `auxiliary` is whether types and tags were asked for.
  */
-function foundBody(outcome: SearchOutcome, hits: string, auxiliary: boolean): string {
-  if (outcome.matches.length > 0) return hits;
+function foundBody(outcome: SearchOutcome, hits: string | null, auxiliary: boolean): string {
+  if (hits !== null) return hits;
   const gone = outcome.gone.length;
   if (gone > 0) {
     return gone === 1
@@ -656,8 +656,7 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       return ("error" in note ? fail : ok)(
         join([
           `# ${shownName(graph.thought.name)}\n${graph.thought.id}${kindMark(graph.thought.kind)}`,
-          // Not through section(): a label can be "(empty)", which it drops.
-          labelBody === null ? null : `## Label\n${labelBody}`,
+          section("Label", labelBody),
           // One per line: an alias may hold a comma, and the list gets edited by value.
           section("Aliases", bullet(aliasesOf(graph.thought))),
           types.length > 1
@@ -682,11 +681,14 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
                 .map((a) => `${a.name ?? "(unnamed)"}${a.location ? ` — ${a.location}` : ""}`),
             ),
           ),
+          // As the read returns it. "" is no note, and a note of white space
+          // alone, which TheBrain keeps in its file and reads as "" (contract
+          // test). Anything else is the note, "(empty)" too, spelled out when
+          // nothing in it shows: a note of a byte order mark alone reads back
+          // as one, and trim() took it for none.
           "error" in note
             ? noteNotRead(note.error)
-            : note.value.trim() === ""
-              ? null
-              : section("Note", note.value),
+            : section("Note", note.value === "" ? null : shownName(note.value)),
         ]),
       );
     }),
@@ -893,7 +895,10 @@ export function registerReadTools(server: McpServer, ctx: ServerContext): void {
       const relabelled = types.some((t) => labelOf(t) !== null);
       return ok(
         join([
-          section("Types", bullet(types.map(line)) + (relabelled ? `\n${TYPE_LABEL}` : "")),
+          section(
+            "Types",
+            relabelled ? `${bullet(types.map(line))}\n${TYPE_LABEL}` : bullet(types.map(line)),
+          ),
           section("Tags", bullet(tags.map(line))),
           types.length === 0 && tags.length === 0
             ? section("Note", "This brain has no types or tags yet.")

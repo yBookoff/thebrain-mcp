@@ -204,11 +204,16 @@ app, and the agent writes there. Every tool takes an explicit `brainId`;
 
 **Notes are never truncated on read.** A truncated note silently corrupts the
 agent's understanding of what is already recorded. If a note is long, it is long.
+A note is what its read returns: `""` is none, and so is a note of white space
+alone, which TheBrain keeps in its file and reads as `""`. Anything else is
+printed, spelled out by its code points when nothing in it shows.
 
 **Output is formatted tables and sections, not raw JSON.** Cheaper in tokens and
 easier for a model to read. `respond.ts` has the primitives (`table`, `bullet`,
 `section`, `join`); empty sections are dropped so the model never has to skim
-past "Tags: (empty)".
+past "Tags: (empty)". No rows is `null` from `table` and `bullet`, and `section`
+drops a body of `null` or `""` without reading it: it dropped the text
+"(empty)", and a note or a thought's one tag of that name went with it.
 
 **A type or a tag is marked; an ordinary thought is not.** The write tools
 refuse an identifier of the wrong kind (§7, items 15, 17 and 18), and a read

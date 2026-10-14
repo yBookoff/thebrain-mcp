@@ -266,12 +266,17 @@ export function guard<A>(
 
 // ---------------------------------------------------------------- formatting
 
-/** Compact table: easier for a model to read than raw JSON, and fewer tokens. */
+/**
+ * Compact table: easier for a model to read than raw JSON, and fewer tokens.
+ * No rows is null, which `section()` drops. It used to be the text "(empty)",
+ * and `section()` dropped that text wherever it came from: a note, or the one
+ * tag a thought had, of that name went missing from `brain_get_thought`.
+ */
 export function table(
   headers: readonly string[],
   rows: ReadonlyArray<readonly string[]>,
-): string {
-  if (rows.length === 0) return "(empty)";
+): string | null {
+  if (rows.length === 0) return null;
   // A cell that holds something and shows nothing says what it holds: it
   // read as a cell with nothing in it, and at the end of a row a byte order
   // mark went with the padding. An empty cell is one the caller left empty.
@@ -286,13 +291,18 @@ export function table(
   );
 }
 
-export function bullet(items: readonly string[]): string {
-  return items.length === 0 ? "(empty)" : items.map((i) => `- ${i}`).join("\n");
+/** One line to an item; no items is null, as no rows is for `table()`. */
+export function bullet(items: readonly string[]): string | null {
+  return items.length === 0 ? null : items.map((i) => `- ${i}`).join("\n");
 }
 
-/** A titled section; empty sections are dropped. */
+/**
+ * A titled section, or null for a body of null or "": nothing to show. What
+ * a body says is never looked at: it may be the brain's own text, and a note
+ * or a name can be "(empty)" or white space like anything else.
+ */
 export function section(title: string, body: string | null): string | null {
-  if (body === null || body.trim() === "" || body === "(empty)") return null;
+  if (body === null || body === "") return null;
   return `## ${title}\n${body}`;
 }
 

@@ -73,7 +73,7 @@ Returns 403 if the API key does not belong to the currently logged-in user.
 
 | Method | Path | What it does |
 |---|---|---|
-| GET | `/api/notes/{brainId}/{thoughtId}` | The note as **Markdown** |
+| GET | `/api/notes/{brainId}/{thoughtId}` | The note as **Markdown**. A note of white space alone, by .NET's rule (U+0085 is of it, a byte order mark is not), is kept in `Notes.md` as sent and read as `""` with the time it was written; a byte order mark or a zero width space alone reads back as sent (contract test) |
 | GET | `/api/notes/{brainId}/{thoughtId}/html` | As HTML |
 | GET | `/api/notes/{brainId}/{thoughtId}/text` | As plain text |
 | POST | `/api/notes/{brainId}/{thoughtId}/update` | Create or **replace** the note (`{markdown}`) |

@@ -374,7 +374,9 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       // Read, and not written over when the read fails. The failure used to
       // be dropped: the note was replaced, and the result said "note
       // created" of a note it had not seen. A thought with no note is a 200
-      // from this read, so a failure is never that answer.
+      // from this read, so a failure is never that answer. "" is no note, as
+      // is white space alone, which TheBrain reads as ""; anything else is
+      // one, a byte order mark alone too, which trim() took for none.
       let previous: string;
       try {
         previous = await ctx.api.notes.get(bid, thoughtId);
@@ -394,7 +396,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         // hold the new text, and what it held before is known here alone.
         if (!mayHaveLanded(error)) throw error;
         const before =
-          previous.trim() === ""
+          previous === ""
             ? "The thought had no note before the call."
             : `Before the call the note held ${previous.length} characters, and they are gone if it did.`;
         return fail(
@@ -414,7 +416,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         join([
           section(
             "Done",
-            previous.trim() === ""
+            previous === ""
               ? "note created"
               : `note replaced; the previous text (${previous.length} characters) is gone`,
           ),
@@ -1141,7 +1143,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
           [
             `links: ${graph.links.length}`,
             `${under}: ${graph.children.length}`,
-            note.trim() === "" ? null : `note: ${note.length} characters`,
+            note === "" ? null : `note: ${note.length} characters`,
             attached > 0 ? `attachments: ${attached}` : null,
           ].filter((s): s is string => s !== null),
         ),
