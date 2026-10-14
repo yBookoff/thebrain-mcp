@@ -8487,22 +8487,47 @@ describe("a call that fails after it has written", () => {
       ]);
     });
 
-    it("a type that is accepted and does not read back stops the call, and the fields after it are listed as not tried", async () => {
-      // The other fields used to be in the type's patch, and were written.
-      // They are not sent now, and the type's error alone would not say so.
+    /** The line of a type the API accepted and a read did not show. */
+    const TYPE_UNREAD =
+      "TheBrain accepted the type, and the thought did not read back with it within 6 s: " +
+      "reads lag behind writes for seconds after a burst of them, and longer while writes " +
+      "keep coming. Do not send it again: brain_get_thought shows it once TheBrain catches up";
+    /** "Next" of a call that went past what did not read back to its end. */
+    const RAN =
+      "The call ran to its end, and nothing is rolled back. What is under Done was done. " +
+      `${NOT}. Nothing else is left: of what is under Failed, send again only what its line ` +
+      `says to, when it says, in a brain_update_thought call for ${THOUGHT}.`;
+    /** A brain where the type is taken and never reads back, and aliases do. */
+    const typeLags = (patch: Route[] = []): Route[] => {
+      let aliases: string[] = [];
+      return [
+        ...patch,
+        ["GET /graph", () => graph(thought("RAG", { aliases }))],
+        [
+          "GET /api/thoughts/",
+          (url) =>
+            url.pathname.endsWith(TYPE)
+              ? thought("Pattern", { id: TYPE, kind: 2 })
+              : thought("RAG", { aliases }),
+        ],
+        [
+          "PATCH /api/thoughts/",
+          (_url, body) => {
+            for (const op of body as Array<{ path: string; value?: unknown }>) {
+              if (op.path === "/aliases") aliases = op.value as string[];
+            }
+            return 200;
+          },
+        ],
+      ];
+    };
+
+    it("a type that is accepted and does not read back does not stop the call: the fields after it are written", async () => {
+      // The call used to stop at the type, list the rest under Skipped, and
+      // say to "fix the cause" of a lag. No other field depends on the type.
       vi.useFakeTimers();
       try {
-        const { call, sent } = await connect([
-          ["GET /graph", () => graph(thought("RAG", { aliases: [] }))],
-          [
-            "GET /api/thoughts/",
-            (url) =>
-              url.pathname.endsWith(TYPE)
-                ? thought("Pattern", { id: TYPE, kind: 2 })
-                : thought("RAG", { aliases: [] }),
-          ],
-          ["PATCH /api/thoughts/", () => 200],
-        ]);
+        const { call, sent } = await connect(typeLags());
         const pending = call("brain_update_thought", {
           brainId: BRAIN,
           thoughtId: THOUGHT,
@@ -8515,20 +8540,133 @@ describe("a call that fails after it has written", () => {
         expect(result.isError).toBe(true);
         expect(result.text).toBe(
           [
-            "## Failed",
-            `- typeId = "${TYPE}": TheBrain accepted the type, and the thought did not read ` +
-              "back with it within 6 s: reads lag behind writes for seconds after a burst of " +
-              "them, and longer while writes keep coming. Do not send it again: " +
-              "brain_get_thought shows it once TheBrain catches up",
-            "",
-            "## Skipped",
+            "## Done",
             '- name = "renamed"',
             "",
+            "## Failed",
+            `- typeId = "${TYPE}": ${TYPE_UNREAD}`,
+            "",
             "## Next",
-            `${AT_FIRST}${NOT}${STOPPED}${REST}`,
+            RAN,
           ].join("\n"),
         );
-        expect(sent("PATCH")).toEqual([[{ op: "replace", path: "/typeId", value: TYPE }]]);
+        expect(sent("PATCH")).toEqual([
+          [{ op: "replace", path: "/typeId", value: TYPE }],
+          [{ op: "replace", path: "/name", value: "renamed" }],
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("an alias edit after a type that did not read back is not held back by it", async () => {
+      // What holds back an edit built on a read from before an unread write
+      // is kept by field: the type's holds back a removal of the type, and
+      // not the aliases, which are written with no wait for the type.
+      vi.useFakeTimers();
+      try {
+        const { call, sent } = await connect(typeLags());
+        const pending = call("brain_update_thought", {
+          brainId: BRAIN,
+          thoughtId: THOUGHT,
+          typeId: TYPE,
+          addAliases: ["R.A.G."],
+        });
+        await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+        const result = await pending;
+
+        expect(result.isError).toBe(true);
+        expect(result.text).toBe(
+          [
+            "## Done",
+            '- aliases added: ["R.A.G."]',
+            '- aliases now: ["R.A.G."]',
+            "",
+            "## Failed",
+            `- typeId = "${TYPE}": ${TYPE_UNREAD}`,
+            "",
+            "## Next",
+            RAN,
+          ].join("\n"),
+        );
+        expect(sent("PATCH")).toEqual([
+          [{ op: "replace", path: "/typeId", value: TYPE }],
+          [{ op: "replace", path: "/aliases", value: ["R.A.G."] }],
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("past a type that did not read back the call still stops at a field refused, and lists both", async () => {
+      vi.useFakeTimers();
+      try {
+        const { call, sent } = await connect(typeLags([colours]));
+        const pending = call("brain_update_thought", {
+          brainId: BRAIN,
+          thoughtId: THOUGHT,
+          typeId: TYPE,
+          foregroundColor: "red",
+          addAliases: ["R.A.G."],
+        });
+        await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+        const result = await pending;
+
+        expect(result.isError).toBe(true);
+        expect(result.text).toBe(
+          [
+            "## Failed",
+            `- typeId = "${TYPE}": ${TYPE_UNREAD}`,
+            "- foregroundColor = \"red\": Color format is malformed - should be like '#123456'. " +
+              `(PATCH /api/thoughts/${BRAIN}/${THOUGHT})`,
+            "",
+            "## Skipped",
+            "- aliases",
+            "",
+            "## Next",
+            "The call went on past what did not read back and stopped at the next failure, " +
+              `and nothing is rolled back. ${NOT}${STOPPED}${REST}`,
+          ].join("\n"),
+        );
+        expect(sent("PATCH")).toHaveLength(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a removal held back behind this server's unread type is told to be sent again, and the rest is written", async () => {
+      // A removal built on a read from before the type would find none to
+      // remove, so it waits for the type and is not sent. The name does not
+      // depend on it, and is written.
+      vi.useFakeTimers();
+      try {
+        const { call, sent } = await connect(typeLags());
+        const first = call("brain_update_thought", { brainId: BRAIN, thoughtId: THOUGHT, typeId: TYPE });
+        await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+        expect((await first).text).toBe(TYPE_UNREAD);
+
+        const second = call("brain_update_thought", {
+          brainId: BRAIN,
+          thoughtId: THOUGHT,
+          typeId: null,
+          name: "renamed",
+        });
+        await vi.advanceTimersByTimeAsync(PAST_READ_BACK);
+        const result = await second;
+
+        expect(result.isError).toBe(true);
+        expect(result.text).toMatch(
+          new RegExp(
+            '^## Done\\n- name = "renamed"\\n\\n## Failed\\n- typeId = null: this server\'s write ' +
+              "to the thought's type \\d+ s ago does not read back yet: .*, so this one was not " +
+              `sent\\. Send it again once brain_get_thought shows the type ${TYPE}\\n\\n## Next\\n`,
+          ),
+        );
+        expect(result.text.endsWith(RAN)).toBe(true);
+        expect(sent("PATCH")).toEqual([
+          [{ op: "replace", path: "/typeId", value: TYPE }],
+          [{ op: "replace", path: "/name", value: "renamed" }],
+        ]);
       } finally {
         vi.useRealTimers();
       }

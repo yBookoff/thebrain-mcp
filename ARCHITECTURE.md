@@ -1556,7 +1556,12 @@ so the wait is six seconds, past the 600, and a write it does not see is
 with it within 6 s … Do not send it again". That is no write that may have
 landed, which says to look first: this one landed, and a look would show the
 old value. It stands under "Failed", or is the whole result, and never under
-"Done": aliases listed there read as a list to build on. Two seconds were
+"Done": aliases listed there read as a list to build on. It does not stop
+`brain_update_thought`, which goes on to the fields after it: no other field
+depends on the type, the alias edit waits on unread aliases alone, and the
+call used to stop there and tell the model to "fix the cause" of a lag and
+send the rest again. "Next" then says that the call ran to its end, and to
+send again only what a line under "Failed" says to. Two seconds were
 short of a burst of 300. Six cost nothing where the write reads back, and
 the pause between reads doubles each second, so a wait asks some 85 reads
 where two seconds asked 80.
@@ -1588,9 +1593,7 @@ is the whole of the result. So does a create that is refused, since nothing
 hangs on a thought that was not made, and the call is its own retry. The
 first of several writes failing is given the shape, with nothing under
 "Done": its error alone says nothing of the writes that were not sent after
-it. That is not only tidiness. A type that was accepted and did not read back
-used to have the other fields in its patch, and now stops the call ahead of
-them. The result of a call written whole is what it was, which tests pin for
+it. The result of a call written whole is what it was, which tests pin for
 all four tools.
 
 **A create with no answer** is told as `brain_ingest` tells it: the thought

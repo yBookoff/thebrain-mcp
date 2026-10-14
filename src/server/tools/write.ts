@@ -302,6 +302,14 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       //
       // The type goes first. What refuses a typeId refuses it ahead of the
       // write, and that has to be ahead of every write of the call.
+      //
+      // A type accepted and not read back is no refusal, and the call goes
+      // on: it used to stop there and leave the rest for a second call,
+      // told to "fix the cause" of a lag. No other field depends on the type.
+      // Each is a patch of its own path, and the alias edit, a read and a
+      // write of /aliases alone, waits only on aliases of its own unread.
+      // A removal held back unsent behind this process's unread type goes on
+      // the same way; its line says when to send it again.
       const typeFirst = [
         ...provided.filter(([key]) => key === "typeId"),
         ...provided.filter(([key]) => key !== "typeId"),
@@ -313,11 +321,13 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
           await ctx.api.thoughts.update(bid, thoughtId, change);
           return [line(field)];
         },
+        goesOnUnread: field[0] === "typeId",
       }));
       let aliasLines: string[] = [];
       if (editsAliases) {
         steps.push({
           what: "aliases",
+          goesOnUnread: true,
           run: async () => {
             // With the name this call has just written: the read behind an
             // alias edit still returns the old one, and the old name kept as
@@ -338,13 +348,21 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
           },
         });
       }
-      const { done, stopped } = await inOrder(steps);
-      if (stopped !== null) {
-        if (wasAll(done, stopped)) throw stopped.error;
+      const { done, passed, stopped } = await inOrder(steps);
+      if (stopped !== null || passed.length > 0) {
+        const failures = [...passed, ...(stopped === null ? [] : [stopped])];
+        if (done.length === 0 && failures.length === 1 && (stopped?.skipped.length ?? 0) === 0) {
+          throw failures[0]!.error;
+        }
         return writtenInPart(
           done,
           stopped,
-          `Fix the cause and send only the rest, in a brain_update_thought call for ${thoughtId}.`,
+          stopped === null
+            ? "Nothing else is left: of what is under Failed, send again only what its line " +
+                `says to, when it says, in a brain_update_thought call for ${thoughtId}.`
+            : `Fix the cause and send only the rest, in a brain_update_thought call for ${thoughtId}.`,
+          [],
+          passed,
         );
       }
       return ok(section("Done", bullet([...provided.map(line), ...aliasLines]))!);
@@ -1207,17 +1225,31 @@ interface Step {
   what: string;
   /** Writes it, and resolves to the lines "Done" has for it. */
   run: () => Promise<string[]>;
+  /**
+   * The call goes on past this step's `not_read_back`. That is no refusal:
+   * the API took the write, or this process held it back behind a write of
+   * its own that it has not seen read back. A connection gone after the
+   * write ends so too, and the next step's request then fails on its own.
+   * Set only where no step after it depends on what it writes.
+   */
+  goesOnUnread?: boolean;
+}
+
+/** A step that failed, and why. */
+interface Failure {
+  what: string;
+  error: unknown;
 }
 
 /** The step a call stopped at, why, and the steps after it, which were not tried. */
-interface Stopped {
-  what: string;
-  error: unknown;
+interface Stopped extends Failure {
   skipped: string[];
 }
 
 /**
- * Runs the steps in order and stops at the first that fails.
+ * Runs the steps in order and stops at the first that fails, but for a
+ * step's `not_read_back` where it `goesOnUnread`: that one is in `passed`,
+ * and the steps after it are run.
  *
  * A batch goes on past a failure (`ingest`), and a call about one thought
  * does not. A batch's writes are in flight together, and what it leaves for
@@ -1227,17 +1259,25 @@ interface Stopped {
  * is most often the connection, and every further try could wait out the
  * timeout with the identifier still untold.
  */
-async function inOrder(steps: readonly Step[]): Promise<{ done: string[]; stopped: Stopped | null }> {
+async function inOrder(
+  steps: readonly Step[],
+): Promise<{ done: string[]; passed: Failure[]; stopped: Stopped | null }> {
   const done: string[] = [];
+  const passed: Failure[] = [];
   for (const [i, step] of steps.entries()) {
     try {
       done.push(...(await step.run()));
     } catch (error) {
+      const unread = error instanceof TheBrainError && error.kind === "not_read_back";
+      if (unread && step.goesOnUnread === true) {
+        passed.push({ what: step.what, error });
+        continue;
+      }
       const skipped = steps.slice(i + 1).map((s) => s.what);
-      return { done, stopped: { what: step.what, error, skipped } };
+      return { done, passed, stopped: { what: step.what, error, skipped } };
     }
   }
-  return { done, stopped: null };
+  return { done, passed, stopped: null };
 }
 
 /**
@@ -1245,24 +1285,22 @@ async function inOrder(steps: readonly Step[]): Promise<{ done: string[]; stoppe
  * before it, nothing left after it. Then the error is the whole of the
  * result, and reads as it did.
  *
- * Not so the first of several. Its error alone says nothing of the rest, and
- * the rest was not sent: a type that was accepted and did not read back used
- * to have the other fields in the same patch, and now stops the call ahead
- * of them.
+ * Not so the first of several. Its error alone says nothing of the rest.
  */
 function wasAll(done: readonly string[], stopped: Stopped): boolean {
   return done.length === 0 && stopped.skipped.length === 0;
 }
 
 /**
- * The result of a call that stopped part way. It is an error, so that it is
- * not read as done, and it is not the error alone, which used to be read as
- * nothing done: `brain_create_thought` lost the identifier of the thought it
- * had made, and the call sent again made a second.
+ * The result of a call that stopped part way, or went on past a write that
+ * did not read back (`passed`). It is an error, so that it is not read as
+ * done, and it is not the error alone, which used to be read as nothing
+ * done: `brain_create_thought` lost the identifier of the thought it had
+ * made, and the call sent again made a second.
  *
  * The sections are `brain_ingest`'s: what was done, by identifier; what
- * failed and why; what was not tried; what to call for the rest. `next` is
- * the tool's own last sentences.
+ * failed and why, what was gone past first; what was not tried; what to call
+ * for the rest. `next` is the tool's own last sentences.
  *
  * "Failed" is hedged, always. A step can fail after its write went through:
  * a type that was accepted and did not read back, a write that got no
@@ -1270,28 +1308,37 @@ function wasAll(done: readonly string[], stopped: Stopped): boolean {
  */
 function writtenInPart(
   done: readonly string[],
-  stopped: Stopped,
+  stopped: Stopped | null,
   next: string,
   warnings: readonly string[] = [],
+  passed: readonly Failure[] = [],
 ): ToolResponse {
   // "Nothing was written" is the refusal's own sentence, and true of the
-  // call only while nothing stands under "Done".
-  const reason = describeError(stopped.error, done.length === 0);
+  // call only while nothing stands under "Done" and nothing was gone past:
+  // a type gone past may be in the brain.
+  const alone = done.length === 0 && passed.length === 0;
+  const failed = [...passed, ...(stopped === null ? [] : [stopped])].map(
+    ({ what, error }) => `${what}: ${describeError(error, alone)}${unanswered(error)}`,
+  );
+  const skipped = stopped?.skipped ?? [];
+  const course =
+    passed.length === 0
+      ? "The call stopped at its first failure"
+      : stopped === null
+        ? "The call ran to its end"
+        : "The call went on past what did not read back and stopped at the next failure";
   return fail(
     join([
       section("Done", bullet(done)),
-      section(
-        "Failed",
-        bullet([`${stopped.what}: ${reason}${unanswered(stopped.error)}`]),
-      ),
-      section("Skipped", bullet(stopped.skipped)),
+      section("Failed", bullet(failed)),
+      section("Skipped", bullet(skipped)),
       warnings.length > 0 ? section("Warning", bullet(warnings)) : null,
       section(
         "Next",
-        "The call stopped at its first failure, and nothing is rolled back. " +
+        `${course}, and nothing is rolled back. ` +
           (done.length > 0 ? "What is under Done was done. " : "") +
           "What is under Failed was not, unless its line says otherwise" +
-          (stopped.skipped.length > 0 ? ", and what is under Skipped was not tried. " : ". ") +
+          (skipped.length > 0 ? ", and what is under Skipped was not tried. " : ". ") +
           next,
       ),
     ]),
