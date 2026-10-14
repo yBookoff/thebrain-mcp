@@ -374,14 +374,6 @@ silent wrong behaviour rather than a loud failure:
   (`#pastUnread()`) and is refused, nothing sent, if no read does: built on
   the old value it would undo the write. Another process's writes are not
   known.
-- **The catch-all 403 to a write is not a refusal to trust.** Under
-  concurrent writes TheBrain now and then answers a create with "To use the
-  TheBrain API…" and makes the thought all the same (4 of 4, L45).
-  `mayHaveLanded()` takes that 403 to anything but a `GET` for a write that
-  may have landed, as it takes a timeout and an answer whose body broke off
-  after its status: never send it again, and say why through `landedWhy()`.
-  Every write refusal measured in those words is refused before sending; keep
-  any new one there, or it will read as "may have landed".
 - **A note of white space alone is kept in its file and read as `""`**, by
   .NET's rule, not `trim()`'s: U+0085 is white space to it and a byte order
   mark is not. A note is what its read returns: `""` is none, anything else is
@@ -516,10 +508,14 @@ The sweep starts past the newest entry the brain logged before the run's first
 write, never deletes the home thought, and deletes in rounds a second apart
 with no two thoughts that share a link in one round (`test/sweep.ts`). A test
 that a read is behind a write writes until one first read is behind, forty
-tries at most; never "stale > 0 of N". A read-back is polled, not given a few
-fixed seconds: under writes to another brain it lagged up to 30 s. A contract
-test with no bound of its own has `DEFAULT_TEST_MS` (60 s), not vitest's 5 s;
-a read-back polls with `eventually()`'s default or 20 s.
+tries at most; never "stale > 0 of N". A read-back is polled, not given a
+fixed pause. A contract test with no bound of its own has `DEFAULT_TEST_MS`
+(20 s), not vitest's 5 s; a read-back polls with `eventually()`'s default of
+5 s, and TheBrain's search, about five seconds behind, is waited for with a
+bound of its own. Tests of bursts of writes sent at once, which the server is
+not built for, run only with `THEBRAIN_LOAD_TESTS=1` as well, in the
+`describe.runIf(LOAD_TESTS)` block of `test/resources.integration.test.ts`;
+a new test under load goes there.
 
 When a claim about the API goes into a document, it should have a test behind it.
 Two documented claims in this project's history turned out to be wrong precisely
