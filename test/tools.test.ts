@@ -182,6 +182,16 @@ const generic403 = (): Response =>
     status: 403,
     headers: { "content-type": "application/json" },
   });
+/** A 200 whose connection fails once its status has come, before its body. */
+const brokenOff = (): Response =>
+  new Response(
+    new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new TypeError("terminated", { cause: new Error("other side closed") }));
+      },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
 
 /** What `describeError()` adds to an identifier nobody has, */
 const NOBODY_HAS_IT =
@@ -7603,6 +7613,43 @@ describe("a call that fails after it has written", () => {
       );
     });
 
+    it("a create answered with the catch-all 403, or whose answer broke off, is one that may have landed", async () => {
+      // The 403 to a create under concurrent writes made the thought 4 times
+      // of 4 (docs/api-map.md, L45), and was told as an identifier that names
+      // nothing. A 200 whose body broke off was no TheBrainError at all.
+      const next = (why: string): string =>
+        `\n\n## Next\n${why}, so TheBrain may have made "RAG" all the same, and there is ` +
+        "no identifier to give for it. Before creating it again, look for it next to " +
+        `${PARENT} with brain_get_thought.`;
+      for (const [answer, text] of [
+        [
+          generic403,
+          `TheBrain answered 403 and named no cause (POST /api/thoughts/${BRAIN}). It answers ` +
+            "a write so when it refuses it, as for an identifier that names nothing in this " +
+            "brain, and now and then when it has carried it out." +
+            next("The 403 does not say whether the create was carried out"),
+        ],
+        [
+          brokenOff,
+          "TheBrain answered 200, and the connection failed before the rest of the answer " +
+            "came (other side closed). Check that the TheBrain desktop app is running and its " +
+            "local API is enabled." +
+            next("The answer to the create broke off after its status"),
+        ],
+      ] as const) {
+        const { call, calls } = await connect(routes([["POST /api/thoughts/", answer]]));
+        const result = await call("brain_create_thought", {
+          brainId: BRAIN,
+          name: "RAG",
+          parentId: PARENT,
+        });
+        expect(result.isError).toBe(true);
+        expect(result.text).toBe(text);
+        // Sent once: a second create would make a second thought.
+        expect(writes(calls)).toEqual([`POST /api/thoughts/${BRAIN}`]);
+      }
+    });
+
     it("a create that is refused is the error it was, and one refused for no cause says what to read", async () => {
       // The 400 a create gets under a parent deleted a moment ago. It used
       // to be passed on as it came, "Could not create thought. (POST …)".
@@ -8583,9 +8630,14 @@ describe("what brain_ingest says of a batch written in part", () => {
     expect(result.text).toContain(
       [
         "## Failed",
+        // A create answered with the catch-all 403 may have been carried out
+        // (docs/api-map.md, L45): its line says so, and where to look.
         '- thought "Refused" (refused): TheBrain answered 403 and named no cause ' +
-          `(POST /api/thoughts/${BRAIN}). That is its answer when an identifier in the call ` +
-          `names nothing in this brain.${NOBODY_HAS_IT}`,
+          `(POST /api/thoughts/${BRAIN}). It answers a write so when it refuses it, as for ` +
+          "an identifier that names nothing in this brain, and now and then when it has " +
+          "carried it out. The 403 does not say whether it was carried out, so TheBrain may " +
+          "have created it all the same: before creating it again, look for it next to its " +
+          "parent with brain_get_thought.",
         '- thought "Bare" (bare): Could not create thought. TheBrain named no cause ' +
           `(POST /api/thoughts/${BRAIN}). It answers so when the parent named for the new ` +
           "thought was deleted a moment ago, or the type named for it is no thought of this " +

@@ -6,7 +6,7 @@
  * call; the latter is a protocol failure it never gets to read.
  */
 
-import { TheBrainError, shownName } from "../api/index.js";
+import { TheBrainError, mayHaveLanded, shownName } from "../api/index.js";
 import { ThoughtKind } from "../api/types.js";
 import { EmbedderUnavailableError } from "../semantic/embedder.js";
 
@@ -107,6 +107,15 @@ export function describeError(error: unknown, alone = true): string {
             "nothing of the thought or of its identifier."
           );
         }
+        // A write: refused in these words, and now and then carried out with
+        // them under concurrent writes (L45). The answer does not say which.
+        if (mayHaveLanded(error)) {
+          return (
+            `TheBrain answered 403 and named no cause${requestOf(error)}. It answers a write ` +
+            "so when it refuses it, as for an identifier that names nothing in this brain, and " +
+            "now and then when it has carried it out."
+          );
+        }
         // Nor of an identifier, when the request carries none: the app's
         // state and the list of brains were told that one of the call's
         // names nothing in this brain.
@@ -166,6 +175,23 @@ export function describeError(error: unknown, alone = true): string {
 
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/**
+ * Why a write that failed may have been carried out all the same, as the
+ * opening of a sentence, for an error `mayHaveLanded()` holds of. `to` names
+ * the write: "the create", "the deletion".
+ */
+export function landedWhy(error: unknown, to?: string): string {
+  const of = to === undefined ? "" : ` to ${to}`;
+  if (error instanceof TheBrainError && error.kind === "forbidden") {
+    return `The 403 does not say whether ${to ?? "it"} was carried out`;
+  }
+  // A status with a `network` failure is an answer whose body broke off.
+  if (error instanceof TheBrainError && error.status !== undefined) {
+    return `The answer${of} broke off after its status`;
+  }
+  return `No answer came${of}`;
 }
 
 const GONE = "It may have been deleted, or be another brain's.";

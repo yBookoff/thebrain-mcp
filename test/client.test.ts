@@ -38,6 +38,23 @@ function clientReturning(
   return { client, fetchImpl };
 }
 
+/** The router's words: its answer for a path outside `/api`, and the API's catch-all 403. */
+const ROUTER_403 =
+  "To use the TheBrain API, make requests to /api (e.g. /api/brains). " +
+  "An API key is required via the Authorization header.";
+
+/** A 200 whose body fails with `failure` once its status has come. */
+function brokenOff(failure: Error): Response {
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(failure);
+      },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
 describe("UUID validation", () => {
   it("accepts a well-formed one", () => {
     expect(isUuid(BRAIN)).toBe(true);
@@ -435,6 +452,87 @@ describe("finding TheBrain", () => {
     expect(answered).toMatchObject({ kind: "not_found" });
     expect(mayHaveLanded(answered)).toBe(false);
     expect(mayHaveLanded(new Error("anything else"))).toBe(false);
+  });
+
+  it("a write answered with the catch-all 403 may have landed, and is not sent again", async () => {
+    // Under concurrent writes TheBrain now and then answers a create so and
+    // makes the thought all the same: 4 of 4 (docs/api-map.md, L45).
+    const { client, fetchImpl } = clientReturning(ROUTER_403, {
+      status: 403,
+      contentType: "text/plain",
+    });
+    const create = await client
+      .post(`/api/thoughts/${BRAIN}`, { json: { name: "A" } })
+      .catch((e: unknown) => e);
+    expect(create).toMatchObject({ kind: "forbidden", status: 403, method: "POST" });
+    expect(mayHaveLanded(create)).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // Any write: the 403 says nothing of what was done.
+    for (const write of [
+      client.patch(`/api/thoughts/${BRAIN}/${BRAIN}`, { jsonPatch: [] }),
+      client.delete(`/api/links/${BRAIN}/${BRAIN}`),
+    ]) {
+      expect(mayHaveLanded(await write.catch((e: unknown) => e))).toBe(true);
+    }
+    // A read wrote nothing either way.
+    const read = await client.get(`/api/thoughts/${BRAIN}/${BRAIN}/graph`).catch((e: unknown) => e);
+    expect(read).toMatchObject({ kind: "forbidden" });
+    expect(mayHaveLanded(read)).toBe(false);
+
+    // A 403 in other words names a cause; and with no request named,
+    // nothing says it was a write.
+    const worded = await clientReturning('"Refused for a reason"', { status: 403 })
+      .client.post(`/api/thoughts/${BRAIN}`, { json: { name: "A" } })
+      .catch((e: unknown) => e);
+    expect(worded).toMatchObject({ kind: "forbidden" });
+    expect(mayHaveLanded(worded)).toBe(false);
+    expect(mayHaveLanded(new TheBrainError("forbidden", ROUTER_403))).toBe(false);
+  });
+
+  // `response.text()` failing used to leave the client as it was thrown: no
+  // TheBrainError, and a create answered 200 read as one that failed.
+  it.each([
+    [
+      "the connection fails",
+      (): Error => new TypeError("terminated", { cause: new Error("other side closed") }),
+      "the connection failed before the rest of the answer came (other side closed)",
+    ],
+    [
+      "the time runs out",
+      (): Error => new DOMException("timed out", "TimeoutError"),
+      "the rest of the answer did not come within 30000 ms",
+    ],
+  ])("an answer whose body breaks off as %s is one that may have landed", async (_name, failure, said) => {
+    const fetchImpl = vi.fn(
+      async (_input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]): Promise<Response> =>
+        brokenOff(failure()),
+    );
+    const client = new TheBrainClient({
+      apiKey: KEY,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const create = await client
+      .post(`/api/thoughts/${BRAIN}`, { json: { name: "A" } })
+      .catch((e: unknown) => e);
+    expect(create).toBeInstanceOf(TheBrainError);
+    expect(create).toMatchObject({
+      kind: "network",
+      status: 200,
+      method: "POST",
+      message: `TheBrain answered 200, and ${said}`,
+    });
+    expect(mayHaveLanded(create)).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    // A read's, and the bytes of an attachment, are the same failure.
+    for (const read of [
+      client.get(`/api/thoughts/${BRAIN}/${BRAIN}`),
+      client.getBytes(`/api/attachments/${BRAIN}/${BRAIN}/file-content`),
+    ]) {
+      const failed = await read.catch((e: unknown) => e);
+      expect(failed).toMatchObject({ kind: "network", status: 200, method: "GET" });
+      expect(mayHaveLanded(failed)).toBe(false);
+    }
   });
 
   it.each([

@@ -44,7 +44,7 @@ export {
   emptyOn400,
   mayHaveLanded,
 } from "./client.js";
-export { TheBrainError, type ApiErrorKind } from "./errors.js";
+export { TheBrainError, isCatchAll, type ApiErrorKind } from "./errors.js";
 export {
   RecentWrites,
   WRITTEN_KEPT_MS,

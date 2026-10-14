@@ -41,6 +41,7 @@ import {
   guard,
   join,
   kindMark,
+  landedWhy,
   ok,
   section,
   sentence,
@@ -173,7 +174,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         return fail(
           join([
             describeError(error),
-            section("Next", afterNoAnswer(named, parentId, hasNote, tags.length > 0)),
+            section("Next", afterNoAnswer(error, named, parentId, hasNote, tags.length > 0)),
           ]),
         );
       }
@@ -393,8 +394,8 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
             describeError(error),
             section(
               "Next",
-              "No answer came to the write, so TheBrain may have replaced the note all the " +
-                `same. ${before} Read the thought with brain_get_thought to see which text ` +
+              `${landedWhy(error, "the write")}, so TheBrain may have replaced the note all ` +
+                `the same. ${before} Read the thought with brain_get_thought to see which text ` +
                 "it has. Sent again, this call writes the same text.",
             ),
           ]),
@@ -446,8 +447,8 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
               describeError(error),
               section(
                 "Next",
-                "No answer came to the write, so TheBrain may have appended the text all " +
-                  "the same. Read the note with brain_get_thought before sending this call " +
+                `${landedWhy(error, "the write")}, so TheBrain may have appended the text ` +
+                  "all the same. Read the note with brain_get_thought before sending this call " +
                   "again: sent again after an append that went through, the text would be " +
                   "in the note twice.",
               ),
@@ -735,9 +736,9 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
               describeError(error),
               section(
                 "Next",
-                "No answer came to the deletion, so TheBrain may have removed the link all the " +
-                  "same. Sent again as it was, this call removes that link if it is there still, " +
-                  "and nothing else.",
+                `${landedWhy(error, "the deletion")}, so TheBrain may have removed the link ` +
+                  "all the same. Sent again as it was, this call removes that link if it is " +
+                  "there still, and nothing else.",
               ),
             ]),
           );
@@ -887,7 +888,7 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
               describeError(error),
               section(
                 "Next",
-                `No answer came to the create, so TheBrain may have made the ${kind} ` +
+                `${landedWhy(error, "the create")}, so TheBrain may have made the ${kind} ` +
                   `"${asked}" all the same, and there is no identifier to give for it. ` +
                   (kind === "tag"
                     ? "Send this call again: under the name of a tag the brain has TheBrain " +
@@ -1182,7 +1183,7 @@ function writtenInPart(
       section("Done", bullet(done)),
       section(
         "Failed",
-        bullet([`${stopped.what}: ${reason}${mayHaveLanded(stopped.error) ? UNANSWERED : ""}`]),
+        bullet([`${stopped.what}: ${reason}${unanswered(stopped.error)}`]),
       ),
       section("Skipped", bullet(stopped.skipped)),
       warnings.length > 0 ? section("Warning", bullet(warnings)) : null,
@@ -1198,8 +1199,15 @@ function writtenInPart(
   );
 }
 
-/** Added to a write that got no answer, which is not a write that failed. */
-const UNANSWERED = " — no answer came, so TheBrain may have carried it out all the same";
+/** Added to a write that may have been carried out, which is not a write that failed. */
+function unanswered(error: unknown): string {
+  if (!mayHaveLanded(error)) return "";
+  const why = landedWhy(error);
+  return (
+    ` — ${why.charAt(0).toLowerCase()}${why.slice(1)}, ` +
+    "so TheBrain may have carried it out all the same"
+  );
+}
 
 /** What a tool that deletes answers before anything else, with the gate shut. */
 const DELETION_DISABLED =
@@ -1383,13 +1391,15 @@ function aboutTheCall(error: unknown): boolean {
 }
 
 /**
- * What follows a create that got no answer. The thought may be there with no
+ * What follows a create that may have been carried out (`mayHaveLanded()`):
+ * no answer, one that broke off, or the catch-all 403. The thought may be there with no
  * identifier to give, so this says where to look before it is created again:
  * next to its parent, or, for a thought created with none, by name. The
  * index knows a new thought only after a sync, and a search that missed it
  * for that reason would be read as "not there".
  */
 function afterNoAnswer(
+  error: unknown,
   name: string,
   parentId: string | undefined,
   hasNote: boolean,
@@ -1400,7 +1410,7 @@ function afterNoAnswer(
     ...(hasTags ? ["its tags with brain_tag"] : []),
   ];
   return (
-    `No answer came to the create, so TheBrain may have made "${name}" all the same, ` +
+    `${landedWhy(error, "the create")}, so TheBrain may have made "${name}" all the same, ` +
     "and there is no identifier to give for it. Before creating it again, look for it " +
     (parentId !== undefined
       ? `next to ${parentId} with brain_get_thought.`

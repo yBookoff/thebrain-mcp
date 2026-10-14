@@ -12,6 +12,7 @@
 import {
   TheBrainError,
   extractErrorMessage,
+  isCatchAll,
   kindForStatus,
   looksLikeHtml,
 } from "./errors.js";
@@ -218,7 +219,8 @@ export class TheBrainClient {
     const contentType = response.headers.get("content-type");
 
     if (options.raw && response.ok) {
-      const buf = new Uint8Array(await response.arrayBuffer());
+      const bytes = await this.#body(response, method, path, () => response.arrayBuffer());
+      const buf = new Uint8Array(bytes);
       // A router miss returns HTML with status 200, so check here too.
       const head = new TextDecoder().decode(buf.subarray(0, 64));
       if (looksLikeHtml(head, contentType)) {
@@ -231,7 +233,7 @@ export class TheBrainClient {
       return buf as T;
     }
 
-    const text = await response.text();
+    const text = await this.#body(response, method, path, () => response.text());
 
     // The critical check: 200 plus HTML means the path missed the API router.
     if (looksLikeHtml(text, contentType)) {
@@ -265,6 +267,35 @@ export class TheBrainClient {
         body: text.slice(0, 200),
         cause,
       });
+    }
+  }
+
+  /**
+   * The body of an answer whose status has come. Reading it is a failure of
+   * its own: the connection can drop, or the time run out, after the status
+   * line. That failure used to leave here as it was thrown, no
+   * `TheBrainError`, and a create answered 200 whose body was lost read as
+   * a create that failed. It is a `network` failure that keeps the status:
+   * the write went out and its answer did not all come (`mayHaveLanded`).
+   */
+  async #body<B>(
+    response: Response,
+    method: string,
+    path: string,
+    read: () => Promise<B>,
+  ): Promise<B> {
+    try {
+      return await read();
+    } catch (cause) {
+      const timedOut = cause instanceof Error && cause.name === "TimeoutError";
+      throw new TheBrainError(
+        "network",
+        `TheBrain answered ${response.status}, and ` +
+          (timedOut
+            ? `the rest of the answer did not come within ${this.#timeoutMs} ms`
+            : "the connection failed before the rest of the answer came" + inFetchWords(cause)),
+        { status: response.status, method, path, cause },
+      );
     }
   }
 
@@ -362,17 +393,27 @@ function isConnectionRefused(error: unknown): boolean {
  * name it by. Measured by dropping the answer to a create on its way back:
  * the thought was there 3 times of 3.
  *
+ * An answer whose body broke off after its status is one too: the status
+ * may well be a 200.
+ *
+ * And so is the catch-all 403 to a write (docs/api-map.md, L45). Under
+ * concurrent writes TheBrain now and then answers a create with it and
+ * makes the thought all the same: 4 of 4, a `101` in the log for every
+ * request of the burst. The same 403 is its answer to some writes it does
+ * refuse, and nothing in it tells the two apart. Every refusal of a write
+ * measured in those words is one the code refuses before sending, so the
+ * write that gets them is taken for one that may have been carried out:
+ * never repeated, and told to be looked for first.
+ *
  * A read that got no answer is not one: carried out or not, it wrote
  * nothing. A write is preceded by reads, of a type, a tag or a parent, and
  * one of those timing out used to pass for a thought that may be there.
  */
 export function mayHaveLanded(error: unknown): boolean {
-  return (
-    error instanceof TheBrainError &&
-    error.kind === "network" &&
-    error.method !== "GET" &&
-    !isConnectionRefused(error.cause)
-  );
+  if (!(error instanceof TheBrainError) || error.method === "GET") return false;
+  // With no request named, nothing says it was a write.
+  if (isCatchAll(error)) return error.method !== undefined;
+  return error.kind === "network" && !isConnectionRefused(error.cause);
 }
 
 function routeMissMessage(): string {

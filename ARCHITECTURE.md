@@ -1339,6 +1339,18 @@ the same way, and its line says that it may have been carried out and to
 read the thought before sending it again. The plan sent again finds such a
 note there, and keeps it.
 
+**Nor is a write answered with the catch-all 403, or one whose answer broke
+off.** Under concurrent writes TheBrain now and then answers a create with
+the router's 403 and makes the thought all the same, 4 of 4 (docs/api-map.md,
+L45). The same words are its answer to some writes it refuses, and every one
+of those measured is refused here before it is sent, so `mayHaveLanded()`
+takes that 403 to anything but a `GET` for a write that may have landed: a
+read costs less than a second thought. An answer whose body could not be
+read after its status, a create's 200 among them, escaped the client as no
+`TheBrainError` and read as a failure; it is a `network` failure now, with
+the status kept. Each tool says which of the three it was (`landedWhy()`):
+no answer, an answer that broke off, or a 403 that does not say.
+
 **A line under "Failed" is explained as a call's own failure is.**
 `describeError()` (§5) is what a call that fails whole is answered with, and
 a batch's lines did not go through it. A create answered with the catch-all
@@ -1758,7 +1770,10 @@ connection failed before an answer came, with `fetch`'s own words for it in
 brackets (`read ECONNRESET`, `other side closed`). After the first nothing
 was sent. After the other two a write may have been carried out, which is
 the line `mayHaveLanded()` draws (§4), and a connection that was there and
-dropped used to be worded as the first.
+dropped used to be worded as the first. A fourth keeps the status: the answer
+came and its body broke off (`TheBrain answered 200, and the connection
+failed before the rest of the answer came`), and a write may have been
+carried out after it too.
 
 **The status is not the meaning.** The API answers a `brainId` that is no
 brain with a 401, the status of a rejected key, in other words. It answers
@@ -3444,11 +3459,14 @@ by the log in one round, a second after the round before: four or five
 rounds, four or five seconds a run. `test/sweep.ts` holds the rules and
 `test/sweep.test.ts` holds them to it.
 
-**A burst is not a promise of 100 answers.** With another session at work in
-the app, one create of a burst is now and then answered with the catch-all
-403, and its thought is made all the same (4 of 4: the log had a `101` for
-every request). A test that needs a burst counts such an answer and says it
-aloud (`makeInBurst()`); it fails for what it is about.
+**A burst is not a promise of 100 answers.** Now and then one create of a
+burst is answered with the catch-all 403, and its thought is made all the
+same (4 of 4: the log had a `101` for every request; docs/api-map.md, L45).
+A test that needs a burst counts such an answer, asks `mayHaveLanded()` of
+it, and says it aloud (`makeInBurst()`); it fails for what it is about. It
+is not made to fail on the 403 itself: that is the app's, the client now
+takes it for a write that may have landed, and a test of the log that went
+red on it would go red about one run in forty for nothing the test checks.
 
 Two testing habits worth stating, because both caught real bugs:
 

@@ -223,8 +223,9 @@ export interface IngestOutcome {
    * What was tried and failed. `of` is what the write was to make. `reason`
    * is the failure in the API's words or this module's, and `error` what was
    * thrown, for a caller that explains failures in its own. `unanswered`
-   * marks a write that went out and got no answer: it may have been carried
-   * out, and a thought may be there with no identifier to report.
+   * marks a write that may have been carried out (`mayHaveLanded()`): it got
+   * no answer, one that broke off, or the catch-all 403, and a thought may be
+   * there with no identifier to report.
    */
   failures: Array<{
     of: "thought" | "note" | "tag" | "aliases" | "link";

@@ -41,6 +41,7 @@ import {
   linksOfPair,
   logEntryKey,
   logTime,
+  mayHaveLanded,
   nameRefusal,
   noteAsStored,
   noteLinesDropped,
@@ -150,12 +151,14 @@ suite("resource layer against the live API", () => {
    * one in 100 in three bursts of five while four writers were at work in
    * another brain, and in none of three bursts with the app to itself. The
    * thought is made all the same: the log had a `101` for every request of
-   * each of those bursts, the refused one included (4 of 4). What that 403
-   * is belongs to another card; a test that needs a burst is about what
-   * the burst leaves, and used to go red on it whenever a second session
-   * was at work. So it is counted and said aloud here, and the thought,
-   * which nothing has the identifier of, is left to the sweep after the
-   * run. Any other refusal is thrown as it came.
+   * each of those bursts, the refused one included (4 of 4). So the client
+   * takes that 403 to a write for one that may have been carried out
+   * (`mayHaveLanded()`, docs/api-map.md, L45), and this asks it so: a client
+   * that took it for a refusal again fails here. A test that needs a burst
+   * is about what the burst leaves, and used to go red on it whenever a
+   * second session was at work. So it is counted and said aloud here, and
+   * the thought, which nothing has the identifier of, is left to the sweep
+   * after the run. Any other failure is thrown as it came.
    */
   let unanswered = 0;
   const makeInBurst = async (name: string): Promise<string | null> => {
@@ -163,8 +166,12 @@ suite("resource layer against the live API", () => {
       return await make(name);
     } catch (error) {
       if (!(error instanceof TheBrainError) || error.kind !== "forbidden") throw error;
+      if (!mayHaveLanded(error)) throw error;
       unanswered += 1;
-      console.warn(`[burst] the create of ${PREFIX}${name} was answered with the catch-all 403`);
+      console.warn(
+        `[burst] the create of ${PREFIX}${name} was answered with the catch-all 403: ` +
+          `${error.status} ${JSON.stringify(error.body)}`,
+      );
       return null;
     }
   };

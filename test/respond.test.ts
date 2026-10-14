@@ -11,6 +11,7 @@ import {
   join,
   kindLabel,
   kindMark,
+  landedWhy,
   ok,
   section,
   shownName,
@@ -107,6 +108,11 @@ describe("error explanations point at the next step", () => {
   const ROUTER_403 =
     "To use the TheBrain API, make requests to /api (e.g. /api/brains). " +
     "An API key is required via the Authorization header.";
+  /** What a write answered with the catch-all 403 is told (docs/api-map.md, L45). */
+  const WRITE_403 = new RegExp(
+    "\\. It answers a write so when it refuses it, as for an identifier that names nothing " +
+      "in this brain, and now and then when it has carried it out\\.$",
+  );
   const answered = (
     kind: "unknown_brain" | "not_found" | "forbidden",
     message: string,
@@ -201,17 +207,13 @@ describe("error explanations point at the next step", () => {
         "or of its identifier.",
     );
     expect(text).not.toMatch(/names nothing|deleted, or be another|Take identifiers/);
-    // Only that read. A write to a note has not been seen to answer it, and
-    // is explained as any other request is.
-    for (const [method, path] of [
-      ["POST", `${note}/update`],
-      ["POST", `${note}/append`],
-      ["GET", `/api/thoughts/${BRAIN}/${NOBODY}/graph`],
-    ] as const) {
-      expect(answered("forbidden", ROUTER_403, method, path), path).toMatch(
-        /That is its answer when an identifier in the call names nothing in this brain/,
-      );
+    // Only that read. A write to a note is explained as any write is.
+    for (const path of [`${note}/update`, `${note}/append`]) {
+      expect(answered("forbidden", ROUTER_403, "POST", path), path).toMatch(WRITE_403);
     }
+    expect(
+      answered("forbidden", ROUTER_403, "GET", `/api/thoughts/${BRAIN}/${NOBODY}/graph`),
+    ).toMatch(/That is its answer when an identifier in the call names nothing in this brain/);
   });
 
   it("the 403 of a request that carries no identifier is not explained by one", () => {
@@ -227,15 +229,39 @@ describe("error explanations point at the next step", () => {
       expect(text).not.toMatch(/names nothing|deleted, or be another|Take identifiers/);
     }
     // A brain in the path is one: what else the request named is in its body.
-    expect(answered("forbidden", ROUTER_403, "POST", `/api/links/${BRAIN}`)).toMatch(
-      /That is its answer when an identifier in the call names nothing in this brain/,
-    );
+    // A write is explained as one, whatever it names.
+    expect(answered("forbidden", ROUTER_403, "POST", `/api/links/${BRAIN}`)).toMatch(WRITE_403);
     // And with no request to go by, nothing is known of what it carried.
     expect(describeError(new TheBrainError("forbidden", ROUTER_403))).toBe(
       "TheBrain answered 403 and named no cause. That is its answer when an identifier in " +
         "the call names nothing in this brain. It may have been deleted, or be another " +
         "brain's. Take identifiers from brain_search or brain_get_thought.",
     );
+  });
+
+  it("the catch-all 403 to a write says it may have been carried out", () => {
+    // A create answered so under concurrent writes was made, 4 of 4
+    // (docs/api-map.md, L45). It was told as an identifier that names
+    // nothing, and as written at all only by a call that had written more.
+    const path = `/api/thoughts/${BRAIN}`;
+    const text = answered("forbidden", ROUTER_403, "POST", path);
+    expect(text).toBe(
+      `TheBrain answered 403 and named no cause (POST ${path}). It answers a write so when ` +
+        "it refuses it, as for an identifier that names nothing in this brain, and now and " +
+        "then when it has carried it out.",
+    );
+    expect(text).not.toMatch(/Nothing was written|deleted, or be another|API key/);
+    const refused = new TheBrainError("forbidden", ROUTER_403, { method: "POST", path });
+    expect(landedWhy(refused, "the create")).toBe(
+      "The 403 does not say whether the create was carried out",
+    );
+    // The other two a write may have landed after: no answer, and one that broke off.
+    expect(landedWhy(new TheBrainError("network", "request exceeded 30000 ms"), "the create")).toBe(
+      "No answer came to the create",
+    );
+    expect(
+      landedWhy(new TheBrainError("network", "TheBrain answered 200, and …", { status: 200 })),
+    ).toBe("The answer broke off after its status");
   });
 
   it("an identifier nobody has is never explained as a wrong brainId or a wrong key", () => {

@@ -23,6 +23,7 @@ import {
   guard,
   join,
   kindMark,
+  landedWhy,
   ok,
   section,
   sentence,
@@ -385,7 +386,9 @@ function whyFailed(failure: IngestOutcome["failures"][number]): string {
     return failure.of === "note" ? `${sentence(why)} ${NOTE_UNREAD}` : why;
   }
   const why = describeError(error, false);
-  return failure.unanswered ? `${sentence(why)} ${UNANSWERED[failure.of]}` : why;
+  return failure.unanswered
+    ? `${sentence(why)} ${landedWhy(error)}, so TheBrain may have ${UNANSWERED[failure.of]}`
+    : why;
 }
 
 const NOTE_UNREAD =
@@ -393,17 +396,20 @@ const NOTE_UNREAD =
   "add to it with brain_append_note.";
 
 const CARRIED_OUT =
-  "No answer came, so TheBrain may have carried it out all the same: read the thought " +
-  "with brain_get_thought before sending it again.";
+  "carried it out all the same: read the thought with brain_get_thought before sending " +
+  "it again.";
 
-/** Added to a write that got no answer, by what it was to make. */
+/**
+ * Added to a write that may have been carried out, by what it was to make,
+ * after `landedWhy()` and "so TheBrain may have".
+ */
 const UNANSWERED: Record<IngestOutcome["failures"][number]["of"], string> = {
   thought:
-    "No answer came, so TheBrain may have created it all the same: before creating it " +
-    "again, look for it next to its parent with brain_get_thought.",
+    "created it all the same: before creating it again, look for it next to its parent " +
+    "with brain_get_thought.",
   note:
-    "No answer came, so TheBrain may have written it all the same: read the thought with " +
-    "brain_get_thought before writing its note again.",
+    "written it all the same: read the thought with brain_get_thought before writing its " +
+    "note again.",
   tag: CARRIED_OUT,
   aliases: CARRIED_OUT,
   link: CARRIED_OUT,
