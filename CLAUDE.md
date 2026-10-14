@@ -517,7 +517,9 @@ write, never deletes the home thought, and deletes in rounds a second apart
 with no two thoughts that share a link in one round (`test/sweep.ts`). A test
 that a read is behind a write writes until one first read is behind, forty
 tries at most; never "stale > 0 of N". A read-back is polled, not given a few
-fixed seconds: under writes to another brain it lagged up to 30 s.
+fixed seconds: under writes to another brain it lagged up to 30 s. A contract
+test with no bound of its own has `DEFAULT_TEST_MS` (60 s), not vitest's 5 s;
+a read-back polls with `eventually()`'s default or 20 s.
 
 When a claim about the API goes into a document, it should have a test behind it.
 Two documented claims in this project's history turned out to be wrong precisely
