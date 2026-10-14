@@ -231,9 +231,12 @@ silent wrong behaviour rather than a loud failure:
   `client.written` keeps for ten seconds the URLs this process attached, as
   sent, `attachUrl()` asks `by-location`, which is live, for each spelling of
   the address it attached to the thought, and calls for one address on one
-  thought go one at a time (0 of 20). Not guarded: another process or the app
-  attaching another spelling while the list is behind, and an attachment
-  deleted in the last 0.1 s, which the list may still show.
+  thought go one at a time (0 of 20). The list is taken only as a source of
+  spellings: each is asked of `by-location` before "Already there", since a
+  list read right after a delete still showed the attachment 6 of 6. Compare
+  a `sourceId` with a caller's thought id regardless of case: the API takes
+  capitals and answers in lower case. Not guarded: another process or the app
+  attaching another spelling while the list is behind.
 - **Tags attach via `POST /api/links` with `relation: 2` against a `kind=4`
   thought.** The server rewrites it to `relation=1, meaning=5`. Against a type
   the same request sets the thought's type and against an ordinary thought it
