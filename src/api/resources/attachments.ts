@@ -2,12 +2,6 @@ import { assertUuid, mayHaveLanded, type TheBrainClient } from "../client.js";
 import { AttachmentType, type AttachmentDto } from "../types.js";
 
 export class AttachmentsResource {
-  /**
-   * The `attachUrl` calls with a check under way, by thought and address
-   * (`urlKey`): a second one waits for the first.
-   */
-  readonly #underWay = new Map<string, Promise<unknown>>();
-
   constructor(private readonly client: TheBrainClient) {}
 
   async metadata(brainId: string, attachmentId: string): Promise<AttachmentDto> {
@@ -96,13 +90,10 @@ export class AttachmentsResource {
    * attachment was not its own, and the address attached straight before in
    * another host case was attached again 2 times in 3.
    *
-   * Two calls for one address on one thought go one after the other. Sent at
-   * once, each looked before either attached, and both attached, in one
-   * spelling as in two (3 of 3 each).
-   *
    * Not guarded: the same address in another host case attached by another
    * process, or in the app, within the moment the list is behind; and two
-   * processes attaching one address at once.
+   * calls for one address on one thought sent at once, which each look
+   * before either attaches.
    */
   async attachUrl(
     brainId: string,
@@ -118,21 +109,10 @@ export class AttachmentsResource {
       return { created: true };
     }
 
-    const slot = `${brainId.toLowerCase()} ${thoughtId.toLowerCase()} ${urlKey(url)}`;
-    const mine = (this.#underWay.get(slot) ?? Promise.resolve())
-      .catch(() => undefined)
-      .then(async () => {
-        const existing = await this.#alreadyThere(brainId, thoughtId, url);
-        if (existing) return { created: false, existing };
-        await this.#post(brainId, thoughtId, url, options.name);
-        return { created: true };
-      });
-    this.#underWay.set(slot, mine);
-    try {
-      return await mine;
-    } finally {
-      if (this.#underWay.get(slot) === mine) this.#underWay.delete(slot);
-    }
+    const existing = await this.#alreadyThere(brainId, thoughtId, url);
+    if (existing) return { created: false, existing };
+    await this.#post(brainId, thoughtId, url, options.name);
+    return { created: true };
   }
 
   /**

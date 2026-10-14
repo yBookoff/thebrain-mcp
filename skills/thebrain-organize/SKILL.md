@@ -113,8 +113,7 @@ Safe and reversible, after showing the person the list:
   `replace: true` once the person agrees.
 - **Removing a link** (`brain_unlink`). It asks the person itself, and takes
   the link's label with it. A thought it leaves with no parent, child or jump
-  is shown next to nothing: give it another link first. Two thoughts joined by
-  two links are a fault to report, with the identifiers `brain_unlink` lists.
+  is shown next to nothing: give it another link first.
 
 ## How to report
 

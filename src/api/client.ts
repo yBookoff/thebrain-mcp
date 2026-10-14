@@ -89,9 +89,8 @@ export function assertUuid(value: string, field: string): void {
  * make, and writes nothing: a thought with itself, under any relation, and a
  * tag under a type. The zeros used to be handed on as the new link's
  * identifier. Both are refused ahead of the request now, which leaves this
- * for a pair nobody measured, for a thought that changed kind since it was
- * read, and for a post sent next to another for the same pair, by another
- * process or by TheBrain itself (L47).
+ * for a pair nobody measured, and for a thought that changed kind since it
+ * was read.
  *
  * `POST /api/thoughts` was not seen to do it, in 28 creates picked to make
  * it. It is checked all the same: its zeros would go on as the parent of the

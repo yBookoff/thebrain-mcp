@@ -81,11 +81,9 @@ export {
 } from "./resources/thoughts.js";
 export {
   isAttachmentOf,
-  isJoinedMoreThanOnce,
   isStructuralLink,
   isTagLink,
   isTypeLink,
-  linksOfPair,
   type CreateLinkInput,
   type UpdateLinkInput,
 } from "./resources/links.js";

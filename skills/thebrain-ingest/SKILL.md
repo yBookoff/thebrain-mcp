@@ -255,11 +255,6 @@ asked for, `brain_link` with `replace: true` makes it so, keeping its label.
 That turns a parent link into a jump or the other way, so do it only where the
 hierarchy should change; the same call with the old relation puts it back.
 
-**Two thoughts joined by more than one link** take no new link: `brain_link`
-answers `Link could not be created.` and says so. `brain_unlink` with the two
-thoughts lists their links by identifier; ask the person which to remove, and
-remove it with its `linkId`. That is a deletion, and needs their consent.
-
 A label given for a link that has another one replaces it, from `brain_link`
 and from a plan alike, and the result quotes both: `label updated: it was "…"
 and is now "…"`. Read that line. If the label it replaced was the person's

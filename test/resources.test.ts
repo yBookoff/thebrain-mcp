@@ -5,12 +5,9 @@ import {
   LOG_PAGE_SIZE,
   MAX_NAME_LENGTH,
   READ_BACK,
-  TheBrainError,
   codePoints,
   compareLogTime,
-  isJoinedMoreThanOnce,
   linkNameAsStored,
-  linksOfPair,
   logEntryKey,
   logTime,
   nameRefusal,
@@ -1835,78 +1832,6 @@ describe("creating a type or a tag", () => {
     });
     expect(calls).toEqual([]);
   });
-
-  it("two calls for one brain go one after the other, each from its read of the log to its last read", async () => {
-    // Sent at once, two creates of one new tag name are two tags as often as
-    // not, and a create that overtook another's read of the log would pass
-    // for what that call made.
-    const { api, calls } = brain(
-      () => [log(NEW, 101, "2026-10-13T21:01:40")],
-      thought(NEW, "gotcha", { kind: 4 }),
-    );
-    await Promise.all([
-      api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 }),
-      api.thoughts.createTypeOrTag(BRAIN, { name: "GOTCHA", kind: 4 }),
-    ]);
-    const steps = calls.map((c) => {
-      if (c.method === "POST") return `create ${(c.body as { name: string }).name}`;
-      return c.url.pathname.includes("/api/brains/") ? "log" : "read";
-    });
-    expect(steps).toEqual([
-      "log",
-      "create gotcha",
-      "read",
-      "read",
-      "log",
-      "create GOTCHA",
-      "read",
-      "read",
-    ]);
-  });
-
-  it("a call that failed does not hold up the next, and another brain does not wait", async () => {
-    const OTHER = "aaaaaaaa-0000-4000-8000-00000000000f";
-    let refuse = true;
-    let release = (): void => {};
-    const held = new Promise<void>((resolve) => (release = resolve));
-    const tag = thought(NEW, "gotcha", { kind: 4 });
-    const answered: string[] = [];
-    const api = new TheBrainApi({
-      apiKey: "k",
-      fetchImpl: (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-        const url = new URL(String(input));
-        const json = (value: unknown, status = 200): Response =>
-          new Response(JSON.stringify(value), {
-            status,
-            headers: { "content-type": "application/json" },
-          });
-        if (url.pathname.includes("/api/brains/")) {
-          // The other brain's log is not answered until the test lets it be.
-          if (url.pathname.includes(OTHER)) await held;
-          return json([]);
-        }
-        if (init?.method === "POST") {
-          if (refuse) {
-            refuse = false;
-            return json("Could not create thought.", 400);
-          }
-          return json({ id: NEW });
-        }
-        if (url.pathname.endsWith("/modifications")) return json([]);
-        answered.push(url.pathname);
-        return json(tag);
-      }) as unknown as typeof fetch,
-    });
-
-    const stuck = api.thoughts.createTypeOrTag(OTHER, { name: "slow", kind: 4 });
-    const failed = api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 });
-    const next = api.thoughts.createTypeOrTag(BRAIN, { name: "gotcha", kind: 4 });
-    await expect(failed).rejects.toMatchObject({ kind: "bad_request" });
-    await expect(next).resolves.toMatchObject({ id: NEW });
-    expect(answered).toEqual([`/api/thoughts/${BRAIN}/${NEW}`]);
-    release();
-    await expect(stuck).resolves.toMatchObject({ id: NEW });
-  });
 });
 
 describe("exact name lookup", () => {
@@ -2284,42 +2209,6 @@ describe("tags", () => {
       await expect(api.links.detachTag(BRAIN, THOUGHT, other), what).resolves.toBe(false);
       expect(writes(calls), what).toEqual([]);
     }
-  });
-
-  it("an attachment taken from a graph is deleted as given, and any other link is refused with nothing sent", async () => {
-    // A tag attached twice is two attachments the lookup has neither of
-    // (L43): the tool takes them from the thought's graph, and deletes each.
-    const as = (a: string, b: string, meaning: number, id = LINK): LinkDto =>
-      ({ id, thoughtIdA: a, thoughtIdB: b, relation: 1, meaning }) as LinkDto;
-    for (const meaning of [5, 7]) {
-      const { api, calls } = brain();
-      await api.links.detachTagLink(BRAIN, THOUGHT, TAG.toUpperCase(), as(TAG, THOUGHT, meaning));
-      expect(sent(calls)).toEqual([`DELETE /api/links/${BRAIN}/${LINK}`]);
-    }
-    for (const [what, link] of [
-      ["the thought's type", as(TYPE, THOUGHT, 2)],
-      ["a jump to the tag", { ...as(THOUGHT, TAG, 1), relation: 3 }],
-      ["the thought as a tag on the tag", as(THOUGHT, TAG, 7)],
-      ["the tag on another thought", as(TAG, PLAIN, 5)],
-    ] as const) {
-      const { api, calls } = brain();
-      await expect(api.links.detachTagLink(BRAIN, THOUGHT, TAG, link), what).rejects.toMatchObject({
-        message: `link ${LINK} is not an attachment of the tag ${TAG} to ${THOUGHT}, and was not removed`,
-      });
-      expect(calls, what).toEqual([]);
-    }
-  });
-
-  it("the bare 400 of a post is told apart from the 400 that names an end", () => {
-    // The first is a pair joined more than once, a tag attached twice
-    // among them; the second an end nobody has (L43).
-    expect(isJoinedMoreThanOnce(new TheBrainError("bad_request", "Link could not be created."))).toBe(true);
-    expect(isJoinedMoreThanOnce(new TheBrainError("bad_request", ` link could not be created `))).toBe(true);
-    expect(
-      isJoinedMoreThanOnce(new TheBrainError("bad_request", `Could not get target thought ${TAG}`)),
-    ).toBe(false);
-    expect(isJoinedMoreThanOnce(new TheBrainError("server", "Link could not be created."))).toBe(false);
-    expect(isJoinedMoreThanOnce(new Error("Link could not be created."))).toBe(false);
   });
 
   it("a tag is on a thought when the link they share is the tag's, with the tag at its head", async () => {
@@ -3008,184 +2897,6 @@ describe("a link's name as TheBrain stores it", () => {
     expect(linkNameAsStored("😀".repeat(600))).toBe("😀".repeat(512));
     // A cut inside an emoji leaves U+FFFD for the half that was kept.
     expect(linkNameAsStored(`${x(1023)}😀`)).toBe(`${x(1023)}\ufffd`);
-  });
-});
-
-describe("every link between two thoughts", () => {
-  const A = "aaaa0000-0000-4000-8000-00000000000a";
-  const B = "bbbb0000-0000-4000-8000-00000000000b";
-  const C = "cccc0000-0000-4000-8000-00000000000c";
-  const at = (id: string, a: string, b: string, relation = 3, meaning = 1): LinkDto =>
-    ({ id, thoughtIdA: a, thoughtIdB: b, relation, meaning, name: null }) as LinkDto;
-  const L1 = "11111111-0000-4000-8000-000000000001";
-  const L2 = "22222222-0000-4000-8000-000000000002";
-  const L3 = "33333333-0000-4000-8000-000000000003";
-  const ids = (links: LinkDto[]): string[] => links.map((l) => l.id);
-
-  it("is the lookup's one link, listed by a graph or not yet", () => {
-    const one = at(L1, A, B);
-    expect(ids(linksOfPair(A, B, [one], one))).toEqual([L1]);
-    // A graph is a copy, behind a link made a moment ago; the lookup is not.
-    expect(ids(linksOfPair(A, B, [], one))).toEqual([L1]);
-    // And the lookup's copy is the one given, where a graph lists the same.
-    const renamed = { ...one, name: "now" };
-    expect(linksOfPair(A, B, [one, one], renamed)).toEqual([renamed]);
-  });
-
-  it("is two where they go each way: the lookup from each end has one, a graph both", () => {
-    const listed = [at(L1, A, B), at(L2, B, A, 1)];
-    expect(ids(linksOfPair(A, B, listed, listed[0]!))).toEqual([L1, L2]);
-    expect(ids(linksOfPair(B, A, listed, listed[1]!))).toEqual([L2, L1]);
-    // Each lookup's link is in, a graph that lists neither not withstanding.
-    expect(ids(linksOfPair(A, B, [], listed[0]!, listed[1]!))).toEqual([L1, L2]);
-  });
-
-  it("is the one link both lookups give, whatever a graph lists beside it", () => {
-    // Straight after one of two is deleted a graph lists both (L43).
-    const left = at(L1, A, B);
-    const listed = [left, at(L2, A, B, 1)];
-    expect(linksOfPair(A, B, listed, left, { ...left, id: L1.toUpperCase() })).toEqual([left]);
-    // One end's lookup alone says nothing of the rest.
-    expect(ids(linksOfPair(A, B, listed, left))).toEqual([L1, L2]);
-    expect(ids(linksOfPair(A, B, listed, left, null))).toEqual([L1, L2]);
-    // Nor does a 404 from one end beside a link from the other.
-    expect(ids(linksOfPair(A, B, [...listed, at(L3, B, A)], null, at(L3, B, A)))).toEqual([
-      L3,
-      L1,
-      L2,
-    ]);
-  });
-
-  it("is what a graph lists beside the lookup's 404, when that is two or more", () => {
-    // Two or three the same way: the lookup has none of them (L35, L43).
-    const two = [at(L1, A, B), at(L2, A, B, 1)];
-    expect(ids(linksOfPair(A, B, two, null))).toEqual([L1, L2]);
-    expect(ids(linksOfPair(A, B, [...two, at(L3, A, B)], null))).toEqual([L1, L2, L3]);
-    // Both graphs read: each link once.
-    expect(ids(linksOfPair(A, B, [...two, ...two], null))).toEqual([L1, L2]);
-  });
-
-  it("is none for a 404 beside one listed link, which a graph behind a deletion lists", () => {
-    expect(linksOfPair(A, B, [at(L1, A, B)], null)).toEqual([]);
-    expect(linksOfPair(A, B, [], null)).toEqual([]);
-  });
-
-  it("leaves out the links of other pairs, and takes an identifier in any letter case", () => {
-    const listed = [at(L1, A, C), at(L2, C, B), at(L3, B.toUpperCase(), A, 1, 5)];
-    expect(ids(linksOfPair(A, B, listed, null))).toEqual([]);
-    const lookup = { ...at(L3, B, A, 1, 5), id: L3.toUpperCase() };
-    expect(ids(linksOfPair(A.toUpperCase(), B, listed, lookup))).toEqual([L3.toUpperCase()]);
-    // A tag's attachment and a type's link are links of the pair too.
-    expect(ids(linksOfPair(A, B, [...listed, at(L1, A, B, 1, 2)], null))).toEqual([L3, L1]);
-  });
-});
-
-describe("one write to a pair of thoughts at a time", () => {
-  const OTHER = "eeeeeeee-0000-4000-8000-000000000005";
-  const THIRD = "ffffffff-0000-4000-8000-000000000006";
-  const LINK = "99999999-0000-4000-8000-000000000009";
-  const short = (id: string): string => id.slice(0, 2);
-
-  /**
-   * A brain whose post of a link is answered a moment after it is sent, and
-   * which logs each post and each answer by its pair; a post named "fails"
-   * is refused. TAG is a tag, any other thought an ordinary one.
-   */
-  const slow = () => {
-    const log: string[] = [];
-    const fetchImpl = vi.fn(
-      async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-        const url = new URL(String(input));
-        const json = (value: unknown, status = 200): Response =>
-          new Response(JSON.stringify(value), {
-            status,
-            headers: { "content-type": "application/json" },
-          });
-        if ((init?.method ?? "GET") === "GET") {
-          const id = url.pathname.split("/").pop()!;
-          return json(thought(id, "named", { kind: id === TAG ? 4 : 1 }));
-        }
-        const body = JSON.parse(String(init!.body)) as {
-          thoughtIdA: string;
-          thoughtIdB: string;
-          name?: string;
-        };
-        const pair = [body.thoughtIdA, body.thoughtIdB].map((id) => short(id.toLowerCase()));
-        const name = pair.sort().join("+");
-        log.push(`post ${name}`);
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        log.push(`answer ${name}`);
-        return body.name === "fails" ? json("Link could not be created.", 400) : json({ id: LINK });
-      },
-    );
-    return {
-      api: new TheBrainApi({ apiKey: "k", fetchImpl: fetchImpl as unknown as typeof fetch }),
-      log,
-    };
-  };
-  const at = (log: readonly string[], entry: string, nth = 0): number =>
-    log.map((e, i) => (e === entry ? i : -1)).filter((i) => i >= 0)[nth] ?? -1;
-  const jump = (a: string, b: string, extra: { name?: string } = {}) => ({
-    thoughtIdA: a,
-    thoughtIdB: b,
-    relation: Relation.Jump,
-    ...extra,
-  });
-
-  it("creates for one pair, whichever end comes first, post one after the other; other pairs do not wait", async () => {
-    // Sent at once, two posts for a pair with no link were two links 51
-    // times in 60 (L35).
-    const { api, log } = slow();
-    const pair = [THOUGHT, OTHER].map(short).sort().join("+");
-    const elsewhere = [THOUGHT, THIRD].map(short).sort().join("+");
-    await Promise.all([
-      api.links.create(BRAIN, jump(THOUGHT, OTHER)),
-      api.links.create(BRAIN, jump(OTHER.toUpperCase(), THOUGHT)),
-      api.links.create(BRAIN, jump(THOUGHT, THIRD)),
-    ]);
-    expect(at(log, `post ${pair}`, 1)).toBeGreaterThan(at(log, `answer ${pair}`));
-    expect(at(log, `post ${elsewhere}`)).toBeLessThan(at(log, `answer ${pair}`));
-  });
-
-  it("a caller's lookup and the create inside its turn go together, and the create takes no second turn", async () => {
-    // A turn that did not know its own holder would wait for itself here.
-    const { api, log } = slow();
-    const order: string[] = [];
-    await Promise.all(
-      [1, 2].map((n) =>
-        api.links.inTurn(BRAIN, OTHER, THOUGHT, async () => {
-          order.push(`look ${n}`);
-          await api.links.create(BRAIN, jump(THOUGHT, OTHER));
-          order.push(`made ${n}`);
-        }),
-      ),
-    );
-    expect(order).toEqual(["look 1", "made 1", "look 2", "made 2"]);
-    expect(log.filter((e) => e.startsWith("post"))).toHaveLength(2);
-  });
-
-  it("a write that failed does not hold up the next", async () => {
-    const { api } = slow();
-    const [failed, next] = await Promise.allSettled([
-      api.links.create(BRAIN, jump(THOUGHT, OTHER, { name: "fails" })),
-      api.links.create(BRAIN, jump(OTHER, THOUGHT)),
-    ]);
-    expect(failed).toMatchObject({ status: "rejected", reason: { kind: "bad_request" } });
-    expect(next).toEqual({ status: "fulfilled", value: LINK });
-  });
-
-  it("a tag's attachment takes the pair's turn too", async () => {
-    // One after the other the second attachment of a tag is the first's
-    // identifier; at once they could be two.
-    const { api, log } = slow();
-    const pair = [THOUGHT, TAG].map(short).sort().join("+");
-    await Promise.all([
-      api.links.attachTag(BRAIN, THOUGHT, TAG),
-      api.links.attachTag(BRAIN, THOUGHT, TAG),
-      api.links.create(BRAIN, jump(TAG, THOUGHT)),
-    ]);
-    expect(at(log, `post ${pair}`, 1)).toBeGreaterThan(at(log, `answer ${pair}`));
-    expect(at(log, `post ${pair}`, 2)).toBeGreaterThan(at(log, `answer ${pair}`, 1));
   });
 });
 
@@ -3973,48 +3684,6 @@ describe("attachments", () => {
     answer = 200;
     await api.attachments.attachUrl(BRAIN, THOUGHT, refused.toLowerCase());
     expect(asked().slice(before)).toEqual([refused.toLowerCase(), "the list"]);
-  });
-
-  it("calls for one address on one thought sent at once go one after the other", async () => {
-    for (const [first, second] of [
-      [UPPER, LOWER],
-      [LOWER, LOWER],
-    ]) {
-      const { api, stored } = listBehind();
-      const both = await Promise.all([
-        api.attachments.attachUrl(BRAIN, THOUGHT, first!),
-        api.attachments.attachUrl(BRAIN, THOUGHT, second!),
-      ]);
-      expect(both.map((r) => r.created)).toEqual([true, false]);
-      expect(both[1]?.existing?.location).toBe(first);
-      expect(stored).toHaveLength(1);
-    }
-  });
-
-  it("calls for other addresses, or other thoughts, are not held up, nor by one that failed", async () => {
-    const { api, calls } = listBehind((url) =>
-      url.searchParams.get("url")!.endsWith("/fails") ? 400 : 200,
-    );
-    await Promise.all([
-      api.attachments.attachUrl(BRAIN, THOUGHT, UPPER),
-      api.attachments.attachUrl(BRAIN, THOUGHT, "https://example.com/q"),
-      api.attachments.attachUrl(BRAIN, TYPE, LOWER),
-    ]);
-    // Each looked before any attached.
-    expect(calls.slice(0, 3).map((c) => c.url.searchParams.get("location"))).toEqual([
-      UPPER,
-      "https://example.com/q",
-      LOWER,
-    ]);
-
-    const failing = "https://example.com/fails";
-    const [failed, next] = await Promise.allSettled([
-      api.attachments.attachUrl(BRAIN, THOUGHT, failing),
-      api.attachments.attachUrl(BRAIN, THOUGHT, failing),
-    ]);
-    expect(failed.status).toBe("rejected");
-    expect(next.status).toBe("rejected");
-    expect(calls.filter((c) => c.method === "POST")).toHaveLength(5);
   });
 });
 

@@ -43,12 +43,10 @@ import {
   WRITTEN_KEPT_MS,
   aliasesOf,
   compareLogTime,
-  isAttachmentOf,
   isTagLink,
   isTypeLink,
   isUuid,
   linkNameAsStored,
-  linksOfPair,
   logEntryKey,
   logTime,
   nameRefusal,
@@ -3142,7 +3140,7 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
       expect(await rawCreate({ name, kind: Normal })).not.toBe(thought);
     });
 
-    it("createTypeOrTag tells a tag it made from one it was answered with, one call at a time", async () => {
+    it("createTypeOrTag tells a tag it made from one it was answered with", async () => {
       const name = named("told");
       const made = await api.thoughts.createTypeOrTag(brainId, { name, kind: Tag });
       created.push(made.id);
@@ -3171,19 +3169,6 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
         const type = await api.thoughts.createTypeOrTag(brainId, { name, kind: Type });
         created.push(type.id);
         expect([type.created, type.thought?.kind], `type ${n}`).toEqual([true, Type]);
-      }
-
-      // Four at once from one process are one tag: the second and later
-      // wait for the one ahead, and are answered with what it made.
-      for (let round = 0; round < 3; round++) {
-        const outcomes = await Promise.all(
-          [1, 2, 3, 4].map(() =>
-            api.thoughts.createTypeOrTag(brainId, { name: named(`chained-${round}`), kind: Tag }),
-          ),
-        );
-        created.push(...outcomes.map((o) => o.id));
-        expect(new Set(outcomes.map((o) => o.id)).size, `round ${round}`).toBe(1);
-        expect(outcomes.map((o) => o.created)).toEqual([true, false, false, false]);
       }
     }, 30_000);
 
@@ -3625,9 +3610,9 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
     it("attachUrl finds the address it attached straight before in another host case, though the list is behind", async () => {
       // Measured through brain_attach_url before this was guarded, a fresh
       // thought each time: the second spelling, sent straight after the
-      // first, was attached again 18 times in 20, and sent at once with it 3
-      // times of 3. The first attach reads the list before it writes, and
-      // the copy made by that read is what the second one met.
+      // first, was attached again 18 times in 20. The first attach reads the
+      // list before it writes, and the copy made by that read is what the
+      // second one met.
       const add = (id: string, url: string) =>
         api.attachments.attachUrl(brainId, id, url, { name: `${PREFIX}link` });
       const spelled = (i: string) => {
@@ -3635,6 +3620,7 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
         return { stored, lower: stored.replace("Example.com", "example.com") };
       };
 
+      let last: { id: string; lower: string; attachmentId: string } | null = null;
       for (const i of ["0", "1", "2"]) {
         const id = await make(`attach-again-${i}`);
         const { stored, lower } = spelled(i);
@@ -3643,18 +3629,14 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
         expect(again.created, i).toBe(false);
         expect(again.existing?.location, i).toBe(stored);
         expect(await api.attachments.byLocation(brainId, lower), i).toEqual([]);
+        last = { id, lower, attachmentId: again.existing!.id };
       }
-
-      const id = await make("attach-at-once");
-      const { stored, lower } = spelled("at-once");
-      const both = await Promise.all([add(id, stored), add(id, lower)]);
-      expect(both.map((r) => r.created)).toEqual([true, false]);
-      expect(await api.attachments.byLocation(brainId, lower)).toEqual([]);
 
       // Deleted, it is not held against the address: by-location, asked for
       // the spelling this process keeps, no longer finds it (3 of 3 at the
       // first read). The list is a copy, so it is waited for.
-      await api.attachments.delete(brainId, both[1]!.existing!.id);
+      const { id, lower, attachmentId } = last!;
+      await api.attachments.delete(brainId, attachmentId);
       await eventually(
         () => locations(id),
         (all) => all.length === 0,
@@ -5100,47 +5082,6 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
       const restored = await graphOf(parent, (g) => ids(g.children).includes(child));
       expect(ids(restored.children)).toContain(child);
       expect(restored.links).toHaveLength(1);
-    }, 30_000);
-
-    it("a look and a post for one pair, sent at once twice in this process, are one link in the pair's turn", async () => {
-      // Two brain_link calls at once each looked before either posted, and
-      // the pair had two links 12 times in 21 on 15.0.640 (L47). In the
-      // pair's turn the second looks once the first has posted, and the
-      // lookup, which is not behind a write (L35), has the link. One link is
-      // what both lookups give: two the same way are a 404 from either end,
-      // and one each way two answers (L43).
-      const linkOnce = (x: string, y: string, relation: Relation): Promise<string> =>
-        api.links.inTurn(brainId, x, y, async () => {
-          const there = await api.links.between(brainId, x, y);
-          return there?.id ?? api.links.create(brainId, { thoughtIdA: x, thoughtIdB: y, relation });
-        });
-      const oneLink = async (a: string, b: string, id: string, what: string): Promise<void> => {
-        expect((await api.links.between(brainId, a, b))?.id, what).toBe(id);
-        expect((await api.links.between(brainId, b, a))?.id, what).toBe(id);
-      };
-      for (const what of ["the same jump", "a jump and a child", "a jump from each end"]) {
-        const a = await make(`turn ${what} a`);
-        const b = await make(`turn ${what} b`);
-        const [one, other] = await Promise.all([
-          linkOnce(a, b, Relation.Jump),
-          what === "a jump from each end"
-            ? linkOnce(b, a, Relation.Jump)
-            : linkOnce(a, b, what === "a jump and a child" ? Relation.Child : Relation.Jump),
-        ]);
-        expect(other, what).toBe(one);
-        await oneLink(a, b, one, what);
-      }
-
-      // Two creates alone go one after the other: the second is posted over
-      // the first's link, and answers with its identifier.
-      const a = await make("turn creates a");
-      const b = await make("turn creates b");
-      const [one, other] = await Promise.all([
-        api.links.create(brainId, { thoughtIdA: a, thoughtIdB: b, relation: Relation.Jump }),
-        api.links.create(brainId, { thoughtIdA: b, thoughtIdB: a, relation: Relation.Jump }),
-      ]);
-      expect(other).toBe(one);
-      await oneLink(a, b, one, "two creates");
     }, 30_000);
 
     it("so a jump posted to a thought's own type or tag takes the type or the tag away", async () => {
@@ -7995,11 +7936,11 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
   });
 
   /**
-   * What the API does when it is asked for what is there already, and for
-   * the same pair twice at once. Measured on TheBrain 15.0.640, 2026-10-11,
-   * through the API alone; the spec says of `POST /api/links` only that it
-   * "creates a new link". It is what `ingest()` goes by when a plan is sent
-   * a second time, and when a plan names one pair in two of its links.
+   * What the API does when it is asked for what is there already. Measured
+   * on TheBrain 15.0.640, 2026-10-11, through the API alone; the spec says
+   * of `POST /api/links` only that it "creates a new link". It is what
+   * `ingest()` goes by when a plan is sent a second time, and when a plan
+   * names one pair in two of its links.
    */
   describe("a link, a label and a tag that are there already", () => {
     const pair = async (name: string): Promise<{ a: string; b: string }> => ({
@@ -8192,52 +8133,6 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
       expect(await api.links.hasTag(brainId, id, tagId)).toBe(false);
     }, 30_000);
 
-    it("two links posted at once for a pair with none can both be made, and then the pair lookup is a 404 and a further post a 400", async () => {
-      // Over 60 pairs: two links 51 times, each with an identifier of its
-      // own, both read by it and both in the graph; one link the other 9,
-      // one of the two identifiers answered then naming no link. So a pair
-      // is tried until it comes to two, which the first or the second does.
-      let doubled: { a: string; b: string; ids: string[] } | null = null;
-      for (let attempt = 0; attempt < 20 && doubled === null; attempt += 1) {
-        const { a, b } = await pair(`there-twice-${attempt}`);
-        const [x, y] = await Promise.all([
-          post({ thoughtIdA: a, thoughtIdB: b, relation: 3 }),
-          post({ thoughtIdA: a, thoughtIdB: b, relation: 3 }),
-        ]);
-        await settle(600);
-        const links = await joining(a, b);
-        expect([1, 2], `attempt ${attempt}`).toContain(links.length);
-        if (links.length === 2) doubled = { a, b, ids: [x.id, y.id] };
-      }
-      expect(doubled, "no pair came to two links in twenty tries").not.toBeNull();
-      const { a, b, ids } = doubled!;
-
-      expect(new Set(ids).size).toBe(2);
-      expect((await joining(a, b)).map((l) => l.id).sort()).toEqual([...ids].sort());
-      // Two links the same way: the lookup finds neither, from either end.
-      expect(await api.links.between(brainId, a, b)).toBeNull();
-      expect(await api.links.between(brainId, b, a)).toBeNull();
-      // And nothing further can be posted between the two, whichever way.
-      for (const body of [
-        { thoughtIdA: a, thoughtIdB: b, relation: 3 },
-        { thoughtIdA: b, thoughtIdB: a, relation: 3 },
-        { thoughtIdA: a, thoughtIdB: b, relation: 1 },
-      ]) {
-        await expect(post(body)).rejects.toMatchObject({
-          status: 400,
-          message: "Link could not be created.",
-        });
-      }
-      // One of the two deleted, and the pair has its one link again.
-      await api.links.delete(brainId, ids[0]!);
-      const left = await eventually(
-        () => api.links.between(brainId, a, b),
-        (l) => l !== null,
-        { stepMs: 50 },
-      );
-      expect(left?.id).toBe(ids[1]);
-    }, 90_000);
-
     it("ingest sends one link for a pair its plan names twice, the first, on a first run and on a second", async () => {
       // Both used to be posted at once and counted under "links created: 2",
       // and two links between the pair is what 14 plans of 20 left.
@@ -8359,8 +8254,8 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
 
   /**
    * What `brain_link` with replace and `brain_unlink` stand on
-   * (docs/api-map.md, L43): a post over the one link a pair has, a link's
-   * deletion, and the pairs that posts sent at once leave.
+   * (docs/api-map.md, L43): a post over the one link a pair has, and a
+   * link's deletion.
    */
   describe("a link changed or removed", () => {
     const pair = async (
@@ -8372,11 +8267,6 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
     });
     const post = (body: Record<string, unknown>): Promise<{ id: string }> =>
       api.client.post<{ id: string }>(`/api/links/${brainId}`, { json: body });
-    /** The links a thought's graph has between it and another. */
-    const joining = async (a: string, b: string): Promise<LinkDto[]> =>
-      (await api.thoughts.getGraph(brainId, a)).links.filter(
-        (l) => [l.thoughtIdA, l.thoughtIdB].includes(a) && [l.thoughtIdA, l.thoughtIdB].includes(b),
-      );
     /** The log's entries about one link, oldest first, as `modType` and its values. */
     const logged = async (linkId: string, atLeast: number): Promise<ModificationLogDto[]> => {
       const ours = (entries: ModificationLogDto[]): ModificationLogDto[] =>
@@ -8387,28 +8277,6 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
         { stepMs: 100 },
       );
       return ours(entries).sort((x, y) => compareLogTime(logTime(x), logTime(y)));
-    };
-    /**
-     * A pair that `bodies`, posted at once, left with `count` links or more,
-     * and the pairs tried before it, whose links are deleted. Two at once
-     * came to two links 51 times in 60 (L35), and three to three 8 times in
-     * 10; so a pair is tried until it comes to them.
-     */
-    const atOnce = async (
-      name: string,
-      bodies: (a: string, b: string) => Array<Record<string, unknown>>,
-      count: number,
-      kindB: number = ThoughtKind.Normal,
-    ): Promise<{ a: string; b: string; links: LinkDto[] }> => {
-      for (let attempt = 0; attempt < 15; attempt += 1) {
-        const { a, b } = await pair(`${name}-${attempt}`, kindB);
-        await Promise.all(bodies(a, b).map(post));
-        await settle(600);
-        const links = await joining(a, b);
-        if (links.length >= count) return { a, b, links };
-        for (const l of links) await api.links.delete(brainId, l.id);
-      }
-      throw new Error(`no pair came to ${count} links in fifteen tries`);
     };
 
     it("a link posted over with another relation is rewritten under its identifier, keeps its label, colour, thickness and direction, and logs a 402 alone", async () => {
@@ -8527,133 +8395,6 @@ suite("resource layer against the live API", { timeout: DEFAULT_TEST_MS }, () =>
       );
       expect([graph.parents, graph.children, graph.jumps].map((l) => l.length)).toEqual([0, 0, 0]);
     }, 30_000);
-
-    it("two links that go each way: the lookup gives each by the end named first, any further post is the bare 400, and both graphs list both", async () => {
-      // Two jumps sent at once from each end came to two links 3 times in 5,
-      // and a jump and a parent link, stored from the other end, 2 in 5.
-      const { a, b, links } = await atOnce(
-        "each-way",
-        (a, b) => [
-          { thoughtIdA: a, thoughtIdB: b, relation: 3 },
-          { thoughtIdA: b, thoughtIdB: a, relation: 3 },
-        ],
-        2,
-      );
-      const fromA = links.find((l) => l.thoughtIdA === a)!;
-      const fromB = links.find((l) => l.thoughtIdA === b)!;
-      expect((await api.links.between(brainId, a, b))?.id).toBe(fromA.id);
-      expect((await api.links.between(brainId, b, a))?.id).toBe(fromB.id);
-      expect((await joining(b, a)).map((l) => l.id).sort()).toEqual([fromA.id, fromB.id].sort());
-      expect(
-        linksOfPair(a, b, (await api.thoughts.getGraph(brainId, a)).links, fromA).map((l) => l.id),
-      ).toEqual([fromA.id, fromB.id]);
-
-      for (const body of [
-        { thoughtIdA: a, thoughtIdB: b, relation: 3 },
-        { thoughtIdA: b, thoughtIdB: a, relation: 3 },
-        { thoughtIdA: a, thoughtIdB: b, relation: 1 },
-        { thoughtIdA: a, thoughtIdB: b, relation: 2 },
-      ]) {
-        await expect(post(body)).rejects.toMatchObject({
-          status: 400,
-          message: "Link could not be created.",
-        });
-      }
-      expect(await joining(a, b)).toHaveLength(2);
-
-      // One deleted, and the other is the pair's to the lookup from each end
-      // at once, where a graph read before lists both still: 12 of 12 for
-      // both graphs, for 26 to 211 ms. The two lookups are what tells the
-      // pair's one link from a graph behind.
-      await api.links.delete(brainId, fromA.id);
-      const graphs = [
-        ...(await api.thoughts.getGraph(brainId, a)).links,
-        ...(await api.thoughts.getGraph(brainId, b)).links,
-      ];
-      const [ab, ba] = await eventually(
-        async () => [await api.links.between(brainId, a, b), await api.links.between(brainId, b, a)],
-        ([x, y]) => x?.id === fromB.id && y?.id === fromB.id,
-        { stepMs: 20 },
-      );
-      expect([ab?.id, ba?.id]).toEqual([fromB.id, fromB.id]);
-      expect(linksOfPair(a, b, graphs, ab!, ba!).map((l) => l.id)).toEqual([fromB.id]);
-      // And it takes a post again: rewritten, under its identifier.
-      expect((await post({ thoughtIdA: a, thoughtIdB: b, relation: 1 })).id).toBe(fromB.id);
-    }, 120_000);
-
-    it("three links posted at once the same way: the lookup has none until one is left, and every post between them is the bare 400", async () => {
-      const { a, b, links } = await atOnce(
-        "three",
-        (a, b) => [1, 2, 3].map(() => ({ thoughtIdA: a, thoughtIdB: b, relation: 3 })),
-        3,
-      );
-      expect(linksOfPair(a, b, links, null).map((l) => l.id)).toEqual(links.map((l) => l.id));
-      for (const [i, link] of links.entries()) {
-        const left = links.length - i;
-        if (left === 1) {
-          expect((await api.links.between(brainId, a, b))?.id).toBe(link.id);
-          expect((await api.links.between(brainId, b, a))?.id).toBe(link.id);
-          break;
-        }
-        expect(await api.links.between(brainId, a, b), `${left} left`).toBeNull();
-        expect(await api.links.between(brainId, b, a), `${left} left`).toBeNull();
-        await expect(post({ thoughtIdA: a, thoughtIdB: b, relation: 3 })).rejects.toMatchObject({
-          status: 400,
-          message: "Link could not be created.",
-        });
-        await api.links.delete(brainId, link.id);
-        await settle(100);
-      }
-    }, 120_000);
-
-    it("a tag attached twice: the lookup has neither, attached again or jumped to it is the bare 400, and the graph lists the tag once", async () => {
-      // 7 of 10 attaches sent at once came to two attachments.
-      const attach = (a: string, b: string) => ({ thoughtIdA: a, thoughtIdB: b, relation: 2 });
-      const { a, b, links } = await atOnce("tag-twice", (a, b) => [attach(a, b), attach(a, b)], 2, ThoughtKind.Tag);
-      expect(links.map((l) => [l.meaning, l.thoughtIdA])).toEqual([
-        [LinkMeaning.Tag, b],
-        [LinkMeaning.Tag, b],
-      ]);
-      expect(await api.links.between(brainId, a, b)).toBeNull();
-      expect(await api.links.hasTag(brainId, a, b)).toBe(false);
-      for (const body of [attach(a, b), { thoughtIdA: a, thoughtIdB: b, relation: 3 }]) {
-        await expect(post(body)).rejects.toMatchObject({
-          status: 400,
-          message: "Link could not be created.",
-        });
-      }
-      expect((await api.thoughts.getGraph(brainId, a)).tags.map((t) => t.id)).toEqual([b]);
-    }, 120_000);
-
-    it("a tag attached twice comes off by both attachments the graph lists: the lookup has the other once one is gone, and neither after", async () => {
-      // What brain_tag remove does with such a tag; it answered "was not on
-      // the thought" while the graph listed both, 3 times of 3.
-      const attach = (a: string, b: string) => ({ thoughtIdA: a, thoughtIdB: b, relation: 2 });
-      const { a, b } = await atOnce("tag-off", (a, b) => [attach(a, b), attach(a, b)], 2, ThoughtKind.Tag);
-      expect(await api.links.between(brainId, a, b)).toBeNull();
-      const found = linksOfPair(a, b, (await api.thoughts.getGraph(brainId, a)).links, null).filter(
-        (l) => isAttachmentOf(l, b),
-      );
-      expect(found).toHaveLength(2);
-      const [first, second] = found as [LinkDto, LinkDto];
-
-      await api.links.detachTagLink(brainId, a, b, first);
-      expect((await api.links.between(brainId, a, b))?.id).toBe(second.id);
-      expect((await api.links.between(brainId, b, a))?.id).toBe(second.id);
-      // Deleted again, an attachment is the 400 of any link that is gone.
-      await expect(api.links.detachTagLink(brainId, a, b, first)).rejects.toMatchObject({
-        kind: "bad_request",
-        status: 400,
-      });
-
-      await api.links.detachTagLink(brainId, a, b, second);
-      expect(await api.links.between(brainId, a, b)).toBeNull();
-      const graph = await eventually(
-        () => api.thoughts.getGraph(brainId, a),
-        (g) => g.links.length === 0,
-      );
-      expect(graph.tags).toEqual([]);
-    }, 120_000);
 
     it("a post towards an end deleted a moment ago is the 400 that names it, not the bare one", async () => {
       // 20 of 20, 0 to 1,500 ms after the delete.

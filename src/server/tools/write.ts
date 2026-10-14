@@ -17,11 +17,9 @@ import {
   TheBrainError,
   assertUuid,
   isAttachmentOf,
-  isJoinedMoreThanOnce,
   isStructuralLink,
   isTagLink,
   isTypeLink,
-  linksOfPair,
   mayHaveLanded,
   nameRefusal,
   normalizeAliases,
@@ -538,133 +536,116 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       // at. A malformed one and the identifier of zeros alike.
       assertUuid(fromId, "fromId");
       assertUuid(toId, "toId");
-      // One call for these two thoughts at a time in this process, the look
-      // and the write together. Two calls sent at once each looked before
-      // either posted, and the pair had two links 12 times in 21 (L47).
-      return ctx.api.links.inTurn(bid, fromId, toId, async () => {
-        // Ahead of everything, the label of a link already there included: under
-        // a type a thought is given that type, and loses the one it had, and
-        // under a tag it is tagged, which is no link and no parent.
-        if (relation === "child") await ctx.api.links.requireParent(bid, fromId, "fromId");
-        if (relation === "parent") await ctx.api.links.requireParent(bid, toId, "toId");
-        const existing = await ctx.api.links.between(bid, fromId, toId);
-        const asked = relation ?? "jump";
-        const called = calledByArgument(fromId, toId);
-        if (existing !== null) {
-          // It used to answer "Link already existed" whatever joined the two,
-          // and to write the label onto a tag's attachment or a type's link.
-          const found = linkFound(
-            existing,
-            {
-              from: fromId,
-              to: toId,
-              relation: asked,
-              fromName: "fromId",
-              toName: "toId",
-            },
-            name,
-          );
-          if (!found.ordinary) {
-            if (replace === true) return fail(notReplaced(existing, called));
-            return ok(section("No link added", found.note)!);
-          }
-          if (replace === true && !found.asAsked) {
-            // Posted over, the link is rewritten to the relation asked for,
-            // under its identifier and with its label, colour, thickness and
-            // direction (L43). Not over a pair that has another link: that
-            // post is refused, and the lookup has shown one of the two. The
-            // one link a pair has is what the lookup gives from either end;
-            // of two each way it gives each from its own (L43).
-            const back = await ctx.api.links.between(bid, toId, fromId);
-            const joined =
-              back !== null && sameThought(back.id, existing.id)
-                ? [existing]
-                : linksOfPair(
-                    fromId,
-                    toId,
-                    (await ctx.api.thoughts.getGraph(bid, fromId)).links,
-                    existing,
-                    back,
-                  );
-            if (joined.length > 1) return fail(severalLinks(joined, called, "brain_link"));
-            let linkId: string;
-            try {
-              linkId = await ctx.api.links.create(bid, {
-                thoughtIdA: fromId,
-                thoughtIdB: toId,
-                relation: RELATION_VALUES[asked],
-                ...(found.label?.write === true && name !== undefined ? { name } : {}),
-              });
-            } catch (error) {
-              if (!mayHaveLanded(error)) throw error;
-              return fail(
-                join([
-                  describeError(error),
-                  section(
-                    "Next",
-                    `${landedWhy(error, "the change")}, so TheBrain may have changed the link ` +
-                      "all the same. Sent again as it is, this call reads the link first, and " +
-                      "changes it only if it is not yet the link asked for.",
-                  ),
-                ]),
-              );
-            }
-            const was = existing.name ?? "";
-            const label =
-              found.label !== null
-                ? `, ${found.label.said}`
-                : was === ""
-                  ? ""
-                  : `, and keeps its label ${JSON.stringify(was)}`;
-            // Another identifier is a link made where the one read had gone.
-            const other = sameThought(linkId, existing.id)
-              ? ""
-              : `. TheBrain answered with ${linkId}, not ${existing.id}: the link read a moment ` +
-                "ago was gone, and this one was made in its place";
-            return ok(
-              section(
-                "Link changed",
-                `identifier ${linkId}: from ${linkKind(existing, called)} to ` +
-                  `${wantedKind(asked)}${label}${other}`,
-              )!,
+      // Ahead of everything, the label of a link already there included: under
+      // a type a thought is given that type, and loses the one it had, and
+      // under a tag it is tagged, which is no link and no parent.
+      if (relation === "child") await ctx.api.links.requireParent(bid, fromId, "fromId");
+      if (relation === "parent") await ctx.api.links.requireParent(bid, toId, "toId");
+      const existing = await ctx.api.links.between(bid, fromId, toId);
+      const asked = relation ?? "jump";
+      const called = calledByArgument(fromId, toId);
+      if (existing !== null) {
+        // It used to answer "Link already existed" whatever joined the two,
+        // and to write the label onto a tag's attachment or a type's link.
+        const found = linkFound(
+          existing,
+          {
+            from: fromId,
+            to: toId,
+            relation: asked,
+            fromName: "fromId",
+            toName: "toId",
+          },
+          name,
+        );
+        if (!found.ordinary) {
+          if (replace === true) return fail(notReplaced(existing, called));
+          return ok(section("No link added", found.note)!);
+        }
+        if (replace === true && !found.asAsked) {
+          // Posted over, the link is rewritten to the relation asked for,
+          // under its identifier and with its label, colour, thickness and
+          // direction (L43).
+          let linkId: string;
+          try {
+            linkId = await ctx.api.links.create(bid, {
+              thoughtIdA: fromId,
+              thoughtIdB: toId,
+              relation: RELATION_VALUES[asked],
+              ...(found.label?.write === true && name !== undefined ? { name } : {}),
+            });
+          } catch (error) {
+            if (!mayHaveLanded(error)) throw error;
+            return fail(
+              join([
+                describeError(error),
+                section(
+                  "Next",
+                  `${landedWhy(error, "the change")}, so TheBrain may have changed the link ` +
+                    "all the same. Sent again as it is, this call reads the link first, and " +
+                    "changes it only if it is not yet the link asked for.",
+                ),
+              ]),
             );
           }
-          // A label the link has already is not sent again, and one that takes
-          // another's place is quoted: "label updated" used to be all it said,
-          // of a label written over as of one that was there already.
-          if (found.label?.write === true) await ctx.api.links.update(bid, existing.id, { name });
+          const was = existing.name ?? "";
+          const label =
+            found.label !== null
+              ? `, ${found.label.said}`
+              : was === ""
+                ? ""
+                : `, and keeps its label ${JSON.stringify(was)}`;
+          // Another identifier is a link made where the one read had gone.
+          const other = sameThought(linkId, existing.id)
+            ? ""
+            : `. TheBrain answered with ${linkId}, not ${existing.id}: the link read a moment ` +
+              "ago was gone, and this one was made in its place";
           return ok(
             section(
-              "Link already existed",
-              found.asAsked
-                ? `identifier ${existing.id}` +
-                  (found.label !== null ? `, ${found.label.said}` : "")
-                : `identifier ${existing.id}: ${found.note}`,
+              "Link changed",
+              `identifier ${linkId}: from ${linkKind(existing, called)} to ` +
+                `${wantedKind(asked)}${label}${other}`,
             )!,
           );
         }
-        if (replace === true) {
-          // The lookup has no link for two thoughts joined by two the same way,
-          // and a post between them is refused (L35): told here, before it.
-          const listed = (await ctx.api.thoughts.getGraph(bid, fromId)).links;
-          const joined = linksOfPair(fromId, toId, listed, null);
-          if (joined.length > 1) return fail(severalLinks(joined, called, "brain_link"));
-        }
-        let linkId: string;
-        try {
-          linkId = await ctx.api.links.create(bid, {
-            thoughtIdA: fromId,
-            thoughtIdB: toId,
-            relation: RELATION_VALUES[asked],
-            ...(name !== undefined ? { name } : {}),
-          });
-        } catch (error) {
-          // A create with no answer is not a create that failed, and one
-          // answered with zeros may sit next to a link made at that moment.
-          return fail(await notLinked(ctx, bid, called, error));
-        }
-        return ok(section("Done", `link created — ${linkId}`)!);
-      });
+        // A label the link has already is not sent again, and one that takes
+        // another's place is quoted: "label updated" used to be all it said,
+        // of a label written over as of one that was there already.
+        if (found.label?.write === true) await ctx.api.links.update(bid, existing.id, { name });
+        return ok(
+          section(
+            "Link already existed",
+            found.asAsked
+              ? `identifier ${existing.id}` +
+                (found.label !== null ? `, ${found.label.said}` : "")
+              : `identifier ${existing.id}: ${found.note}`,
+          )!,
+        );
+      }
+      let linkId: string;
+      try {
+        linkId = await ctx.api.links.create(bid, {
+          thoughtIdA: fromId,
+          thoughtIdB: toId,
+          relation: RELATION_VALUES[asked],
+          ...(name !== undefined ? { name } : {}),
+        });
+      } catch (error) {
+        // A create with no answer is not a create that failed.
+        if (!mayHaveLanded(error)) throw error;
+        return fail(
+          join([
+            describeError(error),
+            section(
+              "Next",
+              `${landedWhy(error, "the create")}, so TheBrain may have linked the two all the ` +
+                "same. Sent again as it is, this call looks the two up first: it adds nothing " +
+                "where a link joins them, and says what that link is.",
+            ),
+          ]),
+        );
+      }
+      return ok(section("Done", `link created — ${linkId}`)!);
     }),
   );
 
@@ -672,25 +653,21 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
     "brain_unlink",
     {
       description:
-        "Removes a link between two thoughts, with its label. There is no undo. Requires " +
-        "human confirmation. Call it only when the user asked for the link to go, or for two " +
-        "thoughts joined by more than one link. brain_link with replace changes a link's " +
-        "kind; a tag goes with brain_tag, a type with brain_update_thought.",
+        "Removes the link between two thoughts, with its label. There is no undo. Requires " +
+        "human confirmation. Call it only when the user asked for the link to go. " +
+        "brain_link with replace changes a link's kind; a tag goes with brain_tag, a type " +
+        "with brain_update_thought.",
       inputSchema: {
         brainId,
         fromId: identifier().describe("One end of the link."),
         toId: identifier().describe("The other end."),
-        linkId: identifier()
-          .optional()
-          .describe("Which link, when more than one joins the two: a call without it lists them."),
         confirm: z.boolean().optional().describe(CONFIRM),
       },
     },
-    guard(async ({ brainId: bid, fromId, toId, linkId, confirm }) => {
+    guard(async ({ brainId: bid, fromId, toId, confirm }) => {
       if (!ctx.config.allowDestructive) return fail(DELETION_DISABLED);
       assertUuid(fromId, "fromId");
       assertUuid(toId, "toId");
-      if (linkId !== undefined) assertUuid(linkId, "linkId");
       if (sameThought(fromId, toId)) {
         return fail(
           `fromId and toId are both ${fromId}, and no link joins a thought to itself. ` +
@@ -699,74 +676,33 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
       }
       const called = calledByArgument(fromId, toId);
 
-      // Both graphs: what joins the two, what each is called, and what else
-      // each is linked to. And the lookup from each end, which is not behind
-      // a write, as a graph is: a graph read straight after one of two links
-      // was removed lists both. It has no link for two the same way.
+      // Both graphs: what each is called, and what else each is linked to.
+      // The link is the lookup's, which is not behind a write, as a graph is.
       const from = await ctx.api.thoughts.getGraph(bid, fromId);
       const to = await ctx.api.thoughts.getGraph(bid, toId);
-      const lookup = await ctx.api.links.between(bid, fromId, toId);
-      const back = await ctx.api.links.between(bid, toId, fromId);
-      const listed = [...from.links, ...to.links];
-      const joined = linksOfPair(fromId, toId, listed, lookup, back);
-      if (joined.length === 0) {
-        // A 404 from both ends is no link, or two or more the same way, and a
-        // graph is behind a creation as well as a deletion: one listed link
-        // tells neither.
-        const seen = [...new Set(listed.filter((l) => ofPair(l, called)).map((l) => l.id))];
-        if (seen.length === 1) {
-          return fail(
-            "TheBrain's lookup has no link between fromId and toId from either end, and " +
-              `their graphs list one, ${seen[0]}: it was removed a moment ago, or the two are ` +
-              "joined by more than one link, which the lookup cannot see and a graph does not " +
-              "list all of yet. Nothing was removed. Send the call again in a moment.",
-          );
-        }
-        return ok(section("Nothing removed", "no link joins fromId and toId")!);
-      }
-
-      let link: LinkDto;
-      if (linkId !== undefined) {
-        const named = joined.find((l) => sameThought(l.id, linkId));
-        if (named === undefined) {
-          const list = bullet(joined.map((l) => linkLine(l, called)));
-          return fail(
-            `No link between fromId and toId has the identifier ${linkId}. Nothing was ` +
-              `removed. The links that join them:\n${list}`,
-          );
-        }
-        link = named;
-      } else if (!joined.some(isStructuralLink)) {
-        // Nothing here is this tool's to remove: no linkId would change that.
-        return fail(notRemoved(joined[0]!, joined, called));
-      } else if (joined.length > 1) {
-        return fail(severalLinks(joined, called, "brain_unlink"));
-      } else {
-        link = joined[0]!;
-      }
+      const link = await ctx.api.links.between(bid, fromId, toId);
+      if (link === null) return ok(section("Nothing removed", "no link joins fromId and toId")!);
       // A tag's attachment and a type's link have tools of their own, which
       // know what taking them away does to the thought.
-      if (!isStructuralLink(link)) return fail(notRemoved(link, joined, called));
+      if (!isStructuralLink(link)) return fail(notRemoved(link, called));
 
       // What a person agrees to: the two thoughts by name, the link and its
-      // label, the links that stay, and a thought the removal leaves with no
-      // parent, child or jump, which TheBrain then shows next to nothing.
+      // label, and a thought the removal leaves with no parent, child or
+      // jump, which TheBrain then shows next to nothing.
       const names: Ends = {
         from: fromId,
         to: toId,
         fromName: `"${shownName(from.thought.name)}"${kindMark(from.thought.kind)}`,
         toName: `"${shownName(to.thought.name)}"${kindMark(to.thought.kind)}`,
       };
-      const others = joined.filter((l) => l !== link);
       const alone = [
-        leftAlone(from, link, others, names) ? names.fromName : null,
-        leftAlone(to, link, others, names) ? names.toName : null,
+        leftAlone(from, names) ? names.fromName : null,
+        leftAlone(to, names) ? names.toName : null,
       ].filter((n): n is string => n !== null);
       const summary = join([
         `Remove the link between ${names.fromName} and ${names.toName}?`,
         bullet([
           `${linkKind(link, names)}${labelOf(link)} — ${link.id}`,
-          ...others.map((l) => `stays: ${linkKind(l, names)}${labelOf(l)} — ${l.id}`),
           ...alone.map((n) => `${n} would be left with no parent, child or jump`),
         ]),
         "This cannot be undone.",
@@ -810,7 +746,6 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
             `the link between ${names.fromName} and ${names.toName}: ` +
               `${linkKind(link, names)}${labelOf(link)} — ${link.id}`,
           ),
-          section("Left", others.length === 0 ? null : leftNote(others, names)),
           alone.length === 0
             ? null
             : section(
@@ -852,93 +787,40 @@ export function registerWriteTools(server: McpServer, ctx: ServerContext): void 
         await ctx.api.links.requireTag(bid, tagId, thoughtId);
       }
       const ends: Ends = { from: thoughtId, to: "", fromName: "the thought", toName: "the tag" };
-      /**
-       * The tag's attachments to the thought: those of the pair's links, by
-       * `linksOfPair`, and those its graph lists, which may be behind.
-       */
-      const attachments = async (
-        tagId: string,
-        lookup: LinkDto | null,
-      ): Promise<{ found: LinkDto[]; listed: LinkDto[] }> => {
-        const links = (await graphOf(ctx, bid, thoughtId)).links;
-        const own = (l: LinkDto): boolean =>
-          isAttachmentOf(l, tagId) && sameThought(l.thoughtIdB, thoughtId);
-        return {
-          found: linksOfPair(thoughtId, tagId, links, lookup).filter(own),
-          listed: links.filter(own),
-        };
-      };
       const steps: Step[] = [
         ...(add ?? []).map((tagId) => ({
           what: `attach ${tagId}`,
-          // In the pair's turn, the look and the attach together: two calls
-          // sent at once each looked before either attached, and both said
-          // "attached" of one attachment (L47). A brain_link call for the
-          // two at that moment could have been posted over.
-          run: () =>
-            ctx.api.links.inTurn(bid, thoughtId, tagId, async () => {
-              // Attached again, a tag is a 200 that changes nothing and logs a
-              // `402` (L35); it was sent every time.
-              const there = await ctx.api.links.between(bid, thoughtId, tagId);
-              if (there !== null && isAttachmentOf(there, tagId)) {
-                return [`tag ${tagId} was on the thought already`];
-              }
-              // Two thoughts share one link, and the attach is posted over the
-              // one there: a jump or a parent link became the tag's attachment
-              // under its identifier, and was gone as what it had been (L23).
-              if (there !== null) {
-                throw new Error(
-                  `the thought and the tag ${tagId} are joined by a link, ${there.id}: ` +
-                    `${linkKind(there, { ...ends, to: tagId })}${labelOf(there)}. Two thoughts ` +
-                    "share one link, and attaching the tag would turn that one into the tag's " +
-                    "attachment: what it is now would be gone. Nothing was sent for this tag. To " +
-                    "tag the thought, remove that link first with brain_unlink.",
-                );
-              }
-              try {
-                await ctx.api.links.attachTag(bid, thoughtId, tagId);
-                return [`attached ${tagId}`];
-              } catch (error) {
-                // A 404 to the lookup is no link, or more than one the same way,
-                // which is what two attaches at once leave (L43): then the post
-                // is refused, and the graph tells which.
-                if (!isJoinedMoreThanOnce(error)) throw error;
-                const twice = (await attachments(tagId, null)).found;
-                if (twice.length === 0) throw error;
-                return [
-                  `tag ${tagId} was on the thought already, attached ${twice.length} times, and ` +
-                    "TheBrain posts nothing between two thoughts joined more than once, so " +
-                    `nothing changed: ${twice.map((l) => `${l.id}${labelOf(l)}`).join(", ")}. ` +
-                    "brain_tag remove takes every attachment off, and add then attaches it once.",
-                ];
-              }
-            }),
+          run: async () => {
+            // Attached again, a tag is a 200 that changes nothing and logs a
+            // `402` (L35); it was sent every time.
+            const there = await ctx.api.links.between(bid, thoughtId, tagId);
+            if (there !== null && isAttachmentOf(there, tagId)) {
+              return [`tag ${tagId} was on the thought already`];
+            }
+            // Two thoughts share one link, and the attach is posted over the
+            // one there: a jump or a parent link became the tag's attachment
+            // under its identifier, and was gone as what it had been (L23).
+            if (there !== null) {
+              throw new Error(
+                `the thought and the tag ${tagId} are joined by a link, ${there.id}: ` +
+                  `${linkKind(there, { ...ends, to: tagId })}${labelOf(there)}. Two thoughts ` +
+                  "share one link, and attaching the tag would turn that one into the tag's " +
+                  "attachment: what it is now would be gone. Nothing was sent for this tag. To " +
+                  "tag the thought, remove that link first with brain_unlink.",
+              );
+            }
+            await ctx.api.links.attachTag(bid, thoughtId, tagId);
+            return [`attached ${tagId}`];
+          },
         })),
         ...(remove ?? []).map((tagId) => ({
           what: `remove ${tagId}`,
           run: async () => {
-            const lookup = await ctx.api.links.between(bid, thoughtId, tagId);
-            if (lookup !== null && isAttachmentOf(lookup, tagId)) {
-              await ctx.api.links.detachTagLink(bid, thoughtId, tagId, lookup);
-              return [`removed ${tagId}`];
-            }
-            // A 404 is no link, and a tag attached twice as well (L43); and
-            // "was not on the thought" is an answer about a thought that is
-            // there, which the graph's read tells too. It used to be given
-            // for a tag the graph listed twice.
-            const { found, listed } = await attachments(tagId, lookup);
-            if (found.length > 0) return removeAttachments(ctx, bid, thoughtId, tagId, found);
-            // One listed and none looked up is one removed a moment ago, or
-            // one of two the graph does not list both of yet (L27, L43).
-            if (listed.length > 0) {
-              throw new Error(
-                `TheBrain's lookup has no attachment of the tag ${tagId} to the thought, and ` +
-                  `the thought's graph lists one, ${listed[0]!.id}: it was removed a moment ago, ` +
-                  "or the tag is attached more than once, which the lookup cannot see and the " +
-                  "graph does not list all of yet. Nothing was removed for this tag. Send it " +
-                  "again in a moment.",
-              );
-            }
+            if (await ctx.api.links.detachTag(bid, thoughtId, tagId)) return [`removed ${tagId}`];
+            // The lookup is the same 404 for a thought nobody has as for no
+            // link, and "was not on the thought" is an answer about a thought
+            // that is there: its read tells.
+            await ctx.api.thoughts.get(bid, thoughtId);
             return [`tag ${tagId} was not on the thought`];
           },
         })),
@@ -1415,91 +1297,6 @@ function labelOf(link: LinkDto): string {
   return link.name === null || link.name === "" ? "" : `, labelled ${JSON.stringify(link.name)}`;
 }
 
-/** A link as a line of a list: its identifier, what it is, its label. */
-function linkLine(link: LinkDto, ends: Ends): string {
-  return `${link.id}: ${linkKind(link, ends)}${labelOf(link)}`;
-}
-
-/**
- * Two thoughts joined by more than one link. A post between them is refused,
- * the lookup cannot see two that go the same way, and only a deletion leaves
- * one (L35, L43): so the links are listed by identifier, for `brain_unlink`.
- */
-function severalLinks(
-  joined: readonly LinkDto[],
-  ends: Ends,
-  tool: "brain_link" | "brain_unlink",
-): string {
-  const list = bullet(joined.map((l) => linkLine(l, ends)));
-  if (tool === "brain_unlink") {
-    return (
-      `fromId and toId are joined by ${joined.length} links. Nothing was removed: send the ` +
-      `call again with the linkId of the one to remove.\n${list}`
-    );
-  }
-  return (
-    `fromId and toId are joined by ${joined.length} links, and TheBrain posts nothing ` +
-    "between two thoughts joined by more than one, so none of them can be changed. Nothing " +
-    `was written.\n${list}\nRemove all but one with brain_unlink, naming each by its ` +
-    "linkId; brain_link then finds the one left, and replace changes it."
-  );
-}
-
-/**
- * What `brain_link` answers when the create of a new link threw; the error
- * itself, thrown again, when there is no more to say than it says.
- *
- * A create that got no answer may have linked the two, and the call sent
- * again looks first: it adds nothing where a link joins them. An answer of
- * zeros, for two thoughts the call has checked, is the API's to a post sent
- * next to another for the same pair, which made the link (L47). This
- * process sends one at a time; another, or TheBrain itself, does not wait.
- * So the pair is looked up, and the link that joins them is named.
- */
-async function notLinked(
-  ctx: ServerContext,
-  bid: string,
-  ends: Ends,
-  error: unknown,
-): Promise<string> {
-  if (mayHaveLanded(error)) {
-    return join([
-      describeError(error),
-      section(
-        "Next",
-        `${landedWhy(error, "the create")}, so TheBrain may have linked the two all the same. ` +
-          "Sent again as it is, this call looks the two up first: it adds nothing where a " +
-          "link joins them, and says what that link is.",
-      ),
-    ]);
-  }
-  if (!(error instanceof TheBrainError) || error.kind !== "zero_id") throw error;
-  let there: LinkDto | null;
-  try {
-    there = await ctx.api.links.between(bid, ends.from, ends.to);
-  } catch (lookup) {
-    // Not taken for "nothing joins them": said, beside the answer itself.
-    return join([
-      describeError(error),
-      section("Not read", `what joins the two now: ${describeError(lookup, false)}`),
-    ]);
-  }
-  if (there === null) throw error;
-  return join([
-    describeError(error),
-    section(
-      "Joined",
-      `the two are linked all the same, by ${linkLine(there, ends)}. Another write to them ` +
-        "went at the same moment, from another session or from TheBrain itself.",
-    ),
-    section(
-      "Next",
-      "Sent again as it is, this call finds that link and says whether it is the one asked " +
-        "for.",
-    ),
-  ]);
-}
-
 /** `brain_link` with replace, over a tag's attachment or a type's link. */
 function notReplaced(link: LinkDto, ends: Ends): string {
   const way = isTagLink(link)
@@ -1514,87 +1311,13 @@ function notReplaced(link: LinkDto, ends: Ends): string {
   );
 }
 
-/**
- * A thought's graph, where a thought nobody has is the 404 of its own read:
- * its graph is the catch-all 403, which names no cause (L3).
- */
-async function graphOf(ctx: ServerContext, brainId: string, thoughtId: string): Promise<CleanGraph> {
-  try {
-    return await ctx.api.thoughts.getGraph(brainId, thoughtId);
-  } catch (error) {
-    if (error instanceof TheBrainError && error.kind === "forbidden") {
-      await ctx.api.thoughts.get(brainId, thoughtId);
-    }
-    throw error;
-  }
-}
-
-/**
- * Takes a tag off a thought by each of its attachments `found` lists, and by
- * nothing else: a tag attached more than once, which the lookup has none of
- * (L43), or attached beside another link of the pair, which stays.
- *
- * Every one, and not one of them: the call asks for the tag to go, the
- * attachments are one tag to TheBrain, which shows it once, and with one
- * left the tag is still on the thought. Nothing a removal loses is beyond
- * `brain_tag` add, which attaches the tag once, so no consent is asked, as
- * for a tag attached once.
- */
-async function removeAttachments(
-  ctx: ServerContext,
-  brainId: string,
-  thoughtId: string,
-  tagId: string,
-  found: readonly LinkDto[],
-): Promise<string[]> {
-  const list = (links: readonly LinkDto[]): string =>
-    links.map((l) => `${l.id}${labelOf(l)}`).join(", ");
-  const removed: LinkDto[] = [];
-  const gone: LinkDto[] = [];
-  for (const link of found) {
-    try {
-      await ctx.api.links.detachTagLink(brainId, thoughtId, tagId, link);
-      removed.push(link);
-    } catch (error) {
-      // The answer for a link that is gone (L43): the graph is behind a
-      // deletion for up to 0.2 s, and listed one removed a moment ago.
-      if (error instanceof TheBrainError && error.kind === "bad_request" && error.status === 400) {
-        gone.push(link);
-        continue;
-      }
-      if (removed.length === 0) throw error;
-      throw new Error(
-        `${removed.length} of the ${found.length} attachments of the tag ${tagId} were ` +
-          `removed, ${list(removed)}, and then ${link.id} was not: ` +
-          `${describeError(error, false)}${unanswered(error)}`,
-      );
-    }
-  }
-  if (removed.length === 0) {
-    return [`tag ${tagId} was not on the thought: ${list(gone)}, which its graph listed, was gone`];
-  }
-  if (found.length === 1) return [`removed ${tagId}`];
-  return [
-    `removed ${tagId}: it was attached ${found.length} times, and each attachment is gone, ` +
-      `${list(removed)}` +
-      (gone.length > 0 ? ` (${list(gone)} was gone already)` : ""),
-  ];
-}
-
 /** `brain_unlink` named a link that is not an ordinary one. */
-function notRemoved(link: LinkDto, joined: readonly LinkDto[], ends: Ends): string {
+function notRemoved(link: LinkDto, ends: Ends): string {
   const what = linkKind(link, ends);
   if (isTagLink(link)) {
-    // Two attachments of one tag: the lookup `detachTag()` goes by has
-    // neither, as for any pair joined twice (L43).
-    const twice = joined.filter((l) => isTagLink(l) && sameThought(l.thoughtIdA, link.thoughtIdA));
     return (
       `${what}: a tag's attachment, which brain_unlink does not remove. Nothing was removed. ` +
-      "Take the tag off with brain_tag." +
-      (twice.length > 1
-        ? ` The tag is attached ${twice.length} times, and brain_tag remove takes every ` +
-          "attachment off; add then attaches it once."
-        : "")
+      "Take the tag off with brain_tag."
     );
   }
   if (isTypeLink(link)) {
@@ -1607,27 +1330,16 @@ function notRemoved(link: LinkDto, joined: readonly LinkDto[], ends: Ends): stri
 }
 
 /**
- * Whether an ordinary thought is left with no parent, child or jump once
- * `link` is gone, of the pair `ends` names. A type or a tag has none as a
- * rule. The graph is a copy: of the pair's links it can list one removed a
- * moment ago (L43), so those count only as `others`, what joins the pair
- * besides `link`. A link made a moment ago may not be counted at all: it
- * errs towards the warning.
+ * Whether an ordinary thought is left with no parent, child or jump once the
+ * link between the pair `ends` names is gone. A type or a tag has none as a
+ * rule. The graph is a copy, which can list the pair's link removed a moment
+ * ago, so no link of the pair is counted. A link made a moment ago may not be
+ * counted at all: it errs towards the warning.
  */
-function leftAlone(
-  graph: CleanGraph,
-  link: LinkDto,
-  others: readonly LinkDto[],
-  ends: Ends,
-): boolean {
+function leftAlone(graph: CleanGraph, ends: Ends): boolean {
   const { kind } = graph.thought;
   if (kind === ThoughtKind.Type || kind === ThoughtKind.Tag) return false;
-  return !graph.links.some(
-    (l) =>
-      isStructuralLink(l) &&
-      !sameThought(l.id, link.id) &&
-      (!ofPair(l, ends) || others.some((o) => sameThought(o.id, l.id))),
-  );
+  return !graph.links.some((l) => isStructuralLink(l) && !ofPair(l, ends));
 }
 
 /** Whether a link joins the two thoughts `ends` names, either way. */
@@ -1635,16 +1347,6 @@ function ofPair(link: LinkDto, ends: Ends): boolean {
   const end = (id: string): boolean => sameThought(id, ends.from) || sameThought(id, ends.to);
   return end(link.thoughtIdA) && end(link.thoughtIdB);
 }
-
-/** What still joins two thoughts after one of their links is removed. */
-function leftNote(others: readonly LinkDto[], ends: Ends): string {
-  const list = bullet(others.map((l) => linkLine(l, ends)));
-  return others.length === 1
-    ? `${list}\nIt is the one link the two have now: brain_link finds it, and with replace ` +
-        "changes it."
-    : `${list}\nStill more than one: TheBrain posts nothing between the two while it is so.`;
-}
-
 
 /**
  * Failures that are about the call and not about the request that met them:

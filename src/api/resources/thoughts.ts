@@ -205,8 +205,6 @@ export const ALIASES_UNSUPPORTED =
 export class ThoughtsResource {
   /** Only a yes is remembered: an update can add aliases while we run. */
   #aliasesSeen = false;
-  /** The last `createTypeOrTag` of each brain, settled or not: the next one waits for it. */
-  #typesAndTags = new Map<string, Promise<void>>();
   /** By field, brain and thought: see `#pastUnread`. */
   #unread = new Map<string, Unread>();
 
@@ -461,11 +459,6 @@ export class ThoughtsResource {
    * of the create and the thought's own entries after it. A list would not
    * do: `/types` and `/tags` are a copy, behind a create by up to 0.42 s.
    *
-   * **One at a time in a brain.** Two creates of one new tag name sent at
-   * once were two tags 5 times of 10, where one sent straight after the
-   * other's answer was the same tag 25 times of 25. And a create that
-   * overtook another's read of the log would pass for what that call made.
-   *
    * **Nothing beside the name is sent.** A label or aliases sent with the
    * name of a tag that is there are written onto that tag. A source or a
    * `typeId` makes a link whose meaning goes by the kinds at its two ends, a
@@ -490,20 +483,6 @@ export class ThoughtsResource {
           "an ordinary thought is made by create()",
       );
     }
-    const before = this.#typesAndTags.get(brainId) ?? Promise.resolve();
-    const mine = before.then(() => this.#typeOrTag(brainId, input));
-    // What the next one waits for is that this one is over, not how it ended.
-    this.#typesAndTags.set(
-      brainId,
-      mine.then(
-        () => undefined,
-        () => undefined,
-      ),
-    );
-    return mine;
-  }
-
-  async #typeOrTag(brainId: string, input: CreateTypeOrTagInput): Promise<TypeOrTagOutcome> {
     const [newest] = await this.client.get<ModificationLogDto[]>(
       `/api/brains/${brainId}/modifications`,
       { query: { maxLogs: 1 } },

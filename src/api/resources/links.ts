@@ -1,5 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks";
-
 import { assertUuid, createdId, type JsonPatchOp, type TheBrainClient } from "../client.js";
 import { TheBrainError } from "../errors.js";
 import {
@@ -45,50 +43,8 @@ export interface UpdateLinkInput {
   direction?: number | undefined;
 }
 
-/** The pairs whose turn (`inTurn`) the code running now holds. */
-const held = new AsyncLocalStorage<ReadonlySet<string>>();
-
 export class LinksResource {
-  /**
-   * The work under way for each pair of thoughts, by `pairKey`: the last to
-   * have come, which the next waits for.
-   */
-  readonly #underWay = new Map<string, Promise<unknown>>();
-
   constructor(private readonly client: TheBrainClient) {}
-
-  /**
-   * Runs `work` once no other work of this process on the same two thoughts
-   * is under way, ends in either order, and holds the next off until it is
-   * done. `create` and `attachTag` take the turn themselves; a caller that
-   * looks the pair up and then writes takes it around both, and the writes
-   * inside take no second turn.
-   *
-   * Two posts sent at once for a pair with no link were two links 51 times
-   * in 60 (L35), and sent one after the other they are one, the second
-   * written over the first. Two `brain_link` calls sent at once each looked
-   * before either posted: two links 12 times in 21, and of the other 9, 7
-   * answered one call with zeros (L47). So the look goes into the turn with
-   * the write, and the second call sees the link the first made.
-   *
-   * Never take a second pair's turn inside one: two calls that did so in
-   * opposite orders would each wait for the other. Not guarded: another
-   * process, or TheBrain itself, writing to the pair at the same moment.
-   */
-  async inTurn<T>(brainId: string, a: string, b: string, work: () => Promise<T>): Promise<T> {
-    const slot = pairKey(brainId, a, b);
-    const mine = held.getStore();
-    if (mine?.has(slot)) return work();
-    const turn = (this.#underWay.get(slot) ?? Promise.resolve())
-      .catch(() => undefined)
-      .then(() => held.run(new Set([...(mine ?? []), slot]), work));
-    this.#underWay.set(slot, turn);
-    try {
-      return await turn;
-    } finally {
-      if (this.#underWay.get(slot) === turn) this.#underWay.delete(slot);
-    }
-  }
 
   async get(brainId: string, linkId: string): Promise<LinkDto> {
     assertUuid(brainId, "brainId");
@@ -127,9 +83,8 @@ export class LinksResource {
    * that is a 200 with an identifier of zeros and no link. Any other answer
    * of zeros is `zero_id`, from `#post`.
    *
-   * One post for a pair at a time in this process (`inTurn`). Posted over
-   * the link a pair has, a link rewrites it to the relation asked for (L43):
-   * look first, in the same turn.
+   * Posted over the link a pair has, a link rewrites it to the relation
+   * asked for (L43): look first.
    */
   async create(brainId: string, input: CreateLinkInput): Promise<string> {
     // Here as well as in `#post`: a malformed end sends nothing, a read included.
@@ -143,22 +98,20 @@ export class LinksResource {
         `a thought cannot be linked to itself: both ends of the link are ${input.thoughtIdA}`,
       );
     }
-    return this.inTurn(brainId, input.thoughtIdA, input.thoughtIdB, async () => {
-      const relation = input.relation ?? Relation.Child;
-      if (relation === Relation.Child) {
-        await this.requireParent(brainId, input.thoughtIdA, "thoughtIdA");
-      }
-      if (relation === Relation.Parent) {
-        await this.requireParent(brainId, input.thoughtIdB, "thoughtIdB");
-      }
-      const id = await this.#post(brainId, input);
-      // Each end's graph lists the other from now on, where the relation puts
-      // it, and a copy of either graph from before this answer does not: kept
-      // for a reader that looks there next. Not for a tag's attachment, which
-      // does not come through here.
-      this.client.written.linked(brainId, input.thoughtIdA, input.thoughtIdB, relation);
-      return id;
-    });
+    const relation = input.relation ?? Relation.Child;
+    if (relation === Relation.Child) {
+      await this.requireParent(brainId, input.thoughtIdA, "thoughtIdA");
+    }
+    if (relation === Relation.Parent) {
+      await this.requireParent(brainId, input.thoughtIdB, "thoughtIdB");
+    }
+    const id = await this.#post(brainId, input);
+    // Each end's graph lists the other from now on, where the relation puts
+    // it, and a copy of either graph from before this answer does not: kept
+    // for a reader that looks there next. Not for a tag's attachment, which
+    // does not come through here.
+    this.client.written.linked(brainId, input.thoughtIdA, input.thoughtIdB, relation);
+    return id;
   }
 
   /**
@@ -183,9 +136,8 @@ export class LinksResource {
       created,
       path,
       `no link was made between ${input.thoughtIdA} and ${input.thoughtIdB}: TheBrain answered ` +
-        "200 with an identifier of zeros, which is its answer for a pair it does not link, " +
-        "and for a post sent next to another between the same two thoughts. Nothing was " +
-        "written",
+        "200 with an identifier of zeros, which is its answer for a pair it does not link. " +
+        "Nothing was written",
     );
   }
 
@@ -273,11 +225,9 @@ export class LinksResource {
    * The tag is read first (`requireTag`), and nothing is sent unless it is
    * one: the server infers the same way from any other kind.
    *
-   * Returns the identifier of the created link.
-   *
-   * In the pair's turn (`inTurn`), as `create` is: two attachments of one
-   * tag sent at once were two 6 times in 24 (L46), and one after the
-   * other the second is the first's identifier and a `402` (L47).
+   * Returns the identifier of the created link. Attached again, a tag is
+   * the attachment's identifier and a `402` in the log (L35): look first
+   * (`hasTag`).
    */
   async attachTag(
     brainId: string,
@@ -286,13 +236,11 @@ export class LinksResource {
   ): Promise<string> {
     await this.requireTag(brainId, tagThoughtId, thoughtId);
     // Not through `create`: what it would read again is known to be a tag.
-    return this.inTurn(brainId, thoughtId, tagThoughtId, () =>
-      this.#post(brainId, {
-        thoughtIdA: thoughtId,
-        thoughtIdB: tagThoughtId,
-        relation: Relation.Parent,
-      }),
-    );
+    return this.#post(brainId, {
+      thoughtIdA: thoughtId,
+      thoughtIdB: tagThoughtId,
+      relation: Relation.Parent,
+    });
   }
 
   /**
@@ -368,36 +316,8 @@ export class LinksResource {
   ): Promise<boolean> {
     const link = await this.between(brainId, thoughtId, tagThoughtId);
     if (link === null || !isAttachmentOf(link, tagThoughtId)) return false;
-    await this.detachTagLink(brainId, thoughtId, tagThoughtId, link);
-    return true;
-  }
-
-  /**
-   * Deletes one attachment of a tag to a thought: `link`, as the lookup or
-   * the thought's graph gave it. Any other link is refused with nothing sent:
-   * one that is not the tag's, with the tag at its head, or that joins other
-   * thoughts.
-   *
-   * A tag attached twice is two such links, which the lookup `detachTag`
-   * goes by has neither of (L43): a caller takes them from the thought's
-   * graph, through `linksOfPair`, and deletes each here.
-   */
-  async detachTagLink(
-    brainId: string,
-    thoughtId: string,
-    tagThoughtId: string,
-    link: LinkDto,
-  ): Promise<void> {
-    assertUuid(brainId, "brainId");
-    assertUuid(link.id, "linkId");
-    if (!isAttachmentOf(link, tagThoughtId) || !sameId(link.thoughtIdB, thoughtId)) {
-      throw new TheBrainError(
-        "bad_request",
-        `link ${link.id} is not an attachment of the tag ${tagThoughtId} to ${thoughtId}, ` +
-          "and was not removed",
-      );
-    }
     await this.#remove(brainId, link.id);
+    return true;
   }
 
   /**
@@ -441,21 +361,6 @@ export function isAttachmentOf(link: LinkDto, tagThoughtId: string): boolean {
 }
 
 /**
- * The 400 a post between two thoughts is answered with when they are joined
- * by more than one link already, whatever it asks for and from either end:
- * `"Link could not be created."`, which names nothing (L43). A tag attached
- * twice is such a pair, and attached again it is this answer, with nothing
- * made.
- */
-export function isJoinedMoreThanOnce(error: unknown): boolean {
-  return (
-    error instanceof TheBrainError &&
-    error.kind === "bad_request" &&
-    /^link could not be created\.?$/i.test(error.message.trim())
-  );
-}
-
-/**
  * A type attachment: a type on a thought, or on another type. `thoughtIdA`
  * is the type. Arrives in the graph alongside parent links.
  */
@@ -470,53 +375,6 @@ export function isStructuralLink(link: LinkDto): boolean {
 
 function sameId(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
-}
-
-/** A pair of thoughts in a brain, whichever end is named first and case aside. */
-function pairKey(brainId: string, a: string, b: string): string {
-  return [brainId.toLowerCase(), ...[a.toLowerCase(), b.toLowerCase()].sort()].join(" ");
-}
-
-/**
- * Every link between two thoughts, from the `links` their graphs list and
- * what the lookup of the pair answered: `lookup` from `between(a, b)` and
- * `back` from `between(b, a)`, when it was asked, each null for a 404.
- * `listed` may be one graph's links or both ends', and may hold links of
- * other pairs.
- *
- * Two thoughts share one link as a rule, and the lookup returns it from
- * either end. Two links posted at once for a pair are often two (L35), and
- * then the lookup is a 404 from either end when both have one `thoughtIdA`,
- * and from each end the link it names first when they have not (L43). A
- * graph lists every link of its thought, those among them, but it is a
- * copy, behind a write by a time nothing bounds (L27): straight after one of
- * two is deleted it lists both, where the lookup is not behind. So the one
- * link both lookups give is the pair's only link, whatever a graph lists
- * beside it. Otherwise a link a lookup gives is in, listed or not, and so
- * is a listed one; and with none from a lookup, only two or more listed
- * are, the pair the lookup cannot see. One listed link and a 404 is left
- * out: a graph behind a deletion, as a rule, or behind the creation of a
- * second link, which only a later read tells apart.
- *
- * The lookups' copies come first: they are the ones that are not behind.
- */
-export function linksOfPair(
-  a: string,
-  b: string,
-  listed: readonly LinkDto[],
-  lookup: LinkDto | null,
-  back: LinkDto | null = null,
-): LinkDto[] {
-  if (lookup !== null && back !== null && sameId(lookup.id, back.id)) return [lookup];
-  const joins = (l: LinkDto): boolean =>
-    (sameId(l.thoughtIdA, a) && sameId(l.thoughtIdB, b)) ||
-    (sameId(l.thoughtIdA, b) && sameId(l.thoughtIdB, a));
-  const found: LinkDto[] = [];
-  const looked = [lookup, back].filter((l): l is LinkDto => l !== null);
-  for (const link of [...looked, ...listed.filter(joins)]) {
-    if (!found.some((f) => sameId(f.id, link.id))) found.push(link);
-  }
-  return looked.length === 0 && found.length < 2 ? [] : found;
 }
 
 export { ThoughtKind };

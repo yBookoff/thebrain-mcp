@@ -108,7 +108,7 @@ exactly as Settings shows it (`http://localhost:11522/api/`) is fine.
 | `brain_update_thought` | Name, label, type, colours; add and remove aliases |
 | `brain_set_note` / `brain_append_note` | Replace or extend a note |
 | `brain_link` | Connect two thoughts, with a label; with `replace`, make the link that joins them another kind |
-| `brain_unlink` | Remove a link, with human confirmation; mends two thoughts joined twice |
+| `brain_unlink` | Remove a link, with human confirmation |
 | `brain_tag` | Attach and detach tags |
 | `brain_create_type_or_tag` | A new type or tag; a tag of a name the brain has is given back, not made twice |
 | `brain_attach_url` | Attach a link, without duplicates |
